@@ -2,9 +2,12 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   Check,
   ChevronRight,
+  Columns2,
   Command,
   Eye,
+  ExternalLink,
   FileCode2,
+  FileText,
   Github,
   GitPullRequest,
   Keyboard,
@@ -16,6 +19,7 @@ import {
   PanelLeftOpen,
   Plus,
   RefreshCw,
+  Rows3,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -27,6 +31,14 @@ import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Kbd } from "./components/ui/kbd";
 import { type AuthClient, type AuthSession, type OAuthStartResponse, tauriAuthClient } from "./lib/auth";
+import {
+  buildLazyDiffState,
+  getDefaultLoadedDiffHunkIds,
+  readDiffModePreference,
+  writeDiffModePreference,
+  type DiffLine,
+  type DiffMode,
+} from "./lib/diff-viewer";
 import {
   buildIncrementalFetchPlan,
   cacheStats,
@@ -256,6 +268,26 @@ function getFileLineLabel(file: CachedFileSummary) {
   return `${additions} ${deletions}`;
 }
 
+function getDiffLineClass(kind: DiffLine["kind"]) {
+  if (kind === "addition") {
+    return "bg-emerald-500/10 text-emerald-800 dark:text-emerald-200";
+  }
+  if (kind === "deletion") {
+    return "bg-rose-500/10 text-rose-800 dark:text-rose-200";
+  }
+  return "bg-background text-foreground";
+}
+
+function getDiffPrefix(kind: DiffLine["kind"]) {
+  if (kind === "addition") {
+    return "+";
+  }
+  if (kind === "deletion") {
+    return "-";
+  }
+  return " ";
+}
+
 function getThreadTitle(body: string) {
   const firstLine = body.split("\n")[0]?.trim() ?? "";
   const firstSentence = firstLine.split(".")[0]?.trim() ?? "";
@@ -405,6 +437,11 @@ export function App({
   const [reviewQueueRevision, setReviewQueueRevision] = useState(0);
   const [fileChangeFilters, setFileChangeFilters] = useState<FileChangeFilters>(defaultFileChangeFilters);
   const [fileChangeRevision, setFileChangeRevision] = useState(0);
+  const [selectedFileChangeId, setSelectedFileChangeId] = useState<string | null>(null);
+  const [diffMode, setDiffMode] = useState<DiffMode>(readDiffModePreference);
+  const [loadedDiffHunks, setLoadedDiffHunks] = useState<Record<string, string[]>>({});
+  const [expandedDiffHunks, setExpandedDiffHunks] = useState<Record<string, string[]>>({});
+  const [fullFileDiffs, setFullFileDiffs] = useState<Record<string, boolean>>({});
   const [threadStateOverrides, setThreadStateOverrides] = useState<Record<string, CachedReviewThread["state"]>>({});
   const [replyDraft, setReplyDraft] = useState("");
   const [threadActionBusy, setThreadActionBusy] = useState<ThreadWriteAction | null>(null);
@@ -547,10 +584,29 @@ export function App({
   const activeThreadTitle = activeThread ? getThreadTitle(activeThread.body) : selectedThread.title;
   const activeThreadBody = activeThread?.body ?? selectedThread.body;
   const threadResolveAction: ThreadWriteAction = activeThreadState === "resolved" ? "unresolve" : "resolve";
+  const selectedFileChange =
+    fileChangeViews.find((view) => view.id === selectedFileChangeId) ??
+    fileChangeViews.find((view) => view.file.path === activeThreadFile) ??
+    fileChangeViews[0] ??
+    null;
+  const selectedFileDiffState = selectedFileChange
+    ? buildLazyDiffState(selectedFileChange.file, {
+        mode: diffMode,
+        repository: selectedPullRequest.repository,
+        pullRequestNumber: selectedPullRequest.number,
+        loadedHunkIds: loadedDiffHunks[selectedFileChange.id],
+        expandedHunkIds: expandedDiffHunks[selectedFileChange.id],
+        fullFileLoaded: fullFileDiffs[selectedFileChange.id],
+      })
+    : null;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
+
+  useEffect(() => {
+    writeDiffModePreference(diffMode);
+  }, [diffMode]);
 
   useEffect(() => {
     let active = true;
@@ -931,6 +987,27 @@ export function App({
     syncFileChanges(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.fileSummaries);
     setFileChangeViewed(currentUserKey, fileChangeId, viewed);
     setFileChangeRevision((current) => current + 1);
+  };
+
+  const loadDiffHunk = (fileChangeId: string, file: CachedFileSummary, hunkId: string) => {
+    setLoadedDiffHunks((current) => ({
+      ...current,
+      [fileChangeId]: Array.from(new Set([...(current[fileChangeId] ?? getDefaultLoadedDiffHunkIds(file)), hunkId])),
+    }));
+  };
+
+  const expandDiffHunk = (fileChangeId: string, hunkId: string) => {
+    setExpandedDiffHunks((current) => ({
+      ...current,
+      [fileChangeId]: Array.from(new Set([...(current[fileChangeId] ?? []), hunkId])),
+    }));
+  };
+
+  const fetchWholeFile = (fileChangeId: string) => {
+    setFullFileDiffs((current) => ({
+      ...current,
+      [fileChangeId]: true,
+    }));
   };
 
   const handleSetSelectedThreadReviewed = (reviewed: boolean) => {
@@ -1504,15 +1581,25 @@ export function App({
                           </div>
                         </div>
                       </div>
-                      <Button
-                        aria-label={`Mark ${view.file.path} ${view.viewed ? "unviewed" : "viewed"}`}
-                        className="mt-2 w-full"
-                        onClick={() => handleSetFileChangeViewed(view.id, !view.viewed)}
-                        size="sm"
-                        variant="outline"
-                      >
-                        {view.viewed ? "Mark unviewed" : "Mark viewed"}
-                      </Button>
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <Button
+                          aria-label={`View diff for ${view.file.path}`}
+                          onClick={() => setSelectedFileChangeId(view.id)}
+                          size="sm"
+                          variant={selectedFileChange?.id === view.id ? "secondary" : "outline"}
+                        >
+                          <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                          View diff
+                        </Button>
+                        <Button
+                          aria-label={`Mark ${view.file.path} ${view.viewed ? "unviewed" : "viewed"}`}
+                          onClick={() => handleSetFileChangeViewed(view.id, !view.viewed)}
+                          size="sm"
+                          variant="outline"
+                        >
+                          {view.viewed ? "Mark unviewed" : "Mark viewed"}
+                        </Button>
+                      </div>
                     </div>
                   ))
                 )}
@@ -1592,27 +1679,134 @@ export function App({
             </div>
 
             <div className="overflow-auto p-4">
-              <div className="overflow-hidden rounded-md border border-border font-mono text-xs">
-                <div className="grid grid-cols-[56px_1fr] border-b border-border bg-muted text-muted-foreground">
-                  <div className="border-r border-border px-2 py-1 text-right">138</div>
-                  <div className="px-3 py-1">export async function rotateSessionToken(userId: string) {"{"}</div>
+              <div className="rounded-md border border-border" aria-label="Diff viewer">
+                <div className="flex items-center justify-between gap-3 border-b border-border bg-muted/50 px-3 py-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold">{selectedFileDiffState?.filePath ?? activeThreadFile}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {selectedFileDiffState?.language ?? "text"} · {selectedFileDiffState?.kind ?? "text"}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button
+                      aria-pressed={diffMode === "unified"}
+                      onClick={() => setDiffMode("unified")}
+                      size="sm"
+                      variant={diffMode === "unified" ? "secondary" : "outline"}
+                    >
+                      <Rows3 className="h-3.5 w-3.5" aria-hidden="true" />
+                      Unified
+                    </Button>
+                    <Button
+                      aria-pressed={diffMode === "side-by-side"}
+                      onClick={() => setDiffMode("side-by-side")}
+                      size="sm"
+                      variant={diffMode === "side-by-side" ? "secondary" : "outline"}
+                    >
+                      <Columns2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      Side-by-side
+                    </Button>
+                  </div>
                 </div>
-                <div className="grid grid-cols-[56px_1fr] border-b border-border bg-rose-500/10">
-                  <div className="border-r border-border px-2 py-1 text-right text-muted-foreground">139</div>
-                  <div className="px-3 py-1 text-rose-700 dark:text-rose-300">- const cached = sessionCache.get(userId);</div>
-                </div>
-                <div className="grid grid-cols-[56px_1fr] border-b border-border bg-emerald-500/10">
-                  <div className="border-r border-border px-2 py-1 text-right text-muted-foreground">140</div>
-                  <div className="px-3 py-1 text-emerald-700 dark:text-emerald-300">+ sessionCache.delete(userId);</div>
-                </div>
-                <div className="grid grid-cols-[56px_1fr] border-b border-border bg-emerald-500/10">
-                  <div className="border-r border-border px-2 py-1 text-right text-muted-foreground">141</div>
-                  <div className="px-3 py-1 text-emerald-700 dark:text-emerald-300">+ const cached = await sessionStore.read(userId);</div>
-                </div>
-                <div className="grid grid-cols-[56px_1fr] bg-muted text-muted-foreground">
-                  <div className="border-r border-border px-2 py-1 text-right">142</div>
-                  <div className="px-3 py-1">return issueRotatedToken(cached, userId);</div>
-                </div>
+
+                {!selectedFileChange || !selectedFileDiffState ? (
+                  <p className="p-3 text-sm text-muted-foreground">No File Change selected.</p>
+                ) : selectedFileDiffState.kind !== "text" ? (
+                  <div className="space-y-3 p-4">
+                    <Badge variant="warning">{getFileKindLabel(selectedFileDiffState.kind)} fallback</Badge>
+                    <p className="text-sm text-muted-foreground">
+                      Narview lists this File Change, but rich diff preview is unavailable for this file type.
+                    </p>
+                    <a
+                      className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent"
+                      href={selectedFileDiffState.githubUrl}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                      Open in GitHub
+                    </a>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-border">
+                    {selectedFileDiffState.hunks.map((hunk) => (
+                      <div key={hunk.id}>
+                        <div className="flex items-center justify-between gap-2 bg-muted/30 px-3 py-2">
+                          <p className="min-w-0 truncate font-mono text-xs text-muted-foreground">{hunk.header}</p>
+                          {!hunk.loaded ? (
+                            <Button size="sm" variant="outline" onClick={() => loadDiffHunk(selectedFileChange.id, selectedFileChange.file, hunk.id)}>
+                              Load hunk
+                            </Button>
+                          ) : !hunk.expanded ? (
+                            <Button size="sm" variant="outline" onClick={() => expandDiffHunk(selectedFileChange.id, hunk.id)}>
+                              Expand context
+                            </Button>
+                          ) : (
+                            <Badge variant="muted">Context expanded</Badge>
+                          )}
+                        </div>
+                        {hunk.loaded ? (
+                          diffMode === "unified" ? (
+                            <div className="font-mono text-xs">
+                              {hunk.lines.map((line, lineIndex) => (
+                                <div
+                                  className={cn("grid grid-cols-[56px_56px_1fr] border-t border-border first:border-t-0", getDiffLineClass(line.kind))}
+                                  key={`${hunk.id}-${lineIndex}`}
+                                >
+                                  <div className="border-r border-border px-2 py-1 text-right text-muted-foreground">{line.oldLine ?? ""}</div>
+                                  <div className="border-r border-border px-2 py-1 text-right text-muted-foreground">{line.newLine ?? ""}</div>
+                                  <div className="min-w-0 px-3 py-1">
+                                    <span className="mr-2 text-muted-foreground">{getDiffPrefix(line.kind)}</span>
+                                    <span>{line.content || " "}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="grid grid-cols-2 font-mono text-xs">
+                              {hunk.lines.map((line, lineIndex) => (
+                                <div className="contents" key={`${hunk.id}-${lineIndex}`}>
+                                  <div className={cn("min-w-0 border-t border-r border-border px-3 py-1", line.kind === "addition" ? "bg-muted/30 text-muted-foreground" : getDiffLineClass(line.kind))}>
+                                    <span className="mr-2 text-muted-foreground">{line.oldLine ?? ""}</span>
+                                    {line.kind !== "addition" ? line.content || " " : " "}
+                                  </div>
+                                  <div className={cn("min-w-0 border-t border-border px-3 py-1", line.kind === "deletion" ? "bg-muted/30 text-muted-foreground" : getDiffLineClass(line.kind))}>
+                                    <span className="mr-2 text-muted-foreground">{line.newLine ?? ""}</span>
+                                    {line.kind !== "deletion" ? line.content || " " : " "}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )
+                        ) : (
+                          <p className="p-3 text-sm text-muted-foreground">Hunk not loaded yet.</p>
+                        )}
+                      </div>
+                    ))}
+
+                    <div className="p-3">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => fetchWholeFile(selectedFileChange.id)}
+                        disabled={Boolean(selectedFileDiffState.fullFileLines)}
+                      >
+                        <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                        View whole file
+                      </Button>
+                      {selectedFileDiffState.fullFileLines && (
+                        <div className="mt-3 rounded-md border border-border" aria-label="Full file view">
+                          {selectedFileDiffState.fullFileLines.map((line, lineIndex) => (
+                            <div className="grid grid-cols-[56px_1fr] border-b border-border last:border-b-0 font-mono text-xs" key={`full-${lineIndex}`}>
+                              <div className="border-r border-border px-2 py-1 text-right text-muted-foreground">{line.newLine ?? line.oldLine ?? ""}</div>
+                              <div className={cn("min-w-0 px-3 py-1", getDiffLineClass(line.kind))}>{line.content || " "}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">

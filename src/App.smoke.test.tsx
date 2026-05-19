@@ -3,6 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import type { AuthClient, AuthSession } from "./lib/auth";
 import {
+  buildLazyDiffState,
+  diffViewerStorageKey,
+  getDefaultLoadedDiffHunkIds,
+  getLanguageForPath,
+  highlightDiffLines,
+  type DiffLine,
+} from "./lib/diff-viewer";
+import {
   buildFileChangeViews,
   fileChangeStorageKey,
   filterFileChanges,
@@ -809,6 +817,89 @@ describe("App shell", () => {
     await user.selectOptions(within(fileList).getByLabelText("File viewed"), "viewed");
     expect(within(fileList).getByText("src/auth/session.ts")).toBeInTheDocument();
     expect(within(fileList).queryByText("src/review/queue.ts")).not.toBeInTheDocument();
+  });
+
+  it("persists the diff mode preference across app mounts", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /side-by-side/i }));
+
+    expect(window.localStorage.getItem(diffViewerStorageKey)).toContain("side-by-side");
+
+    unmount();
+    render(<App />);
+
+    expect(screen.getByRole("button", { name: /side-by-side/i })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("models lazy hunk loading before the whole diff is available", () => {
+    const [file] = createFileSummaries();
+    const state = buildLazyDiffState(file, {
+      mode: "unified",
+      repository: "Resplendent-Data/Narview",
+      pullRequestNumber: 12,
+      loadedHunkIds: getDefaultLoadedDiffHunkIds(file),
+    });
+
+    expect(state.hunks[0].loaded).toBe(true);
+    expect(state.hunks[1].loaded).toBe(false);
+  });
+
+  it("bounds syntax highlighting to visible and near-visible diff lines across languages", () => {
+    const lines: DiffLine[] = Array.from({ length: 12 }, (_, index) => ({
+      oldLine: index + 1,
+      newLine: index + 1,
+      kind: "context",
+      content: `line ${index + 1}`,
+      highlighted: false,
+      language: "text",
+    }));
+
+    const highlighted = highlightDiffLines(lines, "src/App.tsx", { visibleStart: 4, visibleEnd: 5, overscan: 1 });
+
+    expect(highlighted[2].highlighted).toBe(false);
+    expect(highlighted[3].highlighted).toBe(true);
+    expect(highlighted[6].highlighted).toBe(true);
+    expect(highlighted[7].highlighted).toBe(false);
+    expect(highlighted[4].language).toBe("typescript");
+    expect(getLanguageForPath("tools/analyze.py")).toBe("python");
+    expect(getLanguageForPath("src-tauri/src/lib.rs")).toBe("rust");
+    expect(getLanguageForPath("lib/main.dart")).toBe("dart");
+  });
+
+  it("loads hunks, expands context, and fetches the whole file on demand", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const diffViewer = screen.getByLabelText("Diff viewer");
+
+    expect(within(diffViewer).getByText("Hunk not loaded yet.")).toBeInTheDocument();
+
+    await user.click(within(diffViewer).getByRole("button", { name: /load hunk/i }));
+
+    expect(await within(diffViewer).findByText(/logger.info/)).toBeInTheDocument();
+
+    await user.click(within(diffViewer).getAllByRole("button", { name: /expand context/i })[0]);
+
+    expect(await within(diffViewer).findByText(/context before src\/auth\/session\.ts/)).toBeInTheDocument();
+
+    await user.click(within(diffViewer).getByRole("button", { name: /view whole file/i }));
+
+    expect(await within(diffViewer).findByLabelText("Full file view")).toBeInTheDocument();
+  });
+
+  it("shows non-text diff fallback with a GitHub escape hatch", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /view diff for notebooks\/review-findings\.ipynb/i }));
+
+    const diffViewer = screen.getByLabelText("Diff viewer");
+    expect(within(diffViewer).getByText("Non-text fallback")).toBeInTheDocument();
+    expect(within(diffViewer).getByRole("link", { name: /open in github/i })).toHaveAttribute(
+      "href",
+      "https://github.com/acme/payments-web/pull/482/files",
+    );
   });
 
   it("marks Review Threads reviewed locally and distinguishes outdated threads in the UI", async () => {
