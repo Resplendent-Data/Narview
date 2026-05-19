@@ -12,8 +12,10 @@ import {
   prCacheStorageKey,
   readCacheStore,
   setCachedPullRequestPinned,
+  type CachedPullRequestData,
   upsertCachedPullRequest,
 } from "./lib/pr-cache";
+import { buildReviewOverview, getMergeReadiness, scoreHotspots, summarizeChecks } from "./lib/review-overview";
 import { parsePullRequestUrl, type ReviewSessionClient, type ReviewSessionSnapshot } from "./lib/review-session";
 import type { PullRequestSummary, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
 
@@ -137,6 +139,48 @@ function createReviewSessionClient(overrides: Partial<ReviewSessionClient> = {})
     loadSession: vi.fn().mockResolvedValue(null),
     loadLastSession: vi.fn().mockResolvedValue(null),
     ...overrides,
+  };
+}
+
+function createOverviewFixture(): CachedPullRequestData {
+  const cache = createCachedPullRequest(readyPullRequest, 1_800_000_000_000);
+
+  return {
+    ...cache,
+    metadata: {
+      ...cache.metadata,
+      description: "Adds a checkout guard.",
+      baseBranch: "main",
+      headBranch: "feature/checkout-guard",
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      reviewDecision: "APPROVED",
+    },
+    fileSummaries: [
+      { path: "src/auth/session.ts", additions: 160, deletions: 55, status: "modified" },
+      { path: "docs/readme.md", additions: 20, deletions: 0, status: "modified" },
+    ],
+    reviewThreads: [
+      {
+        id: "thread-1",
+        authorLogin: "coderabbitai",
+        filePath: "src/auth/session.ts",
+        line: 24,
+        state: "unresolved",
+        body: "Session path needs a stale-cache guard.",
+        updatedAt: "2026-05-18T12:00:00Z",
+      },
+    ],
+    checks: [
+      {
+        name: "build",
+        status: "completed",
+        conclusion: "success",
+        url: "https://github.com/Resplendent-Data/Narview/actions/runs/1",
+        startedAt: "2026-05-18T12:00:00Z",
+        completedAt: "2026-05-18T12:02:05Z",
+      },
+    ],
   };
 }
 
@@ -268,7 +312,7 @@ describe("App shell", () => {
       />,
     );
 
-    expect(await screen.findByText("Add checkout guard")).toBeInTheDocument();
+    expect((await screen.findAllByText("Add checkout guard")).length).toBeGreaterThan(0);
     expect(screen.queryByText("Draft billing sync")).not.toBeInTheDocument();
 
     await user.click(screen.getByLabelText("Include draft Pull Requests"));
@@ -476,5 +520,108 @@ describe("App shell", () => {
       queued: false,
       message: "Resolve thread requires a live GitHub connection.",
     });
+  });
+
+  it("shows the Review Overview metadata and high-level counts", () => {
+    render(<App />);
+
+    const overview = screen.getByLabelText("Review overview");
+
+    expect(overview).toHaveTextContent("acme/payments-web #482 by @coderabbitai");
+    expect(overview).toHaveTextContent("Remote-first PR review workspace shell");
+    expect(overview).toHaveTextContent("feature/review-workspace -> main");
+    expect(overview).toHaveTextContent("Files");
+    expect(overview).toHaveTextContent("Checks");
+  });
+
+  it("ranks hotspots with deterministic explainable signals", () => {
+    const hotspots = scoreHotspots(createOverviewFixture().fileSummaries, createOverviewFixture().reviewThreads);
+
+    expect(hotspots[0].path).toBe("src/auth/session.ts");
+    expect(hotspots[0].reasons).toEqual(expect.arrayContaining(["215 changed lines", "1 unresolved thread", "critical path"]));
+    expect(hotspots[0].score).toBeGreaterThan(hotspots[1].score);
+  });
+
+  it("applies repository hotspot overrides when provided", () => {
+    const hotspots = scoreHotspots(
+      [
+        { path: "docs/large-guide.md", additions: 300, deletions: 0, status: "modified" },
+        { path: "infra/provider.ts", additions: 5, deletions: 0, status: "modified" },
+      ],
+      [],
+      {
+        weights: {
+          changedLines: 0,
+          criticalPath: 1,
+        },
+        criticalPathPatterns: ["infra"],
+      },
+    );
+
+    expect(hotspots[0].path).toBe("infra/provider.ts");
+    expect(hotspots[0].reasons).toContain("critical path");
+  });
+
+  it("summarizes checks with names, timing, and detail links", () => {
+    const summary = summarizeChecks([
+      {
+        name: "build",
+        status: "completed",
+        conclusion: "success",
+        url: "https://github.com/Resplendent-Data/Narview/actions/runs/1",
+        startedAt: "2026-05-18T12:00:00Z",
+        completedAt: "2026-05-18T12:02:05Z",
+      },
+      { name: "lint", status: "completed", conclusion: "failure", url: null },
+      { name: "preview", status: "in-progress", conclusion: null, url: null, startedAt: "2026-05-18T12:03:00Z" },
+    ]);
+
+    expect(summary).toMatchObject({
+      total: 3,
+      passing: 1,
+      failing: 1,
+      pending: 1,
+      failingNames: ["lint"],
+      detailUrls: ["https://github.com/Resplendent-Data/Narview/actions/runs/1"],
+    });
+    expect(summary.details[0]).toMatchObject({ name: "build", timingLabel: "2m 5s" });
+    expect(summary.details[2]).toMatchObject({ name: "preview", timingLabel: "Running" });
+  });
+
+  it("surfaces merge readiness states from GitHub-visible blockers", () => {
+    const blocked = createOverviewFixture();
+    blocked.metadata.mergeable = "CONFLICTING";
+    blocked.metadata.reviewDecision = "CHANGES_REQUESTED";
+    blocked.checks = [{ name: "lint", status: "completed", conclusion: "failure", url: null }];
+
+    expect(getMergeReadiness(blocked)).toMatchObject({
+      state: "blocked",
+      blockers: expect.arrayContaining([
+        "Pull Request has merge conflicts.",
+        "Changes requested by reviewers.",
+        "1 failing check.",
+        "1 unresolved review thread.",
+      ]),
+    });
+
+    const ready = createOverviewFixture();
+    ready.reviewThreads = [];
+
+    expect(getMergeReadiness(ready)).toEqual({
+      state: "ready",
+      blockers: ["No visible blockers from cached GitHub data."],
+    });
+  });
+
+  it("builds the overview without LLM behavior", () => {
+    const overview = buildReviewOverview(createOverviewFixture(), {
+      weights: {
+        unresolvedThreads: 0.5,
+      },
+    });
+
+    expect(overview.usesLlm).toBe(false);
+    expect(overview.branch).toBe("feature/checkout-guard -> main");
+    expect(JSON.stringify(overview)).not.toMatch(/gemini|openai/i);
   });
 });

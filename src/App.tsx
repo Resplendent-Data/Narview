@@ -35,8 +35,10 @@ import {
   readCachedPullRequest,
   setCachedPullRequestPinned,
   upsertCachedPullRequest,
+  type CachedPullRequestData,
   type CacheStats,
 } from "./lib/pr-cache";
+import { buildReviewOverview, type RepositoryHotspotOverride } from "./lib/review-overview";
 import {
   getPullRequestKey,
   localReviewSessionClient,
@@ -79,12 +81,6 @@ const queues = [
   { id: "resolved-unreviewed", label: "Resolved + unreviewed", count: 6, tone: "muted" as const },
 ];
 
-const hotspots = [
-  { file: "src/auth/session.ts", score: 92, reason: "8 threads, 214 changed lines" },
-  { file: "src/review/queue.ts", score: 77, reason: "High thread density" },
-  { file: "migrations/20260518_reviews.sql", score: 61, reason: "Schema change" },
-];
-
 const files = [
   { path: "src/auth/session.ts", status: "modified", lines: "+128 -86", viewed: false },
   { path: "src/review/queue.ts", status: "modified", lines: "+94 -21", viewed: true },
@@ -120,6 +116,15 @@ const fallbackPullRequest: PullRequestSummary = {
   isDraft: false,
   updatedAt: "2026-05-18T12:00:00Z",
   url: "https://github.com/acme/payments-web/pull/482",
+};
+
+const repositoryHotspotOverrides: Record<string, RepositoryHotspotOverride> = {
+  "acme/payments-web": {
+    weights: {
+      unresolvedThreads: 0.45,
+    },
+    criticalPathPatterns: ["auth", "session", "migration", "schema", "payment", "billing"],
+  },
 };
 
 function getInitialTheme(): Theme {
@@ -160,6 +165,126 @@ function getRefreshBadge(status: RefreshStatus) {
     return { label: "Failed", variant: "danger" as const };
   }
   return { label: "Idle", variant: "muted" as const };
+}
+
+function getReadinessBadge(state: "ready" | "attention" | "blocked") {
+  if (state === "ready") {
+    return { label: "Ready", variant: "success" as const };
+  }
+  if (state === "blocked") {
+    return { label: "Blocked", variant: "danger" as const };
+  }
+  return { label: "Attention", variant: "warning" as const };
+}
+
+function getCheckBadge(status: string, conclusion: string | null) {
+  if (status !== "completed") {
+    return { label: status === "queued" ? "Queued" : "Running", variant: "warning" as const };
+  }
+  if (conclusion === "success") {
+    return { label: "Passing", variant: "success" as const };
+  }
+  if (!conclusion) {
+    return { label: "Completed", variant: "muted" as const };
+  }
+  return { label: conclusion.replace("-", " "), variant: "danger" as const };
+}
+
+function createOverviewCache(pullRequest: PullRequestSummary, cached?: CachedPullRequestData): CachedPullRequestData {
+  const normalizedCached = cached
+    ? {
+        ...cached,
+        reviewThreads: cached.reviewThreads ?? [],
+        fileSummaries: cached.fileSummaries ?? [],
+        checks: cached.checks ?? [],
+      }
+    : null;
+
+  if (
+    normalizedCached &&
+    (normalizedCached.fileSummaries.length > 0 ||
+      normalizedCached.reviewThreads.length > 0 ||
+      normalizedCached.checks.length > 0)
+  ) {
+    return normalizedCached;
+  }
+
+  return {
+    pullRequest,
+    metadata: {
+      title: pullRequest.title,
+      description: "Remote-first PR review workspace shell with deterministic overview signals.",
+      repository: pullRequest.repository,
+      number: pullRequest.number,
+      authorLogin: pullRequest.authorLogin,
+      baseBranch: "main",
+      headBranch: "feature/review-workspace",
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      reviewDecision: "REVIEW_REQUIRED",
+      url: pullRequest.url,
+      isDraft: pullRequest.isDraft,
+      updatedAt: pullRequest.updatedAt,
+    },
+    reviewThreads: [
+      {
+        id: "thread-1",
+        authorLogin: selectedThread.author,
+        filePath: selectedThread.file,
+        line: selectedThread.line,
+        state: "unresolved",
+        body: selectedThread.body,
+        updatedAt: pullRequest.updatedAt,
+      },
+    ],
+    fileSummaries: files.map((file) => ({
+      path: file.path,
+      additions: Number(file.lines.match(/\+(\d+)/)?.[1] ?? 0),
+      deletions: Number(file.lines.match(/-(\d+)/)?.[1] ?? 0),
+      status: file.status === "binary" ? "binary" : file.status === "added" ? "added" : "modified",
+    })),
+    checks: [
+      {
+        name: "build",
+        status: "completed",
+        conclusion: "success",
+        url: "https://github.com/acme/payments-web/actions/runs/1001",
+        startedAt: "2026-05-18T12:01:00Z",
+        completedAt: "2026-05-18T12:03:15Z",
+      },
+      {
+        name: "unit tests",
+        status: "completed",
+        conclusion: "success",
+        url: "https://github.com/acme/payments-web/actions/runs/1002",
+        startedAt: "2026-05-18T12:02:00Z",
+        completedAt: "2026-05-18T12:06:28Z",
+      },
+      {
+        name: "lint",
+        status: "completed",
+        conclusion: "success",
+        url: "https://github.com/acme/payments-web/actions/runs/1003",
+        startedAt: "2026-05-18T12:02:30Z",
+        completedAt: "2026-05-18T12:03:34Z",
+      },
+      {
+        name: "preview",
+        status: "in-progress",
+        conclusion: null,
+        url: "https://github.com/acme/payments-web/actions/runs/1004",
+        startedAt: "2026-05-18T12:04:00Z",
+        completedAt: null,
+      },
+    ],
+    rateLimit: {
+      remaining: null,
+      resetEpochSeconds: null,
+    },
+    fetchedAtEpochMs: Date.now(),
+    lastAccessedEpochMs: Date.now(),
+    pinned: cached?.pinned ?? false,
+  };
 }
 
 export function App({
@@ -208,6 +333,12 @@ export function App({
   const activePullRequestKey = routedPullRequests.length > 0 ? getPullRequestKey(selectedPullRequest) : null;
   const selectedCacheEntry = activePullRequestKey ? readCacheStore().entries[activePullRequestKey] : null;
   const selectedPullRequestPinned = selectedCacheEntry?.pinned ?? false;
+  const reviewOverviewCache = createOverviewCache(selectedPullRequest, selectedCacheEntry ?? undefined);
+  const reviewOverview = buildReviewOverview(
+    reviewOverviewCache,
+    repositoryHotspotOverrides[selectedPullRequest.repository],
+  );
+  const readinessBadge = getReadinessBadge(reviewOverview.readiness.state);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -735,13 +866,13 @@ export function App({
             <section className="border-b border-border p-3">
               <h2 className="mb-2 text-xs font-semibold uppercase tracking-normal text-muted-foreground">Hotspots</h2>
               <div className="space-y-2">
-                {hotspots.map((hotspot) => (
-                  <button className="w-full rounded-md border border-border p-2 text-left hover:bg-accent" key={hotspot.file} type="button">
+                {reviewOverview.hotspots.slice(0, 4).map((hotspot) => (
+                  <button className="w-full rounded-md border border-border p-2 text-left hover:bg-accent" key={hotspot.path} type="button">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-medium">{hotspot.file}</span>
+                      <span className="truncate text-sm font-medium">{hotspot.path}</span>
                       <Badge variant={hotspot.score > 80 ? "danger" : "warning"}>{hotspot.score}</Badge>
                     </div>
-                    <p className="mt-1 truncate text-xs text-muted-foreground">{hotspot.reason}</p>
+                    <p className="mt-1 truncate text-xs text-muted-foreground">{hotspot.reasons.join(", ")}</p>
                   </button>
                 ))}
               </div>
@@ -776,12 +907,46 @@ export function App({
             </Button>
           </div>
 
-          <div className="grid flex-1 grid-rows-[auto_1fr] overflow-hidden">
+          <div className="grid flex-1 grid-rows-[auto_auto_1fr] overflow-hidden">
+            <div className="border-b border-border bg-background px-4 py-3" aria-label="Review overview">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="truncate text-xs text-muted-foreground">
+                    {reviewOverview.repository} #{reviewOverviewCache.metadata.number} by {reviewOverview.author}
+                  </p>
+                  <h2 className="mt-1 truncate text-base font-semibold">{reviewOverview.title}</h2>
+                  <p className="mt-1 truncate text-xs text-muted-foreground">{reviewOverview.branch}</p>
+                  <p className="mt-1 line-clamp-2 text-sm leading-5 text-muted-foreground">{reviewOverview.description}</p>
+                </div>
+                <div className="flex shrink-0 items-start">
+                  <Badge variant={readinessBadge.variant}>{readinessBadge.label}</Badge>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-4 gap-2 text-sm">
+                <div className="rounded-md border border-border px-2 py-1">
+                  <p className="text-xs text-muted-foreground">Files</p>
+                  <p className="font-semibold">{reviewOverview.counts.changedFiles}</p>
+                </div>
+                <div className="rounded-md border border-border px-2 py-1">
+                  <p className="text-xs text-muted-foreground">Lines</p>
+                  <p className="font-semibold">{reviewOverview.counts.changedLines}</p>
+                </div>
+                <div className="rounded-md border border-border px-2 py-1">
+                  <p className="text-xs text-muted-foreground">Threads</p>
+                  <p className="font-semibold">{reviewOverview.counts.reviewThreads}</p>
+                </div>
+                <div className="rounded-md border border-border px-2 py-1">
+                  <p className="text-xs text-muted-foreground">Checks</p>
+                  <p className="font-semibold">{reviewOverview.counts.checks}</p>
+                </div>
+              </div>
+            </div>
+
             <div className="border-b border-border bg-muted/40 px-4 py-3">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <p className="text-xs text-muted-foreground">Review Path 1 of 14</p>
-                  <h2 className="mt-1 text-base font-semibold">{selectedThread.title}</h2>
+                  <h3 className="mt-1 text-base font-semibold">{selectedThread.title}</h3>
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge variant="warning">CodeRabbit</Badge>
@@ -926,11 +1091,63 @@ export function App({
               </div>
             </div>
 
-            <div className="p-3">
-              <h2 className="mb-2 text-xs font-semibold uppercase tracking-normal text-muted-foreground">Merge readiness</h2>
+            <div className="p-3" aria-label="Merge readiness context">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Merge readiness</h2>
+                <Badge variant={readinessBadge.variant}>{readinessBadge.label}</Badge>
+              </div>
               <div className="space-y-2 text-sm">
-                <div className="flex items-center gap-2"><Check className="h-4 w-4 text-emerald-500" aria-hidden="true" /> 7 checks passing</div>
-                <div className="flex items-center gap-2"><ChevronRight className="h-4 w-4 text-amber-500" aria-hidden="true" /> 14 threads need attention</div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-2">
+                    <Check className="h-4 w-4 text-emerald-500" aria-hidden="true" />
+                    Checks passing
+                  </span>
+                  <span>
+                    {reviewOverview.checks.passing}/{reviewOverview.checks.total}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-2">
+                    <ChevronRight className="h-4 w-4 text-amber-500" aria-hidden="true" />
+                    Review blockers
+                  </span>
+                  <span>{reviewOverview.readiness.blockers.length}</span>
+                </div>
+              </div>
+
+              <div className="mt-3 space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Checks</p>
+                {reviewOverview.checks.details.map((check) => {
+                  const checkBadge = getCheckBadge(check.status, check.conclusion);
+
+                  return (
+                    <div className="rounded-md border border-border p-2 text-sm" key={check.name}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate font-medium">{check.name}</span>
+                        <Badge variant={checkBadge.variant}>{checkBadge.label}</Badge>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                        <span>{check.timingLabel}</span>
+                        {check.url ? (
+                          <a className="truncate text-sky-700 underline dark:text-sky-300" href={check.url} rel="noreferrer" target="_blank">
+                            Details
+                          </a>
+                        ) : (
+                          <span>No link</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="mt-3 space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Visible blockers</p>
+                {reviewOverview.readiness.blockers.map((blocker) => (
+                  <div className="rounded-md bg-muted p-2 text-xs text-muted-foreground" key={blocker}>
+                    {blocker}
+                  </div>
+                ))}
               </div>
             </div>
           </aside>

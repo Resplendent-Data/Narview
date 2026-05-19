@@ -26,6 +26,8 @@ export interface CachedCheckRun {
   status: "queued" | "in-progress" | "completed";
   conclusion: "success" | "failure" | "neutral" | "cancelled" | "skipped" | "timed-out" | "action-required" | null;
   url: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
 }
 
 export interface CachedRateLimit {
@@ -37,9 +39,24 @@ export interface CachedPullRequestData {
   pullRequest: PullRequestSummary;
   metadata: {
     title: string;
+    description: string | null;
     repository: string;
     number: number;
     authorLogin: string | null;
+    baseBranch: string | null;
+    headBranch: string | null;
+    mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | null;
+    mergeStateStatus:
+      | "BEHIND"
+      | "BLOCKED"
+      | "CLEAN"
+      | "DIRTY"
+      | "DRAFT"
+      | "HAS_HOOKS"
+      | "UNKNOWN"
+      | "UNSTABLE"
+      | null;
+    reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
     url: string;
     isDraft: boolean;
     updatedAt: string;
@@ -106,9 +123,15 @@ export function createCachedPullRequest(pullRequest: PullRequestSummary, nowEpoc
     pullRequest,
     metadata: {
       title: pullRequest.title,
+      description: null,
       repository: pullRequest.repository,
       number: pullRequest.number,
       authorLogin: pullRequest.authorLogin,
+      baseBranch: null,
+      headBranch: null,
+      mergeable: null,
+      mergeStateStatus: null,
+      reviewDecision: null,
       url: pullRequest.url,
       isDraft: pullRequest.isDraft,
       updatedAt: pullRequest.updatedAt,
@@ -191,13 +214,23 @@ export function upsertCachedPullRequest(
     pullRequest,
     metadata: {
       title: pullRequest.title,
+      description: existing.metadata.description,
       repository: pullRequest.repository,
       number: pullRequest.number,
       authorLogin: pullRequest.authorLogin,
+      baseBranch: existing.metadata.baseBranch,
+      headBranch: existing.metadata.headBranch,
+      mergeable: existing.metadata.mergeable,
+      mergeStateStatus: existing.metadata.mergeStateStatus,
+      reviewDecision: existing.metadata.reviewDecision,
       url: pullRequest.url,
       isDraft: pullRequest.isDraft,
       updatedAt: pullRequest.updatedAt,
     },
+    reviewThreads: patch.reviewThreads ?? existing.reviewThreads,
+    fileSummaries: patch.fileSummaries ?? existing.fileSummaries,
+    checks: patch.checks ?? existing.checks,
+    rateLimit: patch.rateLimit ?? existing.rateLimit,
     fetchedAtEpochMs: patch.fetchedAtEpochMs ?? now,
     lastAccessedEpochMs: now,
     pinned: patch.pinned ?? existing.pinned,

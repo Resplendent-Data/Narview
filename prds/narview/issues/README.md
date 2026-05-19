@@ -9,7 +9,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 | 3 | Workspace Repositories And Active PR List | AFK | done | 02-oauth-sign-in-and-secure-session.md | 3, 5, 6, 7, 52, 53 | [03-workspace-repositories-and-active-pr-list.md](./03-workspace-repositories-and-active-pr-list.md) |
 | 4 | Quick-Open PR And Review Session Resume | AFK | done | 02-oauth-sign-in-and-secure-session.md | 4, 8, 12 | [04-quick-open-pr-and-review-session-resume.md](./04-quick-open-pr-and-review-session-resume.md) |
 | 5 | Incremental GitHub PR Data Cache | AFK | done | 03-workspace-repositories-and-active-pr-list.md, 04-quick-open-pr-and-review-session-resume.md | 46, 47, 48, 49, 50, 51, 52, 53 | [05-incremental-github-pr-data-cache.md](./05-incremental-github-pr-data-cache.md) |
-| 6 | Review Overview With Hotspots And Readiness | AFK | ready | 05-incremental-github-pr-data-cache.md | 9, 10, 11, 37, 38, 45 | [06-review-overview-with-hotspots-and-readiness.md](./06-review-overview-with-hotspots-and-readiness.md) |
+| 6 | Review Overview With Hotspots And Readiness | AFK | done | 05-incremental-github-pr-data-cache.md | 9, 10, 11, 37, 38, 45 | [06-review-overview-with-hotspots-and-readiness.md](./06-review-overview-with-hotspots-and-readiness.md) |
 | 7 | Review Queue And Local Reviewed State | AFK | ready | 05-incremental-github-pr-data-cache.md | 15, 16, 17, 18, 19, 20, 21, 22 | [07-review-queue-and-local-reviewed-state.md](./07-review-queue-and-local-reviewed-state.md) |
 | 8 | GitHub Thread Replies And Resolve Actions | AFK | ready | 07-review-queue-and-local-reviewed-state.md | 23, 24, 25, 26, 47 | [08-github-thread-replies-and-resolve-actions.md](./08-github-thread-replies-and-resolve-actions.md) |
 | 9 | Confirmed Bulk Review Actions | AFK | ready | 08-github-thread-replies-and-resolve-actions.md | 27, 28 | [09-confirmed-bulk-review-actions.md](./09-confirmed-bulk-review-actions.md) |
@@ -25,7 +25,6 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 ## Ready
 
-- [Review Overview With Hotspots And Readiness](./06-review-overview-with-hotspots-and-readiness.md)
 - [Review Queue And Local Reviewed State](./07-review-queue-and-local-reviewed-state.md)
 - [GitHub Thread Replies And Resolve Actions](./08-github-thread-replies-and-resolve-actions.md)
 - [Confirmed Bulk Review Actions](./09-confirmed-bulk-review-actions.md)
@@ -41,7 +40,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 ## In Progress
 
-None.
+None
 
 ## Done
 
@@ -50,3 +49,4 @@ None.
 - [Workspace Repositories And Active PR List](./03-workspace-repositories-and-active-pr-list.md)
 - [Quick-Open PR And Review Session Resume](./04-quick-open-pr-and-review-session-resume.md)
 - [Incremental GitHub PR Data Cache](./05-incremental-github-pr-data-cache.md)
+- [Review Overview With Hotspots And Readiness](./06-review-overview-with-hotspots-and-readiness.md)
