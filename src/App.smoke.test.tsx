@@ -823,4 +823,71 @@ describe("App shell", () => {
 
     expect(await screen.findByText("GitHub rejected this Review Thread write. Check account access and token scopes.")).toBeInTheDocument();
   });
+
+  it("bulk marks selected Review Threads reviewed with undoable feedback", async () => {
+    const user = userEvent.setup();
+    render(<App threadActionClient={createThreadActionClient()} />);
+    const queue = screen.getByLabelText("Review thread queue");
+
+    await user.click(screen.getByLabelText("Select src/auth/session.ts"));
+    await user.click(screen.getByLabelText("Select src/review/queue.ts"));
+    await user.click(within(queue).getByRole("button", { name: /^mark reviewed/i }));
+
+    expect(await within(queue).findByText("Marked 2 threads reviewed.")).toBeInTheDocument();
+    expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
+
+    await user.click(within(queue).getByRole("button", { name: /^undo/i }));
+
+    const store = JSON.parse(window.localStorage.getItem(reviewQueueStorageKey) ?? "{}");
+    expect(store.users["local-user"]["thread-1"].reviewed).toBe(false);
+    expect(store.users["local-user"]["thread-2"].reviewed).toBe(false);
+  });
+
+  it("cancels confirmed bulk GitHub actions before they execute", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+    render(<App threadActionClient={threadActionClient} />);
+    const queue = screen.getByLabelText("Review thread queue");
+
+    await user.click(screen.getByLabelText("Select src/auth/session.ts"));
+    await user.click(within(queue).getByRole("button", { name: /^resolve selected/i }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("Confirm bulk resolve");
+
+    await user.click(screen.getByRole("button", { name: /^cancel/i }));
+
+    expect(threadActionClient.resolve).not.toHaveBeenCalled();
+  });
+
+  it("reports partial failures for confirmed bulk GitHub actions and applies local side effects only to successes", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient({
+      resolve: vi.fn().mockImplementation(async (threadId: string) =>
+        threadId === "thread-1"
+          ? {
+              ok: true,
+              action: "resolve",
+              threadId,
+              message: "Review Thread resolved on GitHub.",
+              replyUrl: null,
+            }
+          : createThreadActionFailure("resolve", threadId, "github-thread-server-error", "GitHub could not resolve this thread right now."),
+      ),
+    });
+    render(<App threadActionClient={threadActionClient} />);
+    const queue = screen.getByLabelText("Review thread queue");
+
+    await user.click(screen.getByLabelText("Select src/auth/session.ts"));
+    await user.click(screen.getByLabelText("Select src/review/queue.ts"));
+    await user.click(within(queue).getByRole("button", { name: /^resolve selected/i }));
+    await user.click(screen.getByRole("button", { name: /^confirm/i }));
+
+    expect(await within(queue).findByText("1 succeeded, 1 failed.")).toBeInTheDocument();
+    expect(within(queue).getByText(/thread-2: GitHub could not resolve this thread right now/)).toBeInTheDocument();
+    await user.click(within(queue).getByRole("button", { name: /^retry failed/i }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("1 selected Review Thread");
+
+    const store = JSON.parse(window.localStorage.getItem(reviewQueueStorageKey) ?? "{}");
+    expect(store.users["local-user"]["thread-1"].reviewed).toBe(true);
+    expect(store.users["local-user"]["thread-2"].reviewed).toBe(false);
+  });
 });

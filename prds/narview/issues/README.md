@@ -12,7 +12,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 | 6 | Review Overview With Hotspots And Readiness | AFK | done | 05-incremental-github-pr-data-cache.md | 9, 10, 11, 37, 38, 45 | [06-review-overview-with-hotspots-and-readiness.md](./06-review-overview-with-hotspots-and-readiness.md) |
 | 7 | Review Queue And Local Reviewed State | AFK | done | 05-incremental-github-pr-data-cache.md | 15, 16, 17, 18, 19, 20, 21, 22 | [07-review-queue-and-local-reviewed-state.md](./07-review-queue-and-local-reviewed-state.md) |
 | 8 | GitHub Thread Replies And Resolve Actions | AFK | done | 07-review-queue-and-local-reviewed-state.md | 23, 24, 25, 26, 47 | [08-github-thread-replies-and-resolve-actions.md](./08-github-thread-replies-and-resolve-actions.md) |
-| 9 | Confirmed Bulk Review Actions | AFK | ready | 08-github-thread-replies-and-resolve-actions.md | 27, 28 | [09-confirmed-bulk-review-actions.md](./09-confirmed-bulk-review-actions.md) |
+| 9 | Confirmed Bulk Review Actions | AFK | done | 08-github-thread-replies-and-resolve-actions.md | 27, 28 | [09-confirmed-bulk-review-actions.md](./09-confirmed-bulk-review-actions.md) |
 | 10 | File Changes And Viewed State | AFK | ready | 05-incremental-github-pr-data-cache.md | 29, 30, 36 | [10-file-changes-and-viewed-state.md](./10-file-changes-and-viewed-state.md) |
 | 11 | Lazy Diff Viewer With Context Expansion | AFK | ready | 10-file-changes-and-viewed-state.md | 31, 32, 33, 34, 35, 36 | [11-lazy-diff-viewer-with-context-expansion.md](./11-lazy-diff-viewer-with-context-expansion.md) |
 | 12 | Thread-Centered Guided Review Flow | AFK | ready | 08-github-thread-replies-and-resolve-actions.md, 11-lazy-diff-viewer-with-context-expansion.md | 13, 14, 15, 21, 22, 23, 24, 25, 26, 39, 40 | [12-thread-centered-guided-review-flow.md](./12-thread-centered-guided-review-flow.md) |
@@ -25,7 +25,6 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 ## Ready
 
-- [Confirmed Bulk Review Actions](./09-confirmed-bulk-review-actions.md)
 - [File Changes And Viewed State](./10-file-changes-and-viewed-state.md)
 - [Lazy Diff Viewer With Context Expansion](./11-lazy-diff-viewer-with-context-expansion.md)
 - [Thread-Centered Guided Review Flow](./12-thread-centered-guided-review-flow.md)
@@ -38,7 +37,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 ## In Progress
 
-None
+No issues in progress.
 
 ## Done
 
@@ -50,3 +49,4 @@ None
 - [Review Overview With Hotspots And Readiness](./06-review-overview-with-hotspots-and-readiness.md)
 - [Review Queue And Local Reviewed State](./07-review-queue-and-local-reviewed-state.md)
 - [GitHub Thread Replies And Resolve Actions](./08-github-thread-replies-and-resolve-actions.md)
+- [Confirmed Bulk Review Actions](./09-confirmed-bulk-review-actions.md)

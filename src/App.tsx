@@ -378,6 +378,15 @@ export function App({
   const [replyDraft, setReplyDraft] = useState("");
   const [threadActionBusy, setThreadActionBusy] = useState<ThreadWriteAction | null>(null);
   const [threadActionResult, setThreadActionResult] = useState<ThreadActionResult | null>(null);
+  const [selectedBulkThreadIds, setSelectedBulkThreadIds] = useState<string[]>([]);
+  const [bulkUndo, setBulkUndo] = useState<{ message: string; previousReviewed: Record<string, boolean> } | null>(null);
+  const [bulkActionResult, setBulkActionResult] = useState<{
+    action: "resolve" | "unresolve";
+    message: string;
+    successes: string[];
+    failures: { id: string; message: string; retryable: boolean }[];
+  } | null>(null);
+  const [bulkConfirmAction, setBulkConfirmAction] = useState<"resolve" | "unresolve" | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>(idleRefreshStatus);
   const [cacheSummary, setCacheSummary] = useState<CacheStats>(() => cacheStats());
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
@@ -478,6 +487,11 @@ export function App({
     filteredReviewThreads[0] ??
     reviewThreadViews[0] ??
     null;
+  const selectedBulkThreadSet = new Set(selectedBulkThreadIds);
+  const selectedBulkThreads = reviewThreadViews.filter((view) => selectedBulkThreadSet.has(view.id));
+  const retryableBulkFailureIds = bulkActionResult?.failures.filter((failure) => failure.retryable).map((failure) => failure.id) ?? [];
+  const allFilteredThreadsSelected =
+    filteredReviewThreads.length > 0 && filteredReviewThreads.every((view) => selectedBulkThreadSet.has(view.id));
   const selectedReviewThreadIndex = selectedReviewThread
     ? Math.max(filteredReviewThreads.findIndex((view) => view.id === selectedReviewThread.id), 0)
     : 0;
@@ -906,6 +920,110 @@ export function App({
     }
   };
 
+  const toggleBulkThreadSelection = (threadId: string, selected: boolean) => {
+    setSelectedBulkThreadIds((current) =>
+      selected ? Array.from(new Set([...current, threadId])) : current.filter((id) => id !== threadId),
+    );
+    setBulkUndo(null);
+    setBulkActionResult(null);
+  };
+
+  const toggleAllFilteredThreadSelection = (selected: boolean) => {
+    setSelectedBulkThreadIds((current) => {
+      if (!selected) {
+        const visible = new Set(filteredReviewThreads.map((view) => view.id));
+        return current.filter((id) => !visible.has(id));
+      }
+
+      return Array.from(new Set([...current, ...filteredReviewThreads.map((view) => view.id)]));
+    });
+    setBulkUndo(null);
+    setBulkActionResult(null);
+  };
+
+  const applyBulkReviewedState = (reviewed: boolean) => {
+    if (selectedBulkThreads.length === 0) {
+      return;
+    }
+
+    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+
+    const previousReviewed = Object.fromEntries(selectedBulkThreads.map((view) => [view.id, view.reviewed]));
+    for (const view of selectedBulkThreads) {
+      setReviewThreadReviewed(currentUserKey, view.id, reviewed);
+    }
+
+    setBulkUndo({
+      message: `Marked ${selectedBulkThreads.length} thread${selectedBulkThreads.length === 1 ? "" : "s"} ${reviewed ? "reviewed" : "unreviewed"}.`,
+      previousReviewed,
+    });
+    setBulkActionResult(null);
+    setReviewQueueRevision((current) => current + 1);
+  };
+
+  const undoBulkReviewedState = () => {
+    if (!bulkUndo) {
+      return;
+    }
+
+    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+    for (const [threadId, reviewed] of Object.entries(bulkUndo.previousReviewed)) {
+      setReviewThreadReviewed(currentUserKey, threadId, reviewed);
+    }
+    setBulkUndo(null);
+    setReviewQueueRevision((current) => current + 1);
+  };
+
+  const runConfirmedBulkThreadAction = async () => {
+    if (!bulkConfirmAction || selectedBulkThreads.length === 0) {
+      return;
+    }
+
+    const action = bulkConfirmAction;
+    setBulkConfirmAction(null);
+    setBulkActionResult(null);
+    setThreadActionBusy(action);
+
+    try {
+      const results = await Promise.all(
+        selectedBulkThreads.map((view) =>
+          action === "resolve" ? threadActionClient.resolve(view.id) : threadActionClient.unresolve(view.id),
+        ),
+      );
+      const successes = results.filter((result) => result.ok).map((result) => result.threadId);
+      const failures = results
+        .filter((result): result is Extract<ThreadActionResult, { ok: false }> => !result.ok)
+        .map((result) => ({
+          id: result.threadId,
+          message: result.message,
+          retryable: result.retryable,
+        }));
+
+      if (successes.length > 0) {
+        syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+      }
+      for (const threadId of successes) {
+        if (action === "resolve") {
+          setReviewThreadReviewed(currentUserKey, threadId, true);
+        }
+        setThreadStateOverrides((current) => ({
+          ...current,
+          [threadId]: action === "resolve" ? "resolved" : "unresolved",
+        }));
+      }
+
+      setBulkActionResult({
+        action,
+        message: `${successes.length} succeeded, ${failures.length} failed.`,
+        successes,
+        failures,
+      });
+      setReviewQueueRevision((current) => current + 1);
+    } finally {
+      setThreadActionBusy(null);
+    }
+  };
+
   const refreshBadge = getRefreshBadge(refreshStatus);
 
   return (
@@ -1142,34 +1260,103 @@ export function App({
                 <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Threads</h2>
                 <Badge variant="info">{filteredReviewThreads.length}</Badge>
               </div>
+              <div className="mb-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                <label className="flex items-center gap-2">
+                  <input
+                    checked={allFilteredThreadsSelected}
+                    className="h-4 w-4 accent-primary"
+                    onChange={(event) => toggleAllFilteredThreadSelection(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Select visible
+                </label>
+                {selectedBulkThreadIds.length > 0 && <span>{selectedBulkThreadIds.length} selected</span>}
+              </div>
+              {selectedBulkThreadIds.length > 0 && (
+                <div className="mb-2 grid grid-cols-2 gap-2">
+                  <Button size="sm" variant="outline" onClick={() => applyBulkReviewedState(true)}>
+                    Mark reviewed
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => applyBulkReviewedState(false)}>
+                    Mark unreviewed
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setBulkConfirmAction("resolve")}>
+                    Resolve selected
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setBulkConfirmAction("unresolve")}>
+                    Unresolve selected
+                  </Button>
+                </div>
+              )}
+              {bulkUndo && (
+                <div className="mb-2 flex items-center justify-between gap-2 rounded-md bg-emerald-500/10 p-2 text-xs text-emerald-700 dark:text-emerald-300">
+                  <span>{bulkUndo.message}</span>
+                  <button className="font-medium underline" onClick={undoBulkReviewedState} type="button">
+                    Undo
+                  </button>
+                </div>
+              )}
+              {bulkActionResult && (
+                <div className="mb-2 space-y-1 rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">
+                  <p>{bulkActionResult.message}</p>
+                  {bulkActionResult.failures.map((failure) => (
+                    <p key={failure.id}>
+                      {failure.id}: {failure.message} {failure.retryable ? "Retryable." : "Terminal."}
+                    </p>
+                  ))}
+                  {retryableBulkFailureIds.length > 0 && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setSelectedBulkThreadIds(retryableBulkFailureIds);
+                        setBulkConfirmAction(bulkActionResult.action);
+                      }}
+                    >
+                      Retry failed
+                    </Button>
+                  )}
+                </div>
+              )}
               <div className="max-h-44 space-y-2 overflow-auto">
                 {filteredReviewThreads.length === 0 ? (
                   <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No Review Threads match these filters.</p>
                 ) : (
                   filteredReviewThreads.map((view) => (
-                    <button
-                      aria-pressed={selectedReviewThread?.id === view.id}
+                    <div
                       className={cn(
-                        "w-full rounded-md border border-border p-2 text-left hover:bg-accent",
+                        "flex w-full items-start gap-2 rounded-md border border-border p-2 text-left hover:bg-accent",
                         selectedReviewThread?.id === view.id && "border-primary bg-accent text-accent-foreground",
                         view.outdated && "border-amber-500/50 bg-amber-500/10",
                       )}
                       key={view.id}
-                      onClick={() => setSelectedReviewThreadId(view.id)}
-                      type="button"
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="min-w-0 truncate text-sm font-medium">{view.thread.filePath}</span>
-                        <Badge variant={view.outdated ? "warning" : view.reviewed ? "success" : "muted"}>
-                          {view.outdated ? "Outdated" : view.reviewed ? "Reviewed" : "Unreviewed"}
-                        </Badge>
-                      </div>
-                      <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-                        <span>{view.origin === "coderabbit" ? "CodeRabbit" : "Human"}</span>
-                        <span>{getThreadStateLabel(view.thread.state)}</span>
-                        {view.thread.line && <span>line {view.thread.line}</span>}
-                      </div>
-                    </button>
+                      <input
+                        aria-label={`Select ${view.thread.filePath}`}
+                        checked={selectedBulkThreadSet.has(view.id)}
+                        className="mt-1 h-4 w-4 accent-primary"
+                        onChange={(event) => toggleBulkThreadSelection(view.id, event.target.checked)}
+                        type="checkbox"
+                      />
+                      <button
+                        aria-pressed={selectedReviewThread?.id === view.id}
+                        className="min-w-0 flex-1 text-left"
+                        onClick={() => setSelectedReviewThreadId(view.id)}
+                        type="button"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="min-w-0 truncate text-sm font-medium">{view.thread.filePath}</span>
+                          <Badge variant={view.outdated ? "warning" : view.reviewed ? "success" : "muted"}>
+                            {view.outdated ? "Outdated" : view.reviewed ? "Reviewed" : "Unreviewed"}
+                          </Badge>
+                        </div>
+                        <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                          <span>{view.origin === "coderabbit" ? "CodeRabbit" : "Human"}</span>
+                          <span>{getThreadStateLabel(view.thread.state)}</span>
+                          {view.thread.line && <span>line {view.thread.line}</span>}
+                        </div>
+                      </button>
+                    </div>
                   ))
                 )}
               </div>
@@ -1507,6 +1694,29 @@ export function App({
           </aside>
         )}
       </main>
+
+      <Dialog.Root open={bulkConfirmAction !== null} onOpenChange={(open) => !open && setBulkConfirmAction(null)}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-24 w-[min(420px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-4 shadow-xl">
+            <Dialog.Title className="text-sm font-semibold">
+              Confirm bulk {bulkConfirmAction === "unresolve" ? "unresolve" : "resolve"}
+            </Dialog.Title>
+            <Dialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
+              This will write to GitHub for {selectedBulkThreads.length} selected Review Thread
+              {selectedBulkThreads.length === 1 ? "" : "s"}. Local Reviewed state changes only after each GitHub write succeeds.
+            </Dialog.Description>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setBulkConfirmAction(null)}>
+                Cancel
+              </Button>
+              <Button onClick={() => void runConfirmedBulkThreadAction()} disabled={threadActionBusy !== null}>
+                Confirm
+              </Button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       <Dialog.Root open={commandOpen} onOpenChange={setCommandOpen}>
         <Dialog.Portal>
