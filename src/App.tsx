@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Columns2,
   Command,
+  Copy,
   Eye,
   ExternalLink,
   FileCode2,
@@ -39,6 +40,7 @@ import {
   type DiffLine,
   type DiffMode,
 } from "./lib/diff-viewer";
+import { buildHandoffPacket, renderHandoffMarkdown } from "./lib/handoff-packet";
 import {
   buildIncrementalFetchPlan,
   cacheStats,
@@ -452,6 +454,9 @@ export function App({
   const [loadedDiffHunks, setLoadedDiffHunks] = useState<Record<string, string[]>>({});
   const [expandedDiffHunks, setExpandedDiffHunks] = useState<Record<string, string[]>>({});
   const [fullFileDiffs, setFullFileDiffs] = useState<Record<string, boolean>>({});
+  const [handoffIntentPreset, setHandoffIntentPreset] = useState("Fix selected feedback");
+  const [handoffCustomIntent, setHandoffCustomIntent] = useState("");
+  const [handoffCopyMessage, setHandoffCopyMessage] = useState<string | null>(null);
   const [threadStateOverrides, setThreadStateOverrides] = useState<Record<string, CachedReviewThread["state"]>>({});
   const [replyDraft, setReplyDraft] = useState("");
   const [threadActionBusy, setThreadActionBusy] = useState<ThreadWriteAction | null>(null);
@@ -609,6 +614,34 @@ export function App({
         fullFileLoaded: fullFileDiffs[selectedFileChange.id],
       })
     : null;
+  const handoffThreadViews = selectedBulkThreads.length > 0 ? selectedBulkThreads : selectedReviewThread ? [selectedReviewThread] : [];
+  const handoffIntent = handoffCustomIntent.trim() || handoffIntentPreset;
+  const handoffDiffContextByPath = Object.fromEntries(
+    handoffThreadViews.map((view) => {
+      const fileView = fileChangeViews.find((fileChange) => fileChange.file.path === view.thread.filePath);
+      if (!fileView) {
+        return [view.thread.filePath, []];
+      }
+
+      const state = buildLazyDiffState(fileView.file, {
+        mode: "unified",
+        repository: selectedPullRequest.repository,
+        pullRequestNumber: selectedPullRequest.number,
+        loadedHunkIds: loadedDiffHunks[fileView.id] ?? getDefaultLoadedDiffHunkIds(fileView.file),
+        expandedHunkIds: expandedDiffHunks[fileView.id],
+        fullFileLoaded: fullFileDiffs[fileView.id],
+      });
+      return [view.thread.filePath, state.fullFileLines ?? state.hunks.flatMap((hunk) => hunk.lines)];
+    }),
+  );
+  const handoffPacket = buildHandoffPacket({
+    intent: handoffIntent,
+    pullRequest: reviewOverviewCache.metadata,
+    threads: handoffThreadViews.map((view) => view.thread),
+    files: reviewOverviewCache.fileSummaries,
+    diffContextByPath: handoffDiffContextByPath,
+  });
+  const handoffMarkdown = renderHandoffMarkdown(handoffPacket);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -1032,6 +1065,11 @@ export function App({
     }));
   };
 
+  const copyHandoffMarkdown = async () => {
+    await navigator.clipboard?.writeText(handoffMarkdown);
+    setHandoffCopyMessage(`Copied ${handoffPacket.threads.length} thread${handoffPacket.threads.length === 1 ? "" : "s"} to Markdown.`);
+  };
+
   const handleSetSelectedThreadReviewed = (reviewed: boolean) => {
     if (!selectedReviewThread) {
       return;
@@ -1221,6 +1259,9 @@ export function App({
         if (selectedReviewThread) {
           openThreadFileInDiff(selectedReviewThread.id);
         }
+      } else if (key === "h") {
+        event.preventDefault();
+        void copyHandoffMarkdown();
       } else if (key === "f") {
         event.preventDefault();
         setFocusMode((current) => !current);
@@ -1951,6 +1992,48 @@ export function App({
                   role="status"
                 >
                   {threadActionResult.message}
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2 border-b border-border p-3" aria-label="Handoff packet">
+              <div className="mb-2 flex items-center justify-between gap-2 text-sm font-semibold">
+                <span>Handoff Packet</span>
+                <Badge variant="info">{handoffPacket.threads.length}</Badge>
+              </div>
+              <label className="text-xs text-muted-foreground">
+                Intent
+                <select
+                  aria-label="Handoff intent"
+                  className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground"
+                  onChange={(event) => setHandoffIntentPreset(event.target.value)}
+                  value={handoffIntentPreset}
+                >
+                  <option value="Fix selected feedback">Fix selected feedback</option>
+                  <option value="Explain why selected feedback is not applied">Explain why feedback is not applied</option>
+                  <option value="Audit the risky parts of this pull request">Audit risky PR areas</option>
+                </select>
+              </label>
+              <textarea
+                aria-label="Custom handoff intent"
+                className="min-h-16 w-full resize-none rounded-md border border-input bg-background p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onChange={(event) => setHandoffCustomIntent(event.target.value)}
+                placeholder="Optional custom intent"
+                value={handoffCustomIntent}
+              />
+              <Button className="w-full justify-between" variant="outline" onClick={() => void copyHandoffMarkdown()}>
+                <span className="inline-flex items-center gap-2">
+                  <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                  Copy Markdown
+                </span>
+                <Kbd>H</Kbd>
+              </Button>
+              <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">
+                {handoffPacket.threads.length} selected Review Thread{handoffPacket.threads.length === 1 ? "" : "s"} · no LLM calls · no code changes
+              </p>
+              {handoffCopyMessage && (
+                <p className="rounded-md bg-emerald-500/10 p-2 text-xs text-emerald-700 dark:text-emerald-300" role="status">
+                  {handoffCopyMessage}
                 </p>
               )}
             </div>

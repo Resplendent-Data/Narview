@@ -10,6 +10,7 @@ import {
   highlightDiffLines,
   type DiffLine,
 } from "./lib/diff-viewer";
+import { buildHandoffPacket, renderHandoffMarkdown, selectDiffContextLines } from "./lib/handoff-packet";
 import {
   buildFileChangeViews,
   fileChangeStorageKey,
@@ -983,6 +984,96 @@ describe("App shell", () => {
     await user.click(screen.getByRole("button", { name: /^unresolve/i }));
 
     expect(threadActionClient.unresolve).toHaveBeenCalledWith("thread-2");
+  });
+
+  it("builds structured handoff packets without LLM behavior or code mutation", () => {
+    const cache = createOverviewFixture();
+    const diffContextByPath = {
+      "src/auth/session.ts": [
+        { oldLine: 23, newLine: 23, kind: "context", content: "before", highlighted: true, language: "typescript" },
+        { oldLine: 24, newLine: null, kind: "deletion", content: "const cached = previous;", highlighted: true, language: "typescript" },
+        { oldLine: null, newLine: 24, kind: "addition", content: "const cached = next;", highlighted: true, language: "typescript" },
+      ] satisfies DiffLine[],
+    };
+
+    const packet = buildHandoffPacket({
+      intent: "Fix selected feedback",
+      pullRequest: cache.metadata,
+      threads: cache.reviewThreads,
+      files: cache.fileSummaries,
+      diffContextByPath,
+      contextRadius: 1,
+    });
+
+    expect(packet).toMatchObject({
+      intent: "Fix selected feedback",
+      usesLlm: false,
+      appliesChanges: false,
+      pullRequest: {
+        repository: "Resplendent-Data/Narview",
+        number: 12,
+      },
+    });
+    expect(packet.threads[0]).toMatchObject({
+      id: "thread-1",
+      filePath: "src/auth/session.ts",
+      line: 24,
+    });
+    expect(JSON.stringify(packet)).not.toMatch(/openai|gemini|anthropic/i);
+  });
+
+  it("renders handoff Markdown with selected thread context boundaries", () => {
+    const cache = createOverviewFixture();
+    const lines: DiffLine[] = Array.from({ length: 7 }, (_, index) => ({
+      oldLine: index + 20,
+      newLine: index + 20,
+      kind: "context",
+      content: `line ${index + 20}`,
+      highlighted: true,
+      language: "typescript",
+    }));
+    const selected = selectDiffContextLines(lines, 23, 1);
+
+    expect(selected).toEqual(["   22 line 22", "   23 line 23", "   24 line 24"]);
+
+    const markdown = renderHandoffMarkdown(
+      buildHandoffPacket({
+        intent: "Audit risky PR areas",
+        pullRequest: cache.metadata,
+        threads: cache.reviewThreads,
+        files: cache.fileSummaries,
+        diffContextByPath: { "src/auth/session.ts": lines },
+        contextRadius: 1,
+      }),
+    );
+
+    expect(markdown).toContain("Intent: Audit risky PR areas");
+    expect(markdown).toContain("### thread-1");
+    expect(markdown).toContain("```diff");
+    expect(markdown).toContain("- src/auth/session.ts");
+  });
+
+  it("captures custom handoff intent and copies Markdown for selected Review Threads", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(<App />);
+
+    await user.click(screen.getByLabelText("Select src/auth/session.ts"));
+    await user.type(screen.getByLabelText("Custom handoff intent"), "Fix only the stale session cache issue");
+    await user.click(screen.getByRole("button", { name: /copy markdown/i }));
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const markdown = writeText.mock.calls[0][0] as string;
+    expect(markdown).toContain("Intent: Fix only the stale session cache issue");
+    expect(markdown).toContain("### thread-1");
+    expect(markdown).toContain("File: src/auth/session.ts:142");
+    expect(markdown).toContain("LLM used: false");
+    expect(markdown).toContain("Applies code changes: false");
+    expect(await screen.findByText("Copied 1 thread to Markdown.")).toBeInTheDocument();
   });
 
   it("marks Review Threads reviewed locally and distinguishes outdated threads in the UI", async () => {
