@@ -27,6 +27,13 @@ import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Kbd } from "./components/ui/kbd";
 import { type AuthClient, type AuthSession, type OAuthStartResponse, tauriAuthClient } from "./lib/auth";
+import {
+  getPullRequestKey,
+  localReviewSessionClient,
+  parsePullRequestUrl,
+  type ReviewSessionClient,
+  type ReviewSessionSnapshot,
+} from "./lib/review-session";
 import { cn } from "./lib/utils";
 import {
   idleRefreshStatus,
@@ -42,6 +49,7 @@ type Theme = "light" | "dark";
 type AppProps = {
   authClient?: AuthClient;
   workspaceClient?: WorkspaceClient;
+  reviewSessionClient?: ReviewSessionClient;
 };
 
 const checkingSession: AuthSession = {
@@ -144,11 +152,11 @@ function getRefreshBadge(status: RefreshStatus) {
   return { label: "Idle", variant: "muted" as const };
 }
 
-function pullRequestKey(pullRequest: PullRequestSummary) {
-  return `${pullRequest.repository}#${pullRequest.number}`;
-}
-
-export function App({ authClient = tauriAuthClient, workspaceClient = tauriWorkspaceClient }: AppProps) {
+export function App({
+  authClient = tauriAuthClient,
+  workspaceClient = tauriWorkspaceClient,
+  reviewSessionClient = localReviewSessionClient,
+}: AppProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [focusMode, setFocusMode] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -162,8 +170,30 @@ export function App({ authClient = tauriAuthClient, workspaceClient = tauriWorks
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [includeDrafts, setIncludeDrafts] = useState(false);
   const [pullRequests, setPullRequests] = useState<PullRequestSummary[]>([]);
+  const [quickOpenedPullRequest, setQuickOpenedPullRequest] = useState<PullRequestSummary | null>(null);
+  const [quickOpenInput, setQuickOpenInput] = useState("");
+  const [quickOpenError, setQuickOpenError] = useState<string | null>(null);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [selectedPullRequestKey, setSelectedPullRequestKey] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>(idleRefreshStatus);
+  const currentUserKey = authSession.accountLogin ?? "local-user";
+  const routedPullRequests = useMemo(() => {
+    if (!quickOpenedPullRequest) {
+      return pullRequests;
+    }
+
+    const quickOpenKey = getPullRequestKey(quickOpenedPullRequest);
+    return [
+      quickOpenedPullRequest,
+      ...pullRequests.filter((pullRequest) => getPullRequestKey(pullRequest) !== quickOpenKey),
+    ];
+  }, [pullRequests, quickOpenedPullRequest]);
+  const selectedPullRequest =
+    routedPullRequests.find((pullRequest) => getPullRequestKey(pullRequest) === selectedPullRequestKey) ??
+    routedPullRequests[0] ??
+    fallbackPullRequest;
+  const selectedPullRequestDisplay = `${selectedPullRequest.repository} #${selectedPullRequest.number}`;
+  const activePullRequestKey = routedPullRequests.length > 0 ? getPullRequestKey(selectedPullRequest) : null;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -233,6 +263,36 @@ export function App({ authClient = tauriAuthClient, workspaceClient = tauriWorks
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  useEffect(() => {
+    if (authSession.state === "checking" || activePullRequestKey) {
+      return;
+    }
+
+    let active = true;
+    reviewSessionClient.loadLastSession(currentUserKey).then((restored) => {
+      if (!active || !restored) {
+        return;
+      }
+
+      setQuickOpenedPullRequest(restored.pullRequest);
+      setSelectedPullRequestKey(getPullRequestKey(restored.pullRequest));
+      applyReviewSession(restored.snapshot);
+      setSessionNotice("Restored last Review Session.");
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [activePullRequestKey, authSession.state, currentUserKey, reviewSessionClient]);
+
+  useEffect(() => {
+    if (!activePullRequestKey || routedPullRequests.length === 0) {
+      return;
+    }
+
+    void reviewSessionClient.saveSession(currentUserKey, selectedPullRequest, buildReviewSessionSnapshot());
+  }, [activePullRequestKey, currentUserKey, focusMode, includeDrafts, reviewSessionClient, routedPullRequests.length]);
+
   const themeLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
   const activeQueue = useMemo(() => queues[0], []);
   const authBadge = getAuthBadge(authSession);
@@ -288,6 +348,55 @@ export function App({ authClient = tauriAuthClient, workspaceClient = tauriWorks
     }
   };
 
+  function buildReviewSessionSnapshot(): ReviewSessionSnapshot {
+    return {
+      activeQueueId: activeQueue.id,
+      includeDrafts,
+      focusMode,
+      threadKey: `${selectedThread.author}:${selectedThread.file}:${selectedThread.line}`,
+      filePath: selectedThread.file,
+      nearbyLine: selectedThread.line,
+      updatedAtEpochMs: Date.now(),
+    };
+  }
+
+  function applyReviewSession(snapshot: ReviewSessionSnapshot) {
+    setIncludeDrafts(snapshot.includeDrafts);
+    setFocusMode(snapshot.focusMode);
+  }
+
+  async function restoreReviewSessionFor(pullRequest: PullRequestSummary) {
+    const restored = await reviewSessionClient.loadSession(currentUserKey, getPullRequestKey(pullRequest));
+
+    if (restored) {
+      applyReviewSession(restored.snapshot);
+      setSessionNotice(`Restored ${pullRequest.repository} #${pullRequest.number}.`);
+    } else {
+      setSessionNotice(`Started ${pullRequest.repository} #${pullRequest.number}.`);
+    }
+  }
+
+  async function handleSelectPullRequest(pullRequest: PullRequestSummary) {
+    setSelectedPullRequestKey(getPullRequestKey(pullRequest));
+    await restoreReviewSessionFor(pullRequest);
+  }
+
+  const handleQuickOpenPullRequest = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setQuickOpenError(null);
+    setSessionNotice(null);
+
+    try {
+      const pullRequest = parsePullRequestUrl(quickOpenInput);
+      setQuickOpenedPullRequest(pullRequest);
+      setSelectedPullRequestKey(getPullRequestKey(pullRequest));
+      setQuickOpenInput("");
+      await restoreReviewSessionFor(pullRequest);
+    } catch (error) {
+      setQuickOpenError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   async function refreshPullRequests(nextIncludeDrafts = includeDrafts) {
     setWorkspaceBusy(true);
     setWorkspaceError(null);
@@ -313,10 +422,10 @@ export function App({ authClient = tauriAuthClient, workspaceClient = tauriWorks
         return response.status;
       });
       setSelectedPullRequestKey((current) => {
-        if (current && response.pullRequests.some((pullRequest) => pullRequestKey(pullRequest) === current)) {
+        if (current && response.pullRequests.some((pullRequest) => getPullRequestKey(pullRequest) === current)) {
           return current;
         }
-        return response.pullRequests[0] ? pullRequestKey(response.pullRequests[0]) : null;
+        return response.pullRequests[0] ? getPullRequestKey(response.pullRequests[0]) : null;
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -387,11 +496,6 @@ export function App({ authClient = tauriAuthClient, workspaceClient = tauriWorks
   };
 
   const refreshBadge = getRefreshBadge(refreshStatus);
-  const selectedPullRequest =
-    pullRequests.find((pullRequest) => pullRequestKey(pullRequest) === selectedPullRequestKey) ??
-    pullRequests[0] ??
-    fallbackPullRequest;
-  const selectedPullRequestDisplay = `${selectedPullRequest.repository} #${selectedPullRequest.number}`;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -463,6 +567,21 @@ export function App({ authClient = tauriAuthClient, workspaceClient = tauriWorks
                   Save
                 </Button>
               </form>
+              <form className="mt-2 flex gap-2" onSubmit={handleQuickOpenPullRequest} aria-label="Quick open Pull Request">
+                <input
+                  aria-label="Pull Request URL"
+                  className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onChange={(event) => setQuickOpenInput(event.target.value)}
+                  placeholder="github.com/owner/repo/pull/123"
+                  value={quickOpenInput}
+                />
+                <Button size="sm" variant="outline" type="submit" disabled={!quickOpenInput.trim()}>
+                  <GitPullRequest className="h-3.5 w-3.5" aria-hidden="true" />
+                  Open
+                </Button>
+              </form>
+              {quickOpenError && <p className="mt-2 rounded-md bg-destructive/10 p-2 text-xs text-destructive">{quickOpenError}</p>}
+              {sessionNotice && <p className="mt-2 rounded-md bg-emerald-500/10 p-2 text-xs text-emerald-700 dark:text-emerald-300">{sessionNotice}</p>}
               <div className="mt-2 space-y-1">
                 {repositories.length === 0 ? (
                   <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No saved repositories.</p>
@@ -509,14 +628,14 @@ export function App({ authClient = tauriAuthClient, workspaceClient = tauriWorks
             <section className="border-b border-border p-3" aria-label="Open Pull Requests">
               <div className="mb-2 flex items-center justify-between">
                 <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Open Pull Requests</h2>
-                <Badge variant="info">{pullRequests.length}</Badge>
+                <Badge variant="info">{routedPullRequests.length}</Badge>
               </div>
               <div className="max-h-56 space-y-1 overflow-auto">
-                {pullRequests.length === 0 ? (
+                {routedPullRequests.length === 0 ? (
                   <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">Refresh saved repositories to load open Pull Requests.</p>
                 ) : (
-                  pullRequests.map((pullRequest) => {
-                    const isSelected = pullRequestKey(pullRequest) === pullRequestKey(selectedPullRequest);
+                  routedPullRequests.map((pullRequest) => {
+                    const isSelected = getPullRequestKey(pullRequest) === getPullRequestKey(selectedPullRequest);
 
                     return (
                       <button
@@ -525,8 +644,8 @@ export function App({ authClient = tauriAuthClient, workspaceClient = tauriWorks
                           "w-full rounded-md border border-border p-2 text-left hover:bg-accent",
                           isSelected && "border-primary bg-accent text-accent-foreground",
                         )}
-                        key={pullRequestKey(pullRequest)}
-                        onClick={() => setSelectedPullRequestKey(pullRequestKey(pullRequest))}
+                        key={getPullRequestKey(pullRequest)}
+                        onClick={() => void handleSelectPullRequest(pullRequest)}
                         type="button"
                       >
                         <div className="flex items-center justify-between gap-2">

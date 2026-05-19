@@ -1,7 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import type { AuthClient, AuthSession } from "./lib/auth";
+import { parsePullRequestUrl, type ReviewSessionClient, type ReviewSessionSnapshot } from "./lib/review-session";
 import type { PullRequestSummary, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
 
 const signedOutSession: AuthSession = {
@@ -48,6 +49,16 @@ const draftPullRequest: PullRequestSummary = {
   isDraft: true,
   updatedAt: "2026-05-18T13:00:00Z",
   url: "https://github.com/Resplendent-Data/Narview/pull/13",
+};
+
+const restoredSnapshot: ReviewSessionSnapshot = {
+  activeQueueId: "needs-attention",
+  includeDrafts: true,
+  focusMode: true,
+  threadKey: "coderabbitai:src/auth/session.ts:142",
+  filePath: "src/auth/session.ts",
+  nearbyLine: 142,
+  updatedAtEpochMs: 1_800_000_000_000,
 };
 
 const localStorageMock = {
@@ -104,6 +115,15 @@ function createWorkspaceClient(overrides: Partial<WorkspaceClient> = {}): Worksp
         refreshedAtEpochSeconds: 1_800_000_000,
       },
     }),
+    ...overrides,
+  };
+}
+
+function createReviewSessionClient(overrides: Partial<ReviewSessionClient> = {}): ReviewSessionClient {
+  return {
+    saveSession: vi.fn().mockResolvedValue(undefined),
+    loadSession: vi.fn().mockResolvedValue(null),
+    loadLastSession: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
 }
@@ -299,5 +319,86 @@ describe("App shell", () => {
 
     expect(await screen.findByText("Rate limited")).toBeInTheDocument();
     expect(screen.getByText(/GitHub rate limit reached/)).toBeInTheDocument();
+  });
+
+  it("parses github.com Pull Request URLs", () => {
+    expect(parsePullRequestUrl("github.com/Resplendent-Data/Narview/pull/91").repository).toBe("Resplendent-Data/Narview");
+    expect(() => parsePullRequestUrl("https://gitlab.com/acme/api/pull/91")).toThrow("github.com");
+  });
+
+  it("quick-opens a Pull Request URL without saving a repository", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <App
+        authClient={createAuthClient()}
+        workspaceClient={createWorkspaceClient()}
+        reviewSessionClient={createReviewSessionClient()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Pull Request URL"), "https://github.com/Resplendent-Data/Narview/pull/91");
+    await user.click(screen.getByRole("button", { name: /open/i }));
+
+    expect(await screen.findAllByText("Resplendent-Data/Narview #91")).toHaveLength(2);
+    expect(screen.getByText("No saved repositories.")).toBeInTheDocument();
+  });
+
+  it("shows invalid Pull Request URL errors", async () => {
+    const user = userEvent.setup();
+
+    render(<App authClient={createAuthClient()} workspaceClient={createWorkspaceClient()} reviewSessionClient={createReviewSessionClient()} />);
+
+    await user.type(screen.getByLabelText("Pull Request URL"), "https://example.com/acme/api/pull/4");
+    await user.click(screen.getByRole("button", { name: /open/i }));
+
+    expect(await screen.findByText("Narview v1 supports github.com Pull Request URLs.")).toBeInTheDocument();
+  });
+
+  it("restores Review Session context for a Pull Request without progress flags", async () => {
+    const user = userEvent.setup();
+    const reviewSessionClient = createReviewSessionClient({
+      loadSession: vi.fn().mockResolvedValue({
+        pullRequest: readyPullRequest,
+        snapshot: restoredSnapshot,
+      }),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={createWorkspaceClient()}
+        reviewSessionClient={reviewSessionClient}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Pull Request URL"), readyPullRequest.url);
+    await user.click(screen.getByRole("button", { name: /open/i }));
+
+    await user.click(await screen.findByRole("button", { name: /exit focus/i }));
+    expect(screen.getByLabelText("Include draft Pull Requests")).toBeChecked();
+    await waitFor(() => expect(reviewSessionClient.saveSession).toHaveBeenCalled());
+    const savedSnapshot = vi.mocked(reviewSessionClient.saveSession).mock.calls.at(-1)?.[2];
+    expect(JSON.stringify(savedSnapshot)).not.toMatch(/reviewed|viewed/i);
+  });
+
+  it("restores the last active Pull Request after app restart", async () => {
+    const reviewSessionClient = createReviewSessionClient({
+      loadLastSession: vi.fn().mockResolvedValue({
+        pullRequest: readyPullRequest,
+        snapshot: restoredSnapshot,
+      }),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={createWorkspaceClient()}
+        reviewSessionClient={reviewSessionClient}
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: /exit focus/i })).toBeInTheDocument();
+    expect(screen.getAllByText("Resplendent-Data/Narview #12").length).toBeGreaterThan(0);
   });
 });
