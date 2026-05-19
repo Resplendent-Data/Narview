@@ -28,6 +28,16 @@ import { Button } from "./components/ui/button";
 import { Kbd } from "./components/ui/kbd";
 import { type AuthClient, type AuthSession, type OAuthStartResponse, tauriAuthClient } from "./lib/auth";
 import {
+  buildIncrementalFetchPlan,
+  cacheStats,
+  clearFetchedGithubData,
+  readCacheStore,
+  readCachedPullRequest,
+  setCachedPullRequestPinned,
+  upsertCachedPullRequest,
+  type CacheStats,
+} from "./lib/pr-cache";
+import {
   getPullRequestKey,
   localReviewSessionClient,
   parsePullRequestUrl,
@@ -176,6 +186,8 @@ export function App({
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [selectedPullRequestKey, setSelectedPullRequestKey] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>(idleRefreshStatus);
+  const [cacheSummary, setCacheSummary] = useState<CacheStats>(() => cacheStats());
+  const [cacheMessage, setCacheMessage] = useState<string | null>(null);
   const currentUserKey = authSession.accountLogin ?? "local-user";
   const routedPullRequests = useMemo(() => {
     if (!quickOpenedPullRequest) {
@@ -194,6 +206,8 @@ export function App({
     fallbackPullRequest;
   const selectedPullRequestDisplay = `${selectedPullRequest.repository} #${selectedPullRequest.number}`;
   const activePullRequestKey = routedPullRequests.length > 0 ? getPullRequestKey(selectedPullRequest) : null;
+  const selectedCacheEntry = activePullRequestKey ? readCacheStore().entries[activePullRequestKey] : null;
+  const selectedPullRequestPinned = selectedCacheEntry?.pinned ?? false;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -292,6 +306,23 @@ export function App({
 
     void reviewSessionClient.saveSession(currentUserKey, selectedPullRequest, buildReviewSessionSnapshot());
   }, [activePullRequestKey, currentUserKey, focusMode, includeDrafts, reviewSessionClient, routedPullRequests.length]);
+
+  useEffect(() => {
+    if (!activePullRequestKey || routedPullRequests.length === 0) {
+      return;
+    }
+
+    const existing = readCachedPullRequest(activePullRequestKey);
+    upsertCachedPullRequest(selectedPullRequest, {
+      pinned: existing?.pinned ?? false,
+      rateLimit: existing?.rateLimit,
+      reviewThreads: existing?.reviewThreads,
+      fileSummaries: existing?.fileSummaries,
+      checks: existing?.checks,
+    });
+    setCacheSummary(cacheStats());
+    setCacheMessage(existing ? "Offline cache ready." : "Cached Pull Request metadata.");
+  }, [activePullRequestKey, routedPullRequests.length, selectedPullRequest]);
 
   const themeLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
   const activeQueue = useMemo(() => queues[0], []);
@@ -493,6 +524,22 @@ export function App({
     if (authSession.state === "signed-in" && repositories.length > 0) {
       await refreshPullRequests(checked);
     }
+  };
+
+  const handleTogglePin = () => {
+    if (!activePullRequestKey || !selectedCacheEntry) {
+      return;
+    }
+
+    setCachedPullRequestPinned(activePullRequestKey, !selectedPullRequestPinned);
+    setCacheSummary(cacheStats());
+    setCacheMessage(!selectedPullRequestPinned ? "Pinned cache entry." : "Unpinned cache entry.");
+  };
+
+  const handleClearCache = () => {
+    clearFetchedGithubData();
+    setCacheSummary(cacheStats());
+    setCacheMessage("Cleared fetched GitHub cache. Review Session state stays local.");
   };
 
   const refreshBadge = getRefreshBadge(refreshStatus);
@@ -843,6 +890,39 @@ export function App({
                   </div>
                 )}
                 {authError && <p className="rounded-md bg-destructive/10 p-2 text-xs text-destructive" role="status">{authError}</p>}
+              </div>
+            </div>
+
+            <div className="border-b border-border p-3" aria-label="Pull Request cache">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                  PR Cache
+                </div>
+                <Badge variant={selectedPullRequestPinned ? "success" : "muted"}>{selectedPullRequestPinned ? "Pinned" : "Unpinned"}</Badge>
+              </div>
+              <div className="space-y-2 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted-foreground">Entries</span>
+                  <span>{cacheSummary.entries}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted-foreground">Pinned</span>
+                  <span>{cacheSummary.pinned}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted-foreground">Next refresh</span>
+                  <span className="truncate">{buildIncrementalFetchPlan("manual").join(", ")}</span>
+                </div>
+                {cacheMessage && <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">{cacheMessage}</p>}
+                <div className="grid grid-cols-2 gap-2">
+                  <Button variant="outline" size="sm" onClick={handleTogglePin} disabled={!activePullRequestKey || !selectedCacheEntry}>
+                    {selectedPullRequestPinned ? "Unpin" : "Pin"}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleClearCache}>
+                    Clear cache
+                  </Button>
+                </div>
               </div>
             </div>
 

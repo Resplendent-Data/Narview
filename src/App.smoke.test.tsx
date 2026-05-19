@@ -2,6 +2,18 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import type { AuthClient, AuthSession } from "./lib/auth";
+import {
+  buildIncrementalFetchPlan,
+  cacheStats,
+  clearFetchedGithubData,
+  createCachedPullRequest,
+  evictCache,
+  networkRequiredFailure,
+  prCacheStorageKey,
+  readCacheStore,
+  setCachedPullRequestPinned,
+  upsertCachedPullRequest,
+} from "./lib/pr-cache";
 import { parsePullRequestUrl, type ReviewSessionClient, type ReviewSessionSnapshot } from "./lib/review-session";
 import type { PullRequestSummary, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
 
@@ -400,5 +412,69 @@ describe("App shell", () => {
 
     expect(await screen.findByRole("button", { name: /exit focus/i })).toBeInTheDocument();
     expect(screen.getAllByText("Resplendent-Data/Narview #12").length).toBeGreaterThan(0);
+  });
+
+  it("plans incremental fetches before diff content", () => {
+    expect(buildIncrementalFetchPlan("manual")).toEqual(["metadata", "review-threads", "file-summaries", "checks"]);
+    expect(buildIncrementalFetchPlan("manual")).not.toContain("diff-content");
+    expect(buildIncrementalFetchPlan("background")).toEqual(["metadata", "checks"]);
+  });
+
+  it("keeps cached Pull Request data readable offline", () => {
+    upsertCachedPullRequest(readyPullRequest);
+
+    const stored = readCacheStore().entries["Resplendent-Data/Narview#12"];
+
+    expect(stored.metadata.title).toBe("Add checkout guard");
+    expect(stored.reviewThreads).toEqual([]);
+    expect(stored.fileSummaries).toEqual([]);
+    expect(stored.checks).toEqual([]);
+  });
+
+  it("evicts by recency while protecting pinned Pull Requests", () => {
+    const pinned = createCachedPullRequest(readyPullRequest, 10);
+    const old = createCachedPullRequest({ ...readyPullRequest, number: 14, title: "Old" }, 20);
+    const fresh = createCachedPullRequest({ ...readyPullRequest, number: 15, title: "Fresh" }, 30);
+    pinned.pinned = true;
+    pinned.lastAccessedEpochMs = 10;
+    old.lastAccessedEpochMs = 20;
+    fresh.lastAccessedEpochMs = 30;
+
+    const evicted = evictCache(
+      {
+        version: 1,
+        entries: {
+          "Resplendent-Data/Narview#12": pinned,
+          "Resplendent-Data/Narview#14": old,
+          "Resplendent-Data/Narview#15": fresh,
+        },
+      },
+      { maxEntries: 2, maxBytes: Number.MAX_SAFE_INTEGER },
+    );
+
+    expect(evicted.entries["Resplendent-Data/Narview#12"]).toBeDefined();
+    expect(evicted.entries["Resplendent-Data/Narview#14"]).toBeUndefined();
+    expect(evicted.entries["Resplendent-Data/Narview#15"]).toBeDefined();
+  });
+
+  it("pins and clears fetched cache without deleting Review Session state", () => {
+    window.localStorage.setItem("narview.reviewSessions.v1", JSON.stringify({ sessions: { saved: true }, lastByUser: {} }));
+    upsertCachedPullRequest(readyPullRequest);
+    setCachedPullRequestPinned("Resplendent-Data/Narview#12", true);
+
+    expect(cacheStats().pinned).toBe(1);
+
+    clearFetchedGithubData();
+
+    expect(window.localStorage.getItem(prCacheStorageKey)).toContain('"entries":{}');
+    expect(window.localStorage.getItem("narview.reviewSessions.v1")).toContain("saved");
+  });
+
+  it("does not queue GitHub writes while offline", () => {
+    expect(networkRequiredFailure("Resolve thread")).toMatchObject({
+      ok: false,
+      queued: false,
+      message: "Resolve thread requires a live GitHub connection.",
+    });
   });
 });

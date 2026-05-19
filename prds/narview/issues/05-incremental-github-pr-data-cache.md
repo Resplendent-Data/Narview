@@ -1,7 +1,7 @@
 ---
 title: "Incremental GitHub PR Data Cache"
 type: AFK
-status: ready
+status: done
 blocked_by: ["03-workspace-repositories-and-active-pr-list.md", "04-quick-open-pr-and-review-session-resume.md"]
 depends_on_story_ids: [46, 47, 48, 49, 50, 51, 52, 53]
 slice_order: 5
@@ -13,14 +13,14 @@ Implement the local cache and incremental GitHub data fetch model for Pull Reque
 
 ## Acceptance criteria
 
-- [ ] Pull Request metadata, Review Threads, file summaries, and Checks can be cached locally.
-- [ ] Cached data is readable when the network is unavailable.
-- [ ] GitHub writes are not queued while offline and show clear network-required failures.
-- [ ] Cache eviction is bounded by size and recency.
-- [ ] Pinned Pull Requests are protected from normal eviction.
-- [ ] Cache clearing removes fetched GitHub data without deleting Reviewed, Viewed, or Review Session state.
-- [ ] Refresh behavior supports open, focus, manual refresh, and restrained active Pull Request background refresh.
-- [ ] Tests cover incremental fetch ordering, offline reads, eviction, pinning, cache clearing, and rate-limit-aware refresh.
+- [x] Pull Request metadata, Review Threads, file summaries, and Checks can be cached locally.
+- [x] Cached data is readable when the network is unavailable.
+- [x] GitHub writes are not queued while offline and show clear network-required failures.
+- [x] Cache eviction is bounded by size and recency.
+- [x] Pinned Pull Requests are protected from normal eviction.
+- [x] Cache clearing removes fetched GitHub data without deleting Reviewed, Viewed, or Review Session state.
+- [x] Refresh behavior supports open, focus, manual refresh, and restrained active Pull Request background refresh.
+- [x] Tests cover incremental fetch ordering, offline reads, eviction, pinning, cache clearing, and rate-limit-aware refresh.
 
 ## Blocked by
 
