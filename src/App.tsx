@@ -111,6 +111,18 @@ type AppProps = {
   threadActionClient?: ThreadActionClient;
 };
 
+type CommandPaletteItem = {
+  id: string;
+  category: "Navigation" | "Review" | "Filters" | "Files" | "Bulk" | "Handoff";
+  label: string;
+  description: string;
+  shortcut?: string;
+  disabled?: boolean;
+  disabledReason?: string;
+  keywords?: string[];
+  run: () => void | Promise<void>;
+};
+
 type QueueButton = {
   id: string;
   label: string;
@@ -149,14 +161,10 @@ const selectedThread = {
     "The rotated token path can still reuse the previous session cache entry. Consider invalidating the session record before returning the new credential.",
 };
 
-const commands = [
-  { label: "Next review thread", shortcut: "J" },
-  { label: "Previous review thread", shortcut: "K" },
-  { label: "Mark thread reviewed", shortcut: "R" },
-  { label: "Resolve thread", shortcut: "E" },
-  { label: "Focus file diff", shortcut: "O" },
-  { label: "Toggle focus mode", shortcut: "F" },
-  { label: "Copy handoff packet", shortcut: "H" },
+const handoffIntentOptions = [
+  { value: "Fix selected feedback", label: "Fix selected feedback" },
+  { value: "Explain why selected feedback is not applied", label: "Explain why feedback is not applied" },
+  { value: "Audit the risky parts of this pull request", label: "Audit risky PR areas" },
 ];
 
 const fallbackPullRequest: PullRequestSummary = {
@@ -310,6 +318,29 @@ function isEditableTarget(target: EventTarget | null) {
   return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable;
 }
 
+function commandMatchesQuery(command: CommandPaletteItem, query: string) {
+  if (!query) {
+    return true;
+  }
+
+  const haystack = [
+    command.category,
+    command.label,
+    command.description,
+    command.shortcut,
+    command.disabledReason,
+    ...(command.keywords ?? []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .every((term) => haystack.includes(term));
+}
+
 function createOverviewCache(pullRequest: PullRequestSummary, cached?: CachedPullRequestData): CachedPullRequestData {
   const normalizedCached = cached
     ? {
@@ -429,6 +460,7 @@ export function App({
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [focusMode, setFocusMode] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
   const [authSession, setAuthSession] = useState<AuthSession>(checkingSession);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -1225,13 +1257,277 @@ export function App({
     }
   };
 
+  const openCommandPalette = () => {
+    setCommandQuery("");
+    setCommandOpen(true);
+  };
+
+  const closeCommandPalette = () => {
+    setCommandOpen(false);
+    setCommandQuery("");
+  };
+
+  const noActiveThreadReason = "No Review Thread is selected.";
+  const noVisibleThreadReason = "No Review Threads match the current filters.";
+  const noSelectedBulkReason = "Select one or more Review Threads first.";
+  const noSelectedFileReason = "No file change is selected.";
+  const commandItems: CommandPaletteItem[] = [
+    {
+      id: "navigation.next-thread",
+      category: "Navigation",
+      label: "Next Review Thread",
+      description: `Move to the next visible Review Thread in ${activeQueue.label}.`,
+      shortcut: "J",
+      disabled: filteredReviewThreads.length === 0,
+      disabledReason: noVisibleThreadReason,
+      keywords: ["review path", "queue"],
+      run: () => moveReviewThread(1),
+    },
+    {
+      id: "navigation.previous-thread",
+      category: "Navigation",
+      label: "Previous Review Thread",
+      description: `Move to the previous visible Review Thread in ${activeQueue.label}.`,
+      shortcut: "K",
+      disabled: filteredReviewThreads.length === 0,
+      disabledReason: noVisibleThreadReason,
+      keywords: ["review path", "queue"],
+      run: () => moveReviewThread(-1),
+    },
+    {
+      id: "navigation.open-active-file",
+      category: "Navigation",
+      label: "Open Active Thread File",
+      description: activeThreadFile ? `Show ${activeThreadFile} in the diff viewer.` : "Show the active Review Thread file in the diff viewer.",
+      shortcut: "O",
+      disabled: !selectedReviewThread,
+      disabledReason: noActiveThreadReason,
+      keywords: ["diff", "file"],
+      run: () => {
+        if (selectedReviewThread) {
+          openThreadFileInDiff(selectedReviewThread.id);
+        }
+      },
+    },
+    {
+      id: "navigation.toggle-focus",
+      category: "Navigation",
+      label: focusMode ? "Exit Focus Mode" : "Enter Focus Mode",
+      description: focusMode ? "Restore the Review Map and Inspector." : "Hide side panels and keep the Review Canvas centered.",
+      shortcut: "F",
+      keywords: ["layout", "canvas"],
+      run: () => setFocusMode((current) => !current),
+    },
+    {
+      id: "review.toggle-reviewed",
+      category: "Review",
+      label: selectedReviewThread?.reviewed ? "Mark Active Review Thread Unreviewed" : "Mark Active Review Thread Reviewed",
+      description: "Update the local per-user Reviewed checklist state.",
+      shortcut: "R",
+      disabled: !selectedReviewThread,
+      disabledReason: noActiveThreadReason,
+      keywords: ["checklist", "local"],
+      run: () => handleSetSelectedThreadReviewed(!(selectedReviewThread?.reviewed ?? false)),
+    },
+    {
+      id: "review.reply-focus",
+      category: "Review",
+      label: "Focus Reply Composer",
+      description: "Move the cursor to the active Review Thread reply field.",
+      shortcut: "⇧R",
+      disabled: !selectedReviewThread,
+      disabledReason: noActiveThreadReason,
+      keywords: ["comment", "thread"],
+      run: focusReplyField,
+    },
+    {
+      id: "review.resolve-toggle",
+      category: "Review",
+      label: threadResolveAction === "unresolve" ? "Unresolve Active Review Thread" : "Resolve Active Review Thread",
+      description: "Run the same GitHub thread action as the Inspector button.",
+      shortcut: "E",
+      disabled: !selectedReviewThread || threadActionBusy !== null,
+      disabledReason: !selectedReviewThread ? noActiveThreadReason : "A GitHub Review Thread action is already running.",
+      keywords: ["github", "thread"],
+      run: () => void runThreadAction(threadResolveAction),
+    },
+    ...queueButtons.map((queue) => ({
+      id: `filters.queue.${queue.id}`,
+      category: "Filters" as const,
+      label: `Filter Queue: ${queue.label}`,
+      description: `Show ${queue.count} Review Thread${queue.count === 1 ? "" : "s"} for ${queue.label}.`,
+      keywords: ["review queue", queue.id],
+      run: () => applyReviewQueueFilters(queue.filters),
+    })),
+    {
+      id: "filters.queue.all",
+      category: "Filters",
+      label: "Clear Review Queue Filters",
+      description: "Show all Review Threads regardless of source, reviewed state, or GitHub state.",
+      disabled: filtersMatch(reviewQueueFilters, defaultReviewQueueFilters),
+      disabledReason: "All Review Threads are already visible.",
+      keywords: ["reset", "all"],
+      run: () => applyReviewQueueFilters(defaultReviewQueueFilters),
+    },
+    {
+      id: "filters.files.unviewed",
+      category: "Filters",
+      label: "Show Unviewed Files",
+      description: "Filter File Changes to files that still need review.",
+      keywords: ["file changes", "viewed"],
+      run: () => updateFileChangeFilter("viewed", "unviewed"),
+    },
+    {
+      id: "filters.files.text",
+      category: "Filters",
+      label: "Show Text Files",
+      description: "Filter File Changes to text diffs.",
+      keywords: ["file changes", "kind"],
+      run: () => updateFileChangeFilter("kind", "text"),
+    },
+    {
+      id: "filters.files.all",
+      category: "Filters",
+      label: "Clear File Filters",
+      description: "Show every file change for the active Pull Request.",
+      disabled: fileChangeFilters.viewed === "all" && fileChangeFilters.kind === "all",
+      disabledReason: "All File Changes are already visible.",
+      keywords: ["reset", "files"],
+      run: () => setFileChangeFilters(defaultFileChangeFilters),
+    },
+    {
+      id: "files.view-whole",
+      category: "Files",
+      label: "View Whole Selected File",
+      description: selectedFileChange ? `Load all visible context for ${selectedFileChange.file.path}.` : "Load all visible context for the selected file.",
+      disabled: !selectedFileChange || Boolean(selectedFileDiffState?.fullFileLines),
+      disabledReason: !selectedFileChange ? noSelectedFileReason : "The whole selected file is already visible.",
+      keywords: ["diff", "context"],
+      run: () => {
+        if (selectedFileChange) {
+          fetchWholeFile(selectedFileChange.id);
+        }
+      },
+    },
+    ...fileChangeViews.slice(0, 8).map((view) => ({
+      id: `files.jump.${view.id}`,
+      category: "Files" as const,
+      label: `Jump To File: ${view.file.path}`,
+      description: `${getFileStatusLabel(view.file.status)} ${getFileLineLabel(view.file)} lines, ${view.kind} diff.`,
+      keywords: ["file changes", view.file.path],
+      run: () => setSelectedFileChangeId(view.id),
+    })),
+    {
+      id: "bulk.select-visible",
+      category: "Bulk",
+      label: allFilteredThreadsSelected ? "Clear Visible Review Thread Selection" : "Select Visible Review Threads",
+      description: allFilteredThreadsSelected
+        ? "Remove visible Review Threads from the bulk selection."
+        : `Select ${filteredReviewThreads.length} visible Review Thread${filteredReviewThreads.length === 1 ? "" : "s"}.`,
+      shortcut: "A",
+      disabled: filteredReviewThreads.length === 0,
+      disabledReason: noVisibleThreadReason,
+      keywords: ["bulk actions"],
+      run: () => toggleAllFilteredThreadSelection(!allFilteredThreadsSelected),
+    },
+    {
+      id: "bulk.clear-selection",
+      category: "Bulk",
+      label: "Clear Selected Review Threads",
+      description: "Remove every Review Thread from the bulk selection.",
+      disabled: selectedBulkThreadIds.length === 0,
+      disabledReason: noSelectedBulkReason,
+      keywords: ["bulk actions"],
+      run: () => setSelectedBulkThreadIds([]),
+    },
+    {
+      id: "bulk.mark-reviewed",
+      category: "Bulk",
+      label: "Bulk Mark Selected Reviewed",
+      description: "Apply the local Reviewed checklist state to selected Review Threads.",
+      disabled: selectedBulkThreads.length === 0,
+      disabledReason: noSelectedBulkReason,
+      keywords: ["bulk actions", "checklist"],
+      run: () => applyBulkReviewedState(true),
+    },
+    {
+      id: "bulk.mark-unreviewed",
+      category: "Bulk",
+      label: "Bulk Mark Selected Unreviewed",
+      description: "Undo the local Reviewed checklist state for selected Review Threads.",
+      disabled: selectedBulkThreads.length === 0,
+      disabledReason: noSelectedBulkReason,
+      keywords: ["bulk actions", "checklist"],
+      run: () => applyBulkReviewedState(false),
+    },
+    {
+      id: "bulk.resolve",
+      category: "Bulk",
+      label: "Bulk Resolve Selected On GitHub",
+      description: "Open the explicit confirmation dialog before resolving selected Review Threads.",
+      disabled: selectedBulkThreads.length === 0 || threadActionBusy !== null,
+      disabledReason: selectedBulkThreads.length === 0 ? noSelectedBulkReason : "A GitHub Review Thread action is already running.",
+      keywords: ["bulk actions", "github"],
+      run: () => setBulkConfirmAction("resolve"),
+    },
+    {
+      id: "bulk.unresolve",
+      category: "Bulk",
+      label: "Bulk Unresolve Selected On GitHub",
+      description: "Open the explicit confirmation dialog before unresolving selected Review Threads.",
+      disabled: selectedBulkThreads.length === 0 || threadActionBusy !== null,
+      disabledReason: selectedBulkThreads.length === 0 ? noSelectedBulkReason : "A GitHub Review Thread action is already running.",
+      keywords: ["bulk actions", "github"],
+      run: () => setBulkConfirmAction("unresolve"),
+    },
+    {
+      id: "handoff.copy",
+      category: "Handoff",
+      label: "Copy Handoff Packet Markdown",
+      description: `Copy ${handoffPacket.threads.length} selected Review Thread${handoffPacket.threads.length === 1 ? "" : "s"} with PR metadata and diff context.`,
+      shortcut: "H",
+      disabled: handoffPacket.threads.length === 0,
+      disabledReason: "Select a Review Thread before creating a Handoff Packet.",
+      keywords: ["handoff packet", "markdown"],
+      run: () => void copyHandoffMarkdown(),
+    },
+    ...handoffIntentOptions.map((option) => ({
+      id: `handoff.intent.${option.value}`,
+      category: "Handoff" as const,
+      label: `Use Handoff Intent: ${option.label}`,
+      description: "Set the structured Handoff Packet intent without making any LLM calls.",
+      keywords: ["handoff packet", "intent"],
+      run: () => {
+        setHandoffIntentPreset(option.value);
+        setHandoffCustomIntent("");
+      },
+    })),
+  ];
+  const normalizedCommandQuery = commandQuery.trim();
+  const filteredCommandItems = commandItems.filter((command) => commandMatchesQuery(command, normalizedCommandQuery));
+  const groupedCommandItems = (["Navigation", "Review", "Filters", "Files", "Bulk", "Handoff"] satisfies CommandPaletteItem["category"][])
+    .map((category) => ({
+      category,
+      commands: filteredCommandItems.filter((command) => command.category === category),
+    }))
+    .filter((group) => group.commands.length > 0);
+
+  const runPaletteCommand = (command: CommandPaletteItem) => {
+    if (command.disabled) {
+      return;
+    }
+
+    closeCommandPalette();
+    void command.run();
+  };
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
       const commandPalette = (event.metaKey || event.ctrlKey) && key === "k";
       if (commandPalette) {
         event.preventDefault();
-        setCommandOpen(true);
+        openCommandPalette();
         return;
       }
 
@@ -1262,6 +1558,9 @@ export function App({
       } else if (key === "h") {
         event.preventDefault();
         void copyHandoffMarkdown();
+      } else if (key === "a") {
+        event.preventDefault();
+        toggleAllFilteredThreadSelection(!allFilteredThreadsSelected);
       } else if (key === "f") {
         event.preventDefault();
         setFocusMode((current) => !current);
@@ -1270,7 +1569,7 @@ export function App({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [moveReviewThread, openThreadFileInDiff, selectedReviewThread, threadResolveAction]);
+  }, [allFilteredThreadsSelected, moveReviewThread, openThreadFileInDiff, openCommandPalette, selectedReviewThread, threadResolveAction]);
 
   const refreshBadge = getRefreshBadge(refreshStatus);
 
@@ -1307,7 +1606,7 @@ export function App({
               Sign in
             </Button>
           )}
-          <Button variant="outline" size="sm" onClick={() => setCommandOpen(true)}>
+          <Button variant="outline" size="sm" onClick={openCommandPalette}>
             <Command className="h-3.5 w-3.5" aria-hidden="true" />
             Command
             <Kbd>⌘K</Kbd>
@@ -1516,7 +1815,7 @@ export function App({
                     onChange={(event) => toggleAllFilteredThreadSelection(event.target.checked)}
                     type="checkbox"
                   />
-                  Select visible
+                  Select visible <Kbd>A</Kbd>
                 </label>
                 {selectedBulkThreadIds.length > 0 && <span>{selectedBulkThreadIds.length} selected</span>}
               </div>
@@ -1928,6 +2227,8 @@ export function App({
                 <span>Reply <Kbd>⇧R</Kbd></span>
                 <span>Open file <Kbd>O</Kbd></span>
                 <span>Focus <Kbd>F</Kbd></span>
+                <span>Select visible <Kbd>A</Kbd></span>
+                <span>Handoff <Kbd>H</Kbd></span>
               </div>
             </div>
           </div>
@@ -2009,9 +2310,11 @@ export function App({
                   onChange={(event) => setHandoffIntentPreset(event.target.value)}
                   value={handoffIntentPreset}
                 >
-                  <option value="Fix selected feedback">Fix selected feedback</option>
-                  <option value="Explain why selected feedback is not applied">Explain why feedback is not applied</option>
-                  <option value="Audit the risky parts of this pull request">Audit risky PR areas</option>
+                  {handoffIntentOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
                 </select>
               </label>
               <textarea
@@ -2199,7 +2502,7 @@ export function App({
         </Dialog.Portal>
       </Dialog.Root>
 
-      <Dialog.Root open={commandOpen} onOpenChange={setCommandOpen}>
+      <Dialog.Root open={commandOpen} onOpenChange={(open) => (open ? setCommandOpen(true) : closeCommandPalette())}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 bg-background/70 backdrop-blur-sm" />
           <Dialog.Content className="fixed left-1/2 top-20 w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-2 shadow-xl">
@@ -2209,16 +2512,48 @@ export function App({
             </Dialog.Description>
             <div className="flex h-10 items-center gap-2 border-b border-border px-2">
               <Search className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-              <input className="h-full flex-1 bg-transparent text-sm outline-none" placeholder="Search commands" aria-label="Search commands" />
+              <input
+                autoFocus
+                className="h-full flex-1 bg-transparent text-sm outline-none"
+                onChange={(event) => setCommandQuery(event.target.value)}
+                placeholder="Search commands"
+                aria-label="Search commands"
+                value={commandQuery}
+              />
               <Kbd>Esc</Kbd>
             </div>
-            <div className="py-2">
-              {commands.map((command) => (
-                <button className="flex h-9 w-full items-center justify-between rounded-md px-2 text-left text-sm hover:bg-accent" key={command.label} type="button">
-                  <span>{command.label}</span>
-                  <Kbd>{command.shortcut}</Kbd>
-                </button>
-              ))}
+            <div className="max-h-[70vh] overflow-auto py-2">
+              {groupedCommandItems.length === 0 ? (
+                <p className="px-2 py-6 text-center text-sm text-muted-foreground" role="status">
+                  No commands match.
+                </p>
+              ) : (
+                groupedCommandItems.map((group) => (
+                  <div className="py-1" key={group.category} role="group" aria-label={`${group.category} commands`}>
+                    <p className="px-2 pb-1 text-xs font-semibold uppercase tracking-normal text-muted-foreground">{group.category}</p>
+                    {group.commands.map((command) => (
+                      <button
+                        aria-disabled={command.disabled ? "true" : "false"}
+                        className={cn(
+                          "flex min-h-12 w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-sm hover:bg-accent",
+                          command.disabled && "cursor-not-allowed opacity-55 hover:bg-transparent",
+                        )}
+                        key={command.id}
+                        onClick={() => runPaletteCommand(command)}
+                        type="button"
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate font-medium">{command.label}</span>
+                          <span className="block truncate text-xs text-muted-foreground">
+                            {command.disabled && command.disabledReason ? command.disabledReason : command.description}
+                          </span>
+                        </span>
+                        {command.shortcut && <Kbd>{command.shortcut}</Kbd>}
+                      </button>
+                    ))}
+                  </div>
+                ))
+              )}
             </div>
           </Dialog.Content>
         </Dialog.Portal>

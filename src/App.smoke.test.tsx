@@ -316,7 +316,61 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: /command/i }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByText("Next review thread")).toBeInTheDocument();
+    expect(screen.getByText("Next Review Thread")).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await user.keyboard("{Control>}k{/Control}");
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText("Copy Handoff Packet Markdown")).toBeInTheDocument();
+    expect(screen.getAllByText("J").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("H").length).toBeGreaterThan(0);
+  });
+
+  it("searches command palette commands and runs queue filters", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /command/i }));
+    await user.type(screen.getByLabelText("Search commands"), "human threads");
+
+    expect(screen.queryByText("Next Review Thread")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /filter queue: human threads/i }));
+
+    expect(screen.getByLabelText("Source")).toHaveValue("human");
+  });
+
+  it("explains unavailable command palette actions", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /command/i }));
+    await user.type(screen.getByLabelText("Search commands"), "bulk resolve");
+
+    const bulkResolve = screen.getByRole("button", { name: /bulk resolve selected on github/i });
+    expect(bulkResolve).toHaveAttribute("aria-disabled", "true");
+    expect(bulkResolve).toHaveTextContent("Select one or more Review Threads first.");
+
+    await user.click(bulkResolve);
+    expect(screen.queryByText("Confirm bulk resolve")).not.toBeInTheDocument();
+  });
+
+  it("runs command palette actions through the same review handlers as visible controls", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+    render(<App threadActionClient={threadActionClient} />);
+
+    await user.click(screen.getByRole("button", { name: /command/i }));
+    await user.type(screen.getByLabelText("Search commands"), "mark active reviewed");
+    await user.click(screen.getByRole("button", { name: /mark active review thread reviewed/i }));
+
+    expect(await screen.findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /command/i }));
+    await user.type(screen.getByLabelText("Search commands"), "resolve active");
+    await user.click(screen.getByRole("button", { name: /resolve active review thread/i }));
+
+    expect(threadActionClient.resolve).toHaveBeenCalledWith("thread-1");
   });
 
   it("toggles dark theme from the theme control", async () => {
@@ -948,6 +1002,9 @@ describe("App shell", () => {
 
     await user.keyboard("e");
     expect(threadActionClient.resolve).toHaveBeenCalledWith("thread-1");
+
+    await user.keyboard("a");
+    expect(screen.getByText("3 selected")).toBeInTheDocument();
 
     await user.keyboard("{Shift>}R{/Shift}");
     expect(screen.getByLabelText("Reply body")).toHaveFocus();
