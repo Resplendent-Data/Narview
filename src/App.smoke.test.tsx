@@ -3,6 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import type { AuthClient, AuthSession } from "./lib/auth";
 import {
+  buildFileChangeViews,
+  fileChangeStorageKey,
+  filterFileChanges,
+  setFileChangeViewed,
+  syncFileChanges,
+  type FileChangeFilters,
+} from "./lib/file-changes";
+import {
   buildIncrementalFetchPlan,
   cacheStats,
   clearFetchedGithubData,
@@ -253,6 +261,14 @@ function createQueueThreads(): CachedPullRequestData["reviewThreads"] {
       body: "This comment belongs to an older diff hunk.",
       updatedAt: "2026-05-18T12:02:00Z",
     },
+  ];
+}
+
+function createFileSummaries(): CachedPullRequestData["fileSummaries"] {
+  return [
+    { path: "src/auth/session.ts", additions: 160, deletions: 55, status: "modified" },
+    { path: "assets/review-map.png", additions: 0, deletions: 0, status: "binary" },
+    { path: "notebooks/review-findings.ipynb", additions: 0, deletions: 0, status: "modified" },
   ];
 }
 
@@ -738,6 +754,61 @@ describe("App shell", () => {
     expect(filterReviewThreads(views, { origin: "all", reviewed: "all", state: "current" }).map((view) => view.id)).not.toContain(
       "thread-outdated",
     );
+  });
+
+  it("stores viewed state per user and File Change identity with recovery context", () => {
+    const files = createFileSummaries();
+    syncFileChanges("octocat", "Resplendent-Data/Narview#12", files);
+    const views = buildFileChangeViews("octocat", "Resplendent-Data/Narview#12", files);
+    setFileChangeViewed("octocat", views[0].id, true, 1_800_000_000_000);
+
+    const store = JSON.parse(window.localStorage.getItem(fileChangeStorageKey) ?? "{}");
+    const storedFile = store.users.octocat[views[0].id];
+
+    expect(storedFile.viewed).toBe(true);
+    expect(storedFile.recoveryContext).toMatchObject({
+      pullRequestKey: "Resplendent-Data/Narview#12",
+      path: "src/auth/session.ts",
+      status: "modified",
+      additions: 160,
+      deletions: 55,
+      kind: "text",
+    });
+    expect(buildFileChangeViews("monalisa", "Resplendent-Data/Narview#12", files)[0].viewed).toBe(false);
+  });
+
+  it("filters File Changes by viewed state and binary or non-text awareness", () => {
+    const files = createFileSummaries();
+    syncFileChanges("octocat", "Resplendent-Data/Narview#12", files);
+    const initialViews = buildFileChangeViews("octocat", "Resplendent-Data/Narview#12", files);
+    setFileChangeViewed("octocat", initialViews[0].id, true, 1_800_000_000_000);
+    const views = buildFileChangeViews("octocat", "Resplendent-Data/Narview#12", files);
+    const selectPaths = (filters: FileChangeFilters) => filterFileChanges(views, filters).map((view) => view.file.path);
+
+    expect(selectPaths({ viewed: "viewed", kind: "all" })).toEqual(["src/auth/session.ts"]);
+    expect(selectPaths({ viewed: "unviewed", kind: "all" })).toEqual(["assets/review-map.png", "notebooks/review-findings.ipynb"]);
+    expect(selectPaths({ viewed: "all", kind: "image" })).toEqual(["assets/review-map.png"]);
+    expect(selectPaths({ viewed: "all", kind: "non-text" })).toEqual(["notebooks/review-findings.ipynb"]);
+  });
+
+  it("marks File Changes viewed locally without marking Review Threads reviewed", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const fileList = screen.getByLabelText("File changes");
+
+    expect(within(fileList).getByText("assets/review-map.png")).toBeInTheDocument();
+    expect(within(fileList).getByText("Image fallback")).toBeInTheDocument();
+    expect(within(fileList).getByText("notebooks/review-findings.ipynb")).toBeInTheDocument();
+    expect(within(fileList).getByText("Non-text fallback")).toBeInTheDocument();
+
+    await user.click(within(fileList).getByRole("button", { name: /mark src\/auth\/session\.ts viewed/i }));
+
+    expect(window.localStorage.getItem(fileChangeStorageKey)).toContain('"viewed":true');
+    expect(JSON.parse(window.localStorage.getItem(reviewQueueStorageKey) ?? "{}").users["local-user"]["thread-1"].reviewed).toBe(false);
+
+    await user.selectOptions(within(fileList).getByLabelText("File viewed"), "viewed");
+    expect(within(fileList).getByText("src/auth/session.ts")).toBeInTheDocument();
+    expect(within(fileList).queryByText("src/review/queue.ts")).not.toBeInTheDocument();
   });
 
   it("marks Review Threads reviewed locally and distinguishes outdated threads in the UI", async () => {

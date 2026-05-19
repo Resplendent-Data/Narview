@@ -35,10 +35,22 @@ import {
   readCachedPullRequest,
   setCachedPullRequestPinned,
   upsertCachedPullRequest,
+  type CachedFileSummary,
   type CachedPullRequestData,
   type CachedReviewThread,
   type CacheStats,
 } from "./lib/pr-cache";
+import {
+  buildFileChangeCounts,
+  buildFileChangeViews,
+  defaultFileChangeFilters,
+  filterFileChanges,
+  readFileChangeStore,
+  setFileChangeViewed,
+  syncFileChanges,
+  type FileChangeFilters,
+  type FileKind,
+} from "./lib/file-changes";
 import { buildReviewOverview, type RepositoryHotspotOverride } from "./lib/review-overview";
 import {
   buildReviewQueueCounts,
@@ -103,11 +115,12 @@ const checkingSession: AuthSession = {
   tokenHint: null,
 };
 
-const files = [
-  { path: "src/auth/session.ts", status: "modified", lines: "+128 -86", viewed: false },
-  { path: "src/review/queue.ts", status: "modified", lines: "+94 -21", viewed: true },
-  { path: "src-tauri/src/github.rs", status: "added", lines: "+188", viewed: false },
-  { path: "assets/review-map.png", status: "binary", lines: "binary", viewed: false },
+const fallbackFileSummaries: CachedFileSummary[] = [
+  { path: "src/auth/session.ts", additions: 128, deletions: 86, status: "modified" },
+  { path: "src/review/queue.ts", additions: 94, deletions: 21, status: "modified" },
+  { path: "src-tauri/src/github.rs", additions: 188, deletions: 0, status: "added" },
+  { path: "assets/review-map.png", additions: 0, deletions: 0, status: "binary" },
+  { path: "notebooks/review-findings.ipynb", additions: 0, deletions: 0, status: "modified" },
 ];
 
 const selectedThread = {
@@ -222,6 +235,27 @@ function getThreadStateLabel(state: "unresolved" | "resolved" | "outdated") {
   return "Outdated";
 }
 
+function getFileStatusLabel(status: CachedFileSummary["status"]) {
+  return status[0].toUpperCase() + status.slice(1);
+}
+
+function getFileKindLabel(kind: FileKind) {
+  if (kind === "non-text") {
+    return "Non-text";
+  }
+  return kind[0].toUpperCase() + kind.slice(1);
+}
+
+function getFileLineLabel(file: CachedFileSummary) {
+  if (file.status === "binary" && file.additions + file.deletions === 0) {
+    return "binary";
+  }
+
+  const additions = file.additions > 0 ? `+${file.additions}` : "+0";
+  const deletions = file.deletions > 0 ? `-${file.deletions}` : "-0";
+  return `${additions} ${deletions}`;
+}
+
 function getThreadTitle(body: string) {
   const firstLine = body.split("\n")[0]?.trim() ?? "";
   const firstSentence = firstLine.split(".")[0]?.trim() ?? "";
@@ -297,12 +331,7 @@ function createOverviewCache(pullRequest: PullRequestSummary, cached?: CachedPul
         updatedAt: pullRequest.updatedAt,
       },
     ],
-    fileSummaries: files.map((file) => ({
-      path: file.path,
-      additions: Number(file.lines.match(/\+(\d+)/)?.[1] ?? 0),
-      deletions: Number(file.lines.match(/-(\d+)/)?.[1] ?? 0),
-      status: file.status === "binary" ? "binary" : file.status === "added" ? "added" : "modified",
-    })),
+    fileSummaries: fallbackFileSummaries,
     checks: [
       {
         name: "build",
@@ -374,6 +403,8 @@ export function App({
   const [selectedReviewThreadId, setSelectedReviewThreadId] = useState<string | null>(null);
   const [reviewQueueFilters, setReviewQueueFilters] = useState<ReviewQueueFilters>(defaultReviewQueueFilters);
   const [reviewQueueRevision, setReviewQueueRevision] = useState(0);
+  const [fileChangeFilters, setFileChangeFilters] = useState<FileChangeFilters>(defaultFileChangeFilters);
+  const [fileChangeRevision, setFileChangeRevision] = useState(0);
   const [threadStateOverrides, setThreadStateOverrides] = useState<Record<string, CachedReviewThread["state"]>>({});
   const [replyDraft, setReplyDraft] = useState("");
   const [threadActionBusy, setThreadActionBusy] = useState<ThreadWriteAction | null>(null);
@@ -419,7 +450,11 @@ export function App({
   const reviewThreadSignature = reviewOverviewCache.reviewThreads
     .map((thread) => `${thread.id}:${thread.state}:${thread.updatedAt}`)
     .join("|");
+  const fileChangeSignature = reviewOverviewCache.fileSummaries
+    .map((file) => `${file.path}:${file.status}:${file.additions}:${file.deletions}`)
+    .join("|");
   const reviewQueueStore = useMemo(() => readReviewQueueStore(), [reviewQueueRevision]);
+  const fileChangeStore = useMemo(() => readFileChangeStore(), [fileChangeRevision]);
   const baseReviewThreadViews = buildReviewThreadViews(
     currentUserKey,
     getPullRequestKey(selectedPullRequest),
@@ -443,6 +478,14 @@ export function App({
   });
   const filteredReviewThreads = filterReviewThreads(reviewThreadViews, reviewQueueFilters);
   const reviewQueueCounts = buildReviewQueueCounts(reviewThreadViews);
+  const fileChangeViews = buildFileChangeViews(
+    currentUserKey,
+    getPullRequestKey(selectedPullRequest),
+    reviewOverviewCache.fileSummaries,
+    fileChangeStore,
+  );
+  const filteredFileChanges = filterFileChanges(fileChangeViews, fileChangeFilters);
+  const fileChangeCounts = buildFileChangeCounts(fileChangeViews);
   const queueButtons: QueueButton[] = [
     {
       id: "needs-attention",
@@ -632,6 +675,11 @@ export function App({
     syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
     setReviewQueueRevision((current) => current + 1);
   }, [currentUserKey, reviewThreadSignature, selectedPullRequest]);
+
+  useEffect(() => {
+    syncFileChanges(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.fileSummaries);
+    setFileChangeRevision((current) => current + 1);
+  }, [currentUserKey, fileChangeSignature, selectedPullRequest]);
 
   useEffect(() => {
     setThreadActionResult(null);
@@ -865,8 +913,24 @@ export function App({
     }));
   };
 
+  const updateFileChangeFilter = <Key extends keyof FileChangeFilters>(
+    key: Key,
+    value: FileChangeFilters[Key],
+  ) => {
+    setFileChangeFilters((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  };
+
   const applyReviewQueueFilters = (filters: ReviewQueueFilters) => {
     setReviewQueueFilters(filters);
+  };
+
+  const handleSetFileChangeViewed = (fileChangeId: string, viewed: boolean) => {
+    syncFileChanges(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.fileSummaries);
+    setFileChangeViewed(currentUserKey, fileChangeId, viewed);
+    setFileChangeRevision((current) => current + 1);
   };
 
   const handleSetSelectedThreadReviewed = (reviewed: boolean) => {
@@ -1377,16 +1441,84 @@ export function App({
               </div>
             </section>
 
-            <section className="p-3">
-              <h2 className="mb-2 text-xs font-semibold uppercase tracking-normal text-muted-foreground">File changes</h2>
-              <div className="space-y-1">
-                {files.map((file) => (
-                  <button className="flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-accent" key={file.path} type="button">
-                    {file.viewed ? <Eye className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" /> : <FileCode2 className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />}
-                    <span className="min-w-0 flex-1 truncate">{file.path}</span>
-                    <span className="text-xs text-muted-foreground">{file.lines}</span>
-                  </button>
-                ))}
+            <section className="p-3" aria-label="File changes">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">File changes</h2>
+                <Badge variant="info">
+                  {fileChangeCounts.viewed}/{fileChangeCounts.total} viewed
+                </Badge>
+              </div>
+              <div className="mb-2 grid grid-cols-2 gap-2">
+                <label className="text-xs text-muted-foreground">
+                  Viewed
+                  <select
+                    aria-label="File viewed"
+                    className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground"
+                    onChange={(event) => updateFileChangeFilter("viewed", event.target.value as FileChangeFilters["viewed"])}
+                    value={fileChangeFilters.viewed}
+                  >
+                    <option value="all">All</option>
+                    <option value="viewed">Viewed</option>
+                    <option value="unviewed">Unviewed</option>
+                  </select>
+                </label>
+                <label className="text-xs text-muted-foreground">
+                  Kind
+                  <select
+                    aria-label="File kind"
+                    className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground"
+                    onChange={(event) => updateFileChangeFilter("kind", event.target.value as FileChangeFilters["kind"])}
+                    value={fileChangeFilters.kind}
+                  >
+                    <option value="all">All</option>
+                    <option value="text">Text</option>
+                    <option value="image">Image</option>
+                    <option value="binary">Binary</option>
+                    <option value="non-text">Non-text</option>
+                  </select>
+                </label>
+              </div>
+              <div className="space-y-2">
+                {filteredFileChanges.length === 0 ? (
+                  <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No File Changes match these filters.</p>
+                ) : (
+                  filteredFileChanges.map((view) => (
+                    <div className="rounded-md border border-border p-2 text-sm" key={view.id}>
+                      <div className="flex items-start gap-2">
+                        {view.viewed ? (
+                          <Eye className="mt-0.5 h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
+                        ) : (
+                          <FileCode2 className="mt-0.5 h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 truncate font-medium">{view.file.path}</span>
+                            <Badge variant={view.viewed ? "success" : "muted"}>{view.viewed ? "Viewed" : "Unviewed"}</Badge>
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                            <span>{getFileStatusLabel(view.file.status)}</span>
+                            <span>{getFileLineLabel(view.file)}</span>
+                            <span>{view.changedLines} lines</span>
+                            <span>{getFileKindLabel(view.kind)}</span>
+                            {view.fallbackLabel && <span>{view.fallbackLabel}</span>}
+                          </div>
+                        </div>
+                      </div>
+                      <Button
+                        aria-label={`Mark ${view.file.path} ${view.viewed ? "unviewed" : "viewed"}`}
+                        className="mt-2 w-full"
+                        onClick={() => handleSetFileChangeViewed(view.id, !view.viewed)}
+                        size="sm"
+                        variant="outline"
+                      >
+                        {view.viewed ? "Mark unviewed" : "Mark viewed"}
+                      </Button>
+                    </div>
+                  ))
+                )}
+                {fileChangeCounts.nonText > 0 && (
+                  <p className="text-xs text-muted-foreground">{fileChangeCounts.nonText} binary or non-text change{fileChangeCounts.nonText === 1 ? "" : "s"} listed with fallback states.</p>
+                )}
               </div>
             </section>
           </aside>
