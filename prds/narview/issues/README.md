@@ -21,11 +21,11 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 | 15 | Privacy, Diagnostics, And Data Controls | AFK | done | 05-incremental-github-pr-data-cache.md | 50, 51, 54, 55 | [15-privacy-diagnostics-and-data-controls.md](./15-privacy-diagnostics-and-data-controls.md) |
 | 16 | Large PR Performance Hardening | AFK | done | 06-review-overview-with-hotspots-and-readiness.md, 11-lazy-diff-viewer-with-context-expansion.md, 12-thread-centered-guided-review-flow.md | 7, 10, 11, 33, 35, 46, 48, 52 | [16-large-pr-performance-hardening.md](./16-large-pr-performance-hardening.md) |
 | 17 | Auto-Update Release Pipeline | HITL | done | 01-launchable-guided-review-shell.md | 56, 57, 58 | [17-auto-update-release-pipeline.md](./17-auto-update-release-pipeline.md) |
-| 18 | V1 End-To-End Acceptance Pass | AFK | ready | 09-confirmed-bulk-review-actions.md, 13-handoff-packets.md, 14-command-palette-and-keyboard-flow-completion.md, 15-privacy-diagnostics-and-data-controls.md, 16-large-pr-performance-hardening.md, 17-auto-update-release-pipeline.md | 1-58 | [18-v1-end-to-end-acceptance-pass.md](./18-v1-end-to-end-acceptance-pass.md) |
+| 18 | V1 End-To-End Acceptance Pass | AFK | done | 09-confirmed-bulk-review-actions.md, 13-handoff-packets.md, 14-command-palette-and-keyboard-flow-completion.md, 15-privacy-diagnostics-and-data-controls.md, 16-large-pr-performance-hardening.md, 17-auto-update-release-pipeline.md | 1-58 | [18-v1-end-to-end-acceptance-pass.md](./18-v1-end-to-end-acceptance-pass.md) |
 
 ## Ready
 
-- [V1 End-To-End Acceptance Pass](./18-v1-end-to-end-acceptance-pass.md)
+None
 
 ## In Progress
 
@@ -50,3 +50,4 @@ None
 - [Privacy, Diagnostics, And Data Controls](./15-privacy-diagnostics-and-data-controls.md)
 - [Large PR Performance Hardening](./16-large-pr-performance-hardening.md)
 - [Auto-Update Release Pipeline](./17-auto-update-release-pipeline.md)
+- [V1 End-To-End Acceptance Pass](./18-v1-end-to-end-acceptance-pass.md)

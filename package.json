@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 1420",
     "test": "vitest run",
+    "test:v1-acceptance": "node scripts/validate-v1-acceptance.mjs",
     "test:release-config": "node scripts/validate-release-config.mjs && NARVIEW_UPDATER_PUBLIC_KEY=local-validation-public-key NARVIEW_UPDATER_ENDPOINT=https://github.com/Resplendent-Data/Narview/releases/latest/download/latest.json node scripts/prepare-tauri-release-config.mjs --dry-run",
     "test:smoke": "vitest run src/App.smoke.test.tsx",
     "tauri": "tauri",
