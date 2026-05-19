@@ -1,7 +1,7 @@
 ---
 title: "Large PR Performance Hardening"
 type: AFK
-status: ready
+status: done
 blocked_by: ["06-review-overview-with-hotspots-and-readiness.md", "11-lazy-diff-viewer-with-context-expansion.md", "12-thread-centered-guided-review-flow.md"]
 depends_on_story_ids: [7, 10, 11, 33, 35, 46, 48, 52]
 slice_order: 16
@@ -13,12 +13,12 @@ Harden Narview against large Pull Requests using synthetic fixtures and performa
 
 ## Acceptance criteria
 
-- [ ] Synthetic large Pull Request fixtures cover many files, many Review Threads, huge generated files, and large diff totals.
-- [ ] Review Overview and Review Queues become usable before full diff content is fetched.
-- [ ] Review Queues, File Changes, and diff views use virtualization or equivalent bounded rendering.
-- [ ] Lazy syntax highlighting remains limited to visible or near-visible content under stress.
-- [ ] Rate-limit and partial-data states remain visible and understandable.
-- [ ] Performance tests assert usable-load and interaction thresholds for large fixtures.
+- [x] Synthetic large Pull Request fixtures cover many files, many Review Threads, huge generated files, and large diff totals.
+- [x] Review Overview and Review Queues become usable before full diff content is fetched.
+- [x] Review Queues, File Changes, and diff views use virtualization or equivalent bounded rendering.
+- [x] Lazy syntax highlighting remains limited to visible or near-visible content under stress.
+- [x] Rate-limit and partial-data states remain visible and understandable.
+- [x] Performance tests assert usable-load and interaction thresholds for large fixtures.
 
 ## Blocked by
 

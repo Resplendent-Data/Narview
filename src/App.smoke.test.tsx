@@ -12,6 +12,11 @@ import {
 } from "./lib/diff-viewer";
 import { buildHandoffPacket, renderHandoffMarkdown, selectDiffContextLines } from "./lib/handoff-packet";
 import {
+  createSyntheticLargePullRequestFixture,
+  getBoundedRenderWindow,
+  measureLargePrUsability,
+} from "./lib/large-pr-performance";
+import {
   buildDiagnosticsPreview,
   hasTelemetryEmissionPaths,
   redactOperationalLog,
@@ -1034,6 +1039,88 @@ describe("App shell", () => {
     expect(getLanguageForPath("tools/analyze.py")).toBe("python");
     expect(getLanguageForPath("src-tauri/src/lib.rs")).toBe("rust");
     expect(getLanguageForPath("lib/main.dart")).toBe("dart");
+  });
+
+  it("creates synthetic large Pull Request fixtures with files, threads, generated files, and huge totals", () => {
+    const fixture = createSyntheticLargePullRequestFixture({
+      fileCount: 1_000,
+      threadCount: 600,
+      hugeGeneratedLines: 1_000_000,
+    });
+    const changedLines = fixture.fileSummaries.reduce((total, file) => total + file.additions + file.deletions, 0);
+
+    expect(fixture.fileSummaries).toHaveLength(1_000);
+    expect(fixture.reviewThreads).toHaveLength(600);
+    expect(fixture.fileSummaries.some((file) => file.path.includes("generated/huge-schema"))).toBe(true);
+    expect(fixture.fileSummaries.some((file) => file.status === "binary")).toBe(true);
+    expect(changedLines).toBeGreaterThan(1_000_000);
+  });
+
+  it("bounds list rendering windows for large queues and file lists", () => {
+    const items = Array.from({ length: 10_000 }, (_, index) => index);
+    const firstWindow = getBoundedRenderWindow(items, { limit: 80 });
+    const middleWindow = getBoundedRenderWindow(items, { limit: 80, startIndex: 5_000 });
+
+    expect(firstWindow.rendered).toBe(80);
+    expect(firstWindow.omitted).toBe(9_920);
+    expect(middleWindow.items[0]).toBe(5_000);
+    expect(middleWindow.items.at(-1)).toBe(5_079);
+  });
+
+  it("keeps large Pull Request overview, queues, files, and lazy diff usable within performance thresholds", () => {
+    const fixture = createSyntheticLargePullRequestFixture({
+      fileCount: 1_200,
+      threadCount: 650,
+      hugeGeneratedLines: 250_000,
+    });
+
+    const report = measureLargePrUsability(fixture);
+
+    expect(report.usableBeforeFullDiffContent).toBe(true);
+    expect(report.renderedThreads).toBeLessThanOrEqual(80);
+    expect(report.renderedFiles).toBeLessThanOrEqual(120);
+    expect(report.renderedDiffLines).toBeLessThanOrEqual(16);
+    expect(report.highlightedDiffLines).toBeLessThanOrEqual(report.renderedDiffLines);
+    expect(report.totalMs).toBeLessThan(500);
+    expect(report.queueMs).toBeLessThan(150);
+  });
+
+  it("renders bounded large Pull Request windows and rate-limit context in the app", async () => {
+    const large = createSyntheticLargePullRequestFixture({
+      fileCount: 240,
+      threadCount: 140,
+      hugeGeneratedLines: 20_000,
+    });
+    upsertCachedPullRequest(large.pullRequest, {
+      reviewThreads: large.reviewThreads,
+      fileSummaries: large.fileSummaries,
+      checks: large.checks,
+      rateLimit: large.rateLimit,
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={createWorkspaceClient({
+          listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+          refreshPullRequests: vi.fn().mockResolvedValue({
+            repositories: [narviewRepository],
+            pullRequests: [large.pullRequest],
+            status: {
+              state: "rate-limited",
+              message: "GitHub rate limit reached; showing cached partial data.",
+              rateLimitResetEpochSeconds: 1_800_001_200,
+              refreshedAtEpochSeconds: 1_800_000_000,
+            },
+          }),
+        })}
+      />,
+    );
+
+    expect(await screen.findAllByText("acme/large-pr #9001")).toHaveLength(2);
+    expect(screen.getByText("Showing 80 of 140 matching Review Threads.")).toBeInTheDocument();
+    expect(screen.getByText("Showing 120 of 240 matching File Changes.")).toBeInTheDocument();
+    expect(screen.getAllByText(/GitHub rate limit reached/).length).toBeGreaterThanOrEqual(2);
   });
 
   it("loads hunks, expands context, and fetches the whole file on demand", async () => {

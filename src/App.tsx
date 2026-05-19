@@ -41,6 +41,7 @@ import {
   type DiffMode,
 } from "./lib/diff-viewer";
 import { buildHandoffPacket, renderHandoffMarkdown } from "./lib/handoff-packet";
+import { getBoundedRenderWindow } from "./lib/large-pr-performance";
 import {
   buildDiagnosticsPreview,
   renderDiagnosticsExport,
@@ -179,6 +180,10 @@ const handoffIntentOptions = [
   { value: "Explain why selected feedback is not applied", label: "Explain why feedback is not applied" },
   { value: "Audit the risky parts of this pull request", label: "Audit risky PR areas" },
 ];
+
+const reviewThreadRenderLimit = 80;
+const fileChangeRenderLimit = 120;
+const fullFileRenderLimit = 320;
 
 const fallbackPullRequest: PullRequestSummary = {
   repository: "acme/payments-web",
@@ -543,6 +548,10 @@ export function App({
   const selectedCacheEntry = activePullRequestKey ? readCacheStore().entries[activePullRequestKey] : null;
   const selectedPullRequestPinned = selectedCacheEntry?.pinned ?? false;
   const reviewOverviewCache = createOverviewCache(selectedPullRequest, selectedCacheEntry ?? undefined);
+  const rateLimitMessage =
+    reviewOverviewCache.rateLimit.remaining === 0
+      ? `GitHub rate limit reached${reviewOverviewCache.rateLimit.resetEpochSeconds ? ` until ${reviewOverviewCache.rateLimit.resetEpochSeconds}` : ""}. Cached partial data stays visible.`
+      : null;
   const reviewOverview = buildReviewOverview(
     reviewOverviewCache,
     repositoryHotspotOverrides[selectedPullRequest.repository],
@@ -590,6 +599,10 @@ export function App({
     fileChangeStore,
   );
   const filteredFileChanges = filterFileChanges(fileChangeViews, fileChangeFilters);
+  const reviewThreadWindow = getBoundedRenderWindow(filteredReviewThreads, { limit: reviewThreadRenderLimit });
+  const renderedReviewThreads = reviewThreadWindow.items;
+  const fileChangeWindow = getBoundedRenderWindow(filteredFileChanges, { limit: fileChangeRenderLimit });
+  const renderedFileChanges = fileChangeWindow.items;
   const fileChangeCounts = buildFileChangeCounts(fileChangeViews);
   const queueButtons: QueueButton[] = [
     {
@@ -639,7 +652,7 @@ export function App({
   const selectedBulkThreads = reviewThreadViews.filter((view) => selectedBulkThreadSet.has(view.id));
   const retryableBulkFailureIds = bulkActionResult?.failures.filter((failure) => failure.retryable).map((failure) => failure.id) ?? [];
   const allFilteredThreadsSelected =
-    filteredReviewThreads.length > 0 && filteredReviewThreads.every((view) => selectedBulkThreadSet.has(view.id));
+    renderedReviewThreads.length > 0 && renderedReviewThreads.every((view) => selectedBulkThreadSet.has(view.id));
   const selectedReviewThreadIndex = selectedReviewThread
     ? Math.max(filteredReviewThreads.findIndex((view) => view.id === selectedReviewThread.id), 0)
     : 0;
@@ -666,6 +679,9 @@ export function App({
         expandedHunkIds: expandedDiffHunks[selectedFileChange.id],
         fullFileLoaded: fullFileDiffs[selectedFileChange.id],
       })
+    : null;
+  const fullFileLineWindow = selectedFileDiffState?.fullFileLines
+    ? getBoundedRenderWindow(selectedFileDiffState.fullFileLines, { limit: fullFileRenderLimit })
     : null;
   const handoffThreadViews = selectedBulkThreads.length > 0 ? selectedBulkThreads : selectedReviewThread ? [selectedReviewThread] : [];
   const handoffIntent = handoffCustomIntent.trim() || handoffIntentPreset;
@@ -1225,11 +1241,11 @@ export function App({
   const toggleAllFilteredThreadSelection = (selected: boolean) => {
     setSelectedBulkThreadIds((current) => {
       if (!selected) {
-        const visible = new Set(filteredReviewThreads.map((view) => view.id));
+        const visible = new Set(renderedReviewThreads.map((view) => view.id));
         return current.filter((id) => !visible.has(id));
       }
 
-      return Array.from(new Set([...current, ...filteredReviewThreads.map((view) => view.id)]));
+      return Array.from(new Set([...current, ...renderedReviewThreads.map((view) => view.id)]));
     });
     setBulkUndo(null);
     setBulkActionResult(null);
@@ -1484,9 +1500,9 @@ export function App({
       label: allFilteredThreadsSelected ? "Clear Visible Review Thread Selection" : "Select Visible Review Threads",
       description: allFilteredThreadsSelected
         ? "Remove visible Review Threads from the bulk selection."
-        : `Select ${filteredReviewThreads.length} visible Review Thread${filteredReviewThreads.length === 1 ? "" : "s"}.`,
+        : `Select ${renderedReviewThreads.length} visible Review Thread${renderedReviewThreads.length === 1 ? "" : "s"}.`,
       shortcut: "A",
-      disabled: filteredReviewThreads.length === 0,
+      disabled: renderedReviewThreads.length === 0,
       disabledReason: noVisibleThreadReason,
       keywords: ["bulk actions"],
       run: () => toggleAllFilteredThreadSelection(!allFilteredThreadsSelected),
@@ -1930,7 +1946,7 @@ export function App({
                 {filteredReviewThreads.length === 0 ? (
                   <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No Review Threads match these filters.</p>
                 ) : (
-                  filteredReviewThreads.map((view) => (
+                  renderedReviewThreads.map((view) => (
                     <div
                       className={cn(
                         "flex w-full items-start gap-2 rounded-md border border-border p-2 text-left hover:bg-accent",
@@ -1968,6 +1984,11 @@ export function App({
                   ))
                 )}
               </div>
+              {reviewThreadWindow.omitted > 0 && (
+                <p className="mt-2 rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">
+                  Showing {reviewThreadWindow.rendered} of {reviewThreadWindow.total} matching Review Threads.
+                </p>
+              )}
             </section>
 
             <section className="border-b border-border p-3">
@@ -2026,7 +2047,7 @@ export function App({
                 {filteredFileChanges.length === 0 ? (
                   <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No File Changes match these filters.</p>
                 ) : (
-                  filteredFileChanges.map((view) => (
+                  renderedFileChanges.map((view) => (
                     <div className="rounded-md border border-border p-2 text-sm" key={view.id}>
                       <div className="flex items-start gap-2">
                         {view.viewed ? (
@@ -2069,6 +2090,11 @@ export function App({
                       </div>
                     </div>
                   ))
+                )}
+                {fileChangeWindow.omitted > 0 && (
+                  <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">
+                    Showing {fileChangeWindow.rendered} of {fileChangeWindow.total} matching File Changes.
+                  </p>
                 )}
                 {fileChangeCounts.nonText > 0 && (
                   <p className="text-xs text-muted-foreground">{fileChangeCounts.nonText} binary or non-text change{fileChangeCounts.nonText === 1 ? "" : "s"} listed with fallback states.</p>
@@ -2264,14 +2290,19 @@ export function App({
                         <FileText className="h-3.5 w-3.5" aria-hidden="true" />
                         View whole file
                       </Button>
-                      {selectedFileDiffState.fullFileLines && (
+                      {fullFileLineWindow && (
                         <div className="mt-3 rounded-md border border-border" aria-label="Full file view">
-                          {selectedFileDiffState.fullFileLines.map((line, lineIndex) => (
+                          {fullFileLineWindow.items.map((line, lineIndex) => (
                             <div className="grid grid-cols-[56px_1fr] border-b border-border last:border-b-0 font-mono text-xs" key={`full-${lineIndex}`}>
                               <div className="border-r border-border px-2 py-1 text-right text-muted-foreground">{line.newLine ?? line.oldLine ?? ""}</div>
                               <div className={cn("min-w-0 px-3 py-1", getDiffLineClass(line.kind))}>{line.content || " "}</div>
                             </div>
                           ))}
+                          {fullFileLineWindow.omitted > 0 && (
+                            <p className="border-t border-border p-2 text-xs text-muted-foreground">
+                              Showing {fullFileLineWindow.rendered} of {fullFileLineWindow.total} full-file lines.
+                            </p>
+                          )}
                         </div>
                       )}
                     </div>
@@ -2465,6 +2496,7 @@ export function App({
                   <span className="text-muted-foreground">Next refresh</span>
                   <span className="truncate">{buildIncrementalFetchPlan("manual").join(", ")}</span>
                 </div>
+                {rateLimitMessage && <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">{rateLimitMessage}</p>}
                 {cacheMessage && <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">{cacheMessage}</p>}
                 <div className="grid grid-cols-2 gap-2">
                   <Button variant="outline" size="sm" onClick={handleTogglePin} disabled={!activePullRequestKey || !selectedCacheEntry}>
