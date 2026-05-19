@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "createUpdaterArtifacts": true,
+    "targets": ["app", "dmg", "appimage"]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "${NARVIEW_UPDATER_PUBLIC_KEY}",
+      "endpoints": ["${NARVIEW_UPDATER_ENDPOINT}"]
+    }
+  }
+}
