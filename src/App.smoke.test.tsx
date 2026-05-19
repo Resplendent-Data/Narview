@@ -24,6 +24,12 @@ import {
   syncReviewThreads,
 } from "./lib/review-queue";
 import { parsePullRequestUrl, type ReviewSessionClient, type ReviewSessionSnapshot } from "./lib/review-session";
+import {
+  createThreadActionFailure,
+  networkRequiredThreadActionFailure,
+  validateReplyBody,
+  type ThreadActionClient,
+} from "./lib/thread-actions";
 import type { PullRequestSummary, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
 
 const signedOutSession: AuthSession = {
@@ -145,6 +151,33 @@ function createReviewSessionClient(overrides: Partial<ReviewSessionClient> = {})
     saveSession: vi.fn().mockResolvedValue(undefined),
     loadSession: vi.fn().mockResolvedValue(null),
     loadLastSession: vi.fn().mockResolvedValue(null),
+    ...overrides,
+  };
+}
+
+function createThreadActionClient(overrides: Partial<ThreadActionClient> = {}): ThreadActionClient {
+  return {
+    reply: vi.fn().mockImplementation(async (threadId: string) => ({
+      ok: true,
+      action: "reply",
+      threadId,
+      message: "Reply added to GitHub Review Thread.",
+      replyUrl: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r1",
+    })),
+    resolve: vi.fn().mockImplementation(async (threadId: string) => ({
+      ok: true,
+      action: "resolve",
+      threadId,
+      message: "Review Thread resolved on GitHub.",
+      replyUrl: null,
+    })),
+    unresolve: vi.fn().mockImplementation(async (threadId: string) => ({
+      ok: true,
+      action: "unresolve",
+      threadId,
+      message: "Review Thread unresolved on GitHub.",
+      replyUrl: null,
+    })),
     ...overrides,
   };
 }
@@ -724,5 +757,70 @@ describe("App shell", () => {
 
     expect(within(queue).getByText("src-tauri/src/github.rs")).toBeInTheDocument();
     expect(within(queue).queryByText("src/auth/session.ts")).not.toBeInTheDocument();
+  });
+
+  it("adds a Reply to the selected GitHub Review Thread", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+
+    render(<App threadActionClient={threadActionClient} />);
+
+    await user.type(screen.getByLabelText("Reply body"), "Good catch. I patched this.");
+    await user.click(screen.getByRole("button", { name: /^reply/i }));
+
+    expect(threadActionClient.reply).toHaveBeenCalledWith("thread-1", "Good catch. I patched this.");
+    expect(await screen.findByText("Reply added to GitHub Review Thread.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Reply body")).toHaveValue("");
+  });
+
+  it("resolves and unresolves Review Threads while preserving local Reviewed state", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+
+    render(<App threadActionClient={threadActionClient} />);
+    const inspector = screen.getByLabelText("Inspector");
+
+    await user.click(within(inspector).getByRole("button", { name: /^resolve/i }));
+
+    expect(threadActionClient.resolve).toHaveBeenCalledWith("thread-1");
+    expect(await screen.findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: /^unresolve/i })).toBeInTheDocument();
+    expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
+
+    await user.click(within(inspector).getByRole("button", { name: /^unresolve/i }));
+
+    expect(threadActionClient.unresolve).toHaveBeenCalledWith("thread-1");
+    expect(await screen.findByText("Review Thread unresolved on GitHub.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+    expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
+  });
+
+  it("surfaces retryable and terminal GitHub write failures clearly", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient({
+      reply: vi.fn().mockResolvedValue(
+        createThreadActionFailure(
+          "reply",
+          "thread-1",
+          "github-thread-permission-error",
+          "GitHub rejected this Review Thread write. Check account access and token scopes.",
+        ),
+      ),
+    });
+
+    expect(validateReplyBody("   ")).toBe("Reply body is required.");
+    expect(networkRequiredThreadActionFailure("resolve", "thread-1")).toMatchObject({
+      ok: false,
+      code: "network-required",
+      retryable: true,
+      message: "Resolve thread requires a live GitHub connection.",
+    });
+
+    render(<App threadActionClient={threadActionClient} />);
+
+    await user.type(screen.getByLabelText("Reply body"), "Trying a reply.");
+    await user.click(screen.getByRole("button", { name: /^reply/i }));
+
+    expect(await screen.findByText("GitHub rejected this Review Thread write. Check account access and token scopes.")).toBeInTheDocument();
   });
 });

@@ -1,4 +1,5 @@
 mod auth;
+mod thread_actions;
 mod workspace;
 
 #[tauri::command]
@@ -21,6 +22,9 @@ pub fn run() {
             workspace::save_workspace_repository,
             workspace::remove_workspace_repository,
             workspace::refresh_pull_requests,
+            thread_actions::reply_review_thread,
+            thread_actions::resolve_review_thread,
+            thread_actions::unresolve_review_thread,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Narview");

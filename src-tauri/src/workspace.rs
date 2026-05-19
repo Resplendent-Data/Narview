@@ -113,7 +113,7 @@ struct WorkspaceFile {
 }
 
 pub struct WorkspaceState {
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
 }
 
 impl WorkspaceState {

@@ -36,6 +36,7 @@ import {
   setCachedPullRequestPinned,
   upsertCachedPullRequest,
   type CachedPullRequestData,
+  type CachedReviewThread,
   type CacheStats,
 } from "./lib/pr-cache";
 import { buildReviewOverview, type RepositoryHotspotOverride } from "./lib/review-overview";
@@ -59,6 +60,12 @@ import {
   type ReviewSessionClient,
   type ReviewSessionSnapshot,
 } from "./lib/review-session";
+import {
+  tauriThreadActionClient,
+  type ThreadActionClient,
+  type ThreadActionResult,
+  type ThreadWriteAction,
+} from "./lib/thread-actions";
 import { cn } from "./lib/utils";
 import {
   idleRefreshStatus,
@@ -75,6 +82,7 @@ type AppProps = {
   authClient?: AuthClient;
   workspaceClient?: WorkspaceClient;
   reviewSessionClient?: ReviewSessionClient;
+  threadActionClient?: ThreadActionClient;
 };
 
 type QueueButton = {
@@ -343,6 +351,7 @@ export function App({
   authClient = tauriAuthClient,
   workspaceClient = tauriWorkspaceClient,
   reviewSessionClient = localReviewSessionClient,
+  threadActionClient = tauriThreadActionClient,
 }: AppProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [focusMode, setFocusMode] = useState(false);
@@ -365,6 +374,10 @@ export function App({
   const [selectedReviewThreadId, setSelectedReviewThreadId] = useState<string | null>(null);
   const [reviewQueueFilters, setReviewQueueFilters] = useState<ReviewQueueFilters>(defaultReviewQueueFilters);
   const [reviewQueueRevision, setReviewQueueRevision] = useState(0);
+  const [threadStateOverrides, setThreadStateOverrides] = useState<Record<string, CachedReviewThread["state"]>>({});
+  const [replyDraft, setReplyDraft] = useState("");
+  const [threadActionBusy, setThreadActionBusy] = useState<ThreadWriteAction | null>(null);
+  const [threadActionResult, setThreadActionResult] = useState<ThreadActionResult | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>(idleRefreshStatus);
   const [cacheSummary, setCacheSummary] = useState<CacheStats>(() => cacheStats());
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
@@ -398,12 +411,27 @@ export function App({
     .map((thread) => `${thread.id}:${thread.state}:${thread.updatedAt}`)
     .join("|");
   const reviewQueueStore = useMemo(() => readReviewQueueStore(), [reviewQueueRevision]);
-  const reviewThreadViews = buildReviewThreadViews(
+  const baseReviewThreadViews = buildReviewThreadViews(
     currentUserKey,
     getPullRequestKey(selectedPullRequest),
     reviewOverviewCache.reviewThreads,
     reviewQueueStore,
   );
+  const reviewThreadViews = baseReviewThreadViews.map((view) => {
+    const stateOverride = threadStateOverrides[view.id];
+    if (!stateOverride) {
+      return view;
+    }
+
+    return {
+      ...view,
+      outdated: stateOverride === "outdated",
+      thread: {
+        ...view.thread,
+        state: stateOverride,
+      },
+    };
+  });
   const filteredReviewThreads = filterReviewThreads(reviewThreadViews, reviewQueueFilters);
   const reviewQueueCounts = buildReviewQueueCounts(reviewThreadViews);
   const queueButtons: QueueButton[] = [
@@ -461,6 +489,7 @@ export function App({
   const activeThreadStateLabel = activeThread ? getThreadStateLabel(activeThread.state) : selectedThread.state;
   const activeThreadTitle = activeThread ? getThreadTitle(activeThread.body) : selectedThread.title;
   const activeThreadBody = activeThread?.body ?? selectedThread.body;
+  const threadResolveAction: ThreadWriteAction = activeThreadState === "resolved" ? "unresolve" : "resolve";
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -589,6 +618,10 @@ export function App({
     syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
     setReviewQueueRevision((current) => current + 1);
   }, [currentUserKey, reviewThreadSignature, selectedPullRequest]);
+
+  useEffect(() => {
+    setThreadActionResult(null);
+  }, [selectedReviewThread?.id]);
 
   const themeLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
   const authBadge = getAuthBadge(authSession);
@@ -830,6 +863,47 @@ export function App({
     syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
     setReviewThreadReviewed(currentUserKey, selectedReviewThread.id, reviewed);
     setReviewQueueRevision((current) => current + 1);
+  };
+
+  const runThreadAction = async (action: ThreadWriteAction) => {
+    if (!selectedReviewThread) {
+      return;
+    }
+
+    setThreadActionBusy(action);
+    setThreadActionResult(null);
+
+    try {
+      const result =
+        action === "reply"
+          ? await threadActionClient.reply(selectedReviewThread.id, replyDraft)
+          : action === "resolve"
+            ? await threadActionClient.resolve(selectedReviewThread.id)
+            : await threadActionClient.unresolve(selectedReviewThread.id);
+
+      setThreadActionResult(result);
+
+      if (result.ok && action === "reply") {
+        setReplyDraft("");
+      }
+      if (result.ok && action === "resolve") {
+        syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+        setReviewThreadReviewed(currentUserKey, selectedReviewThread.id, true);
+        setThreadStateOverrides((current) => ({
+          ...current,
+          [selectedReviewThread.id]: "resolved",
+        }));
+        setReviewQueueRevision((current) => current + 1);
+      }
+      if (result.ok && action === "unresolve") {
+        setThreadStateOverrides((current) => ({
+          ...current,
+          [selectedReviewThread.id]: "unresolved",
+        }));
+      }
+    } finally {
+      setThreadActionBusy(null);
+    }
   };
 
   const refreshBadge = getRefreshBadge(refreshStatus);
@@ -1245,6 +1319,13 @@ export function App({
             </div>
 
             <div className="space-y-2 border-b border-border p-3">
+              <textarea
+                aria-label="Reply body"
+                className="min-h-20 w-full resize-none rounded-md border border-input bg-background p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onChange={(event) => setReplyDraft(event.target.value)}
+                placeholder="Reply to this Review Thread"
+                value={replyDraft}
+              />
               <Button
                 className="w-full justify-between"
                 variant="secondary"
@@ -1254,14 +1335,39 @@ export function App({
                 {selectedReviewThread?.reviewed ? "Mark unreviewed" : "Mark reviewed"}
                 <Kbd>R</Kbd>
               </Button>
-              <Button className="w-full justify-between" variant="outline">
+              <Button
+                className="w-full justify-between"
+                variant="outline"
+                onClick={() => void runThreadAction("reply")}
+                disabled={!selectedReviewThread || threadActionBusy !== null}
+              >
                 Reply
                 <Kbd>⇧R</Kbd>
               </Button>
-              <Button className="w-full justify-between" variant="outline">
-                Resolve
+              <Button
+                className="w-full justify-between"
+                variant="outline"
+                onClick={() => void runThreadAction(threadResolveAction)}
+                disabled={!selectedReviewThread || threadActionBusy !== null}
+              >
+                {threadResolveAction === "unresolve" ? "Unresolve" : "Resolve"}
                 <Kbd>E</Kbd>
               </Button>
+              {threadActionResult && (
+                <p
+                  className={cn(
+                    "rounded-md p-2 text-xs",
+                    threadActionResult.ok
+                      ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                      : threadActionResult.retryable
+                        ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                        : "bg-destructive/10 text-destructive",
+                  )}
+                  role="status"
+                >
+                  {threadActionResult.message}
+                </p>
+              )}
             </div>
 
             <div className="border-b border-border p-3" aria-label="GitHub session details">
