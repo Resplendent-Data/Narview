@@ -12,6 +12,16 @@ import {
 } from "./lib/diff-viewer";
 import { buildHandoffPacket, renderHandoffMarkdown, selectDiffContextLines } from "./lib/handoff-packet";
 import {
+  buildDiagnosticsPreview,
+  hasTelemetryEmissionPaths,
+  redactOperationalLog,
+  renderDiagnosticsExport,
+  summarizeFileChangeStore,
+  summarizeReviewQueueStore,
+  summarizeReviewSessionStore,
+  telemetryPolicy,
+} from "./lib/privacy-diagnostics";
+import {
   buildFileChangeViews,
   fileChangeStorageKey,
   filterFileChanges,
@@ -40,7 +50,12 @@ import {
   setReviewThreadReviewed,
   syncReviewThreads,
 } from "./lib/review-queue";
-import { parsePullRequestUrl, type ReviewSessionClient, type ReviewSessionSnapshot } from "./lib/review-session";
+import {
+  parsePullRequestUrl,
+  reviewSessionStorageKey,
+  type ReviewSessionClient,
+  type ReviewSessionSnapshot,
+} from "./lib/review-session";
 import {
   createThreadActionFailure,
   networkRequiredThreadActionFailure,
@@ -652,8 +667,12 @@ describe("App shell", () => {
     expect(evicted.entries["Resplendent-Data/Narview#15"]).toBeDefined();
   });
 
-  it("pins and clears fetched cache without deleting Review Session state", () => {
-    window.localStorage.setItem("narview.reviewSessions.v1", JSON.stringify({ sessions: { saved: true }, lastByUser: {} }));
+  it("pins and clears fetched cache without deleting local review memory", () => {
+    window.localStorage.setItem(reviewSessionStorageKey, JSON.stringify({ sessions: { saved: true }, lastByUser: {} }));
+    syncReviewThreads("octocat", "Resplendent-Data/Narview#12", createOverviewFixture().reviewThreads);
+    setReviewThreadReviewed("octocat", "thread-1", true, 1_800_000_000_000);
+    syncFileChanges("octocat", "Resplendent-Data/Narview#12", createOverviewFixture().fileSummaries);
+    setFileChangeViewed("octocat", "Resplendent-Data/Narview#12:src/auth/session.ts", true, 1_800_000_000_000);
     upsertCachedPullRequest(readyPullRequest);
     setCachedPullRequestPinned("Resplendent-Data/Narview#12", true);
 
@@ -662,7 +681,101 @@ describe("App shell", () => {
     clearFetchedGithubData();
 
     expect(window.localStorage.getItem(prCacheStorageKey)).toContain('"entries":{}');
-    expect(window.localStorage.getItem("narview.reviewSessions.v1")).toContain("saved");
+    expect(window.localStorage.getItem(reviewSessionStorageKey)).toContain("saved");
+    expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
+    expect(window.localStorage.getItem(fileChangeStorageKey)).toContain('"viewed":true');
+  });
+
+  it("resets local review history only after explicit confirmation", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(reviewSessionStorageKey, JSON.stringify({ sessions: { saved: true }, lastByUser: { "local-user": "saved" } }));
+    render(<App reviewSessionClient={createReviewSessionClient()} />);
+
+    await user.click(screen.getByRole("button", { name: /^mark reviewed/i }));
+    await user.click(within(screen.getByLabelText("File changes")).getByRole("button", { name: /mark src\/auth\/session\.ts viewed/i }));
+
+    expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
+    expect(window.localStorage.getItem(fileChangeStorageKey)).toContain('"viewed":true');
+    expect(window.localStorage.getItem(reviewSessionStorageKey)).toContain("saved");
+
+    const privacy = screen.getByLabelText("Privacy and diagnostics");
+    await user.click(within(privacy).getByRole("button", { name: /reset local review history/i }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("Reset local review history");
+
+    await user.click(screen.getByRole("button", { name: /^reset$/i }));
+
+    const reviewStore = JSON.parse(window.localStorage.getItem(reviewQueueStorageKey) ?? "{}");
+    const fileStore = JSON.parse(window.localStorage.getItem(fileChangeStorageKey) ?? "{}");
+    expect(Object.values(reviewStore.users["local-user"]).every((state) => !(state as { reviewed: boolean }).reviewed)).toBe(true);
+    expect(Object.values(fileStore.users["local-user"]).every((state) => !(state as { viewed: boolean }).viewed)).toBe(true);
+    expect(window.localStorage.getItem(reviewSessionStorageKey)).toContain('"sessions":{}');
+    expect(within(privacy).getByText("Local review history reset.")).toBeInTheDocument();
+  });
+
+  it("previews and copies redacted diagnostics on explicit user action", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(<App />);
+
+    const privacy = screen.getByLabelText("Privacy and diagnostics");
+    expect(within(privacy).getByText("Telemetry off")).toBeInTheDocument();
+    expect(within(privacy).getByRole("button", { name: /copy export/i })).toBeDisabled();
+
+    await user.click(within(privacy).getByRole("button", { name: /preview diagnostics/i }));
+
+    const preview = within(privacy).getByLabelText("Diagnostics preview");
+    expect(preview).toHaveTextContent('"telemetry"');
+    expect(preview).toHaveTextContent('"oauthTokens": "redacted"');
+    expect(preview).not.toHaveTextContent("The rotated token path");
+
+    await user.click(within(privacy).getByRole("button", { name: /copy export/i }));
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText.mock.calls[0][0]).toContain('"requestDetails": "redacted"');
+    expect(writeText.mock.calls[0][0]).not.toContain("The rotated token path");
+  });
+
+  it("redacts operational logs and exposes no telemetry emission paths", () => {
+    const redacted = redactOperationalLog({
+      message: "safe summary",
+      token: "gho_secretabcdefghijklmnopqrstuvwxyz",
+      diffHunk: "@@ -1,1 +1,1 @@\n-  const oldValue = token;\n+  const newValue = token;",
+      reviewThreadBody: "Raw review feedback should not leave diagnostics.",
+      nested: {
+        requestHeaders: {
+          authorization: "Bearer secret",
+        },
+        safeCount: 4,
+      },
+    }) as unknown as {
+      message: string;
+      token: string;
+      diffHunk: string;
+      reviewThreadBody: string;
+      nested: { requestHeaders: string; safeCount: number };
+    };
+    const preview = buildDiagnosticsPreview({
+      cache: { entries: 1, pinned: 0, bytes: 128 },
+      reviewQueue: summarizeReviewQueueStore({ version: 1, users: {} }),
+      fileChanges: summarizeFileChangeStore({ version: 1, users: {} }),
+      reviewSessions: summarizeReviewSessionStore({ sessions: {}, lastByUser: {} }),
+      generatedAt: "2026-05-18T00:00:00.000Z",
+    });
+    const exportText = renderDiagnosticsExport(preview);
+
+    expect(redacted.message).toBe("safe summary");
+    expect(redacted.token).toBe("[redacted]");
+    expect(redacted.diffHunk).toBe("[redacted]");
+    expect(redacted.reviewThreadBody).toBe("[redacted]");
+    expect(redacted.nested.requestHeaders).toBe("[redacted]");
+    expect(redacted.nested.safeCount).toBe(4);
+    expect(exportText).toContain('"rawCode": "redacted"');
+    expect(hasTelemetryEmissionPaths()).toBe(false);
+    expect(telemetryPolicy.analyticsSinks).toEqual([]);
   });
 
   it("does not queue GitHub writes while offline", () => {

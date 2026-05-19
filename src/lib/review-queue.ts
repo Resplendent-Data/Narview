@@ -80,6 +80,10 @@ export function writeReviewQueueStore(store: ReviewQueueStore) {
   }
 }
 
+export function clearReviewQueueStore() {
+  writeReviewQueueStore({ version: 1, users: {} });
+}
+
 export function syncReviewThreads(
   userKey: string,
   pullRequestKey: string,

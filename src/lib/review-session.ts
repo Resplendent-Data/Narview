@@ -21,12 +21,12 @@ export interface ReviewSessionClient {
   loadLastSession: (userKey: string) => Promise<RestoredReviewSession | null>;
 }
 
-interface SessionStore {
+export interface SessionStore {
   sessions: Record<string, RestoredReviewSession>;
   lastByUser: Record<string, string>;
 }
 
-const storageKey = "narview.reviewSessions.v1";
+export const reviewSessionStorageKey = "narview.reviewSessions.v1";
 
 export function getPullRequestKey(pullRequest: Pick<PullRequestSummary, "repository" | "number">) {
   return `${pullRequest.repository}#${pullRequest.number}`;
@@ -65,12 +65,12 @@ export function parsePullRequestUrl(value: string): PullRequestSummary {
   };
 }
 
-function readStore(): SessionStore {
+export function readReviewSessionStore(): SessionStore {
   if (typeof window === "undefined") {
     return { sessions: {}, lastByUser: {} };
   }
 
-  const raw = window.localStorage.getItem(storageKey);
+  const raw = window.localStorage.getItem(reviewSessionStorageKey);
   if (!raw) {
     return { sessions: {}, lastByUser: {} };
   }
@@ -82,9 +82,9 @@ function readStore(): SessionStore {
   }
 }
 
-function writeStore(store: SessionStore) {
+export function writeReviewSessionStore(store: SessionStore) {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(storageKey, JSON.stringify(store));
+    window.localStorage.setItem(reviewSessionStorageKey, JSON.stringify(store));
   }
 }
 
@@ -92,9 +92,20 @@ function sessionKey(userKey: string, pullRequestKey: string) {
   return `${userKey}:${pullRequestKey}`;
 }
 
+export function clearReviewSessionStore() {
+  writeReviewSessionStore({ sessions: {}, lastByUser: {} });
+}
+
+export function reviewSessionStats(store = readReviewSessionStore()) {
+  return {
+    sessions: Object.keys(store.sessions).length,
+    users: Object.keys(store.lastByUser).length,
+  };
+}
+
 export const localReviewSessionClient: ReviewSessionClient = {
   async saveSession(userKey, pullRequest, snapshot) {
-    const store = readStore();
+    const store = readReviewSessionStore();
     const pullRequestKey = getPullRequestKey(pullRequest);
     const key = sessionKey(userKey, pullRequestKey);
 
@@ -103,17 +114,17 @@ export const localReviewSessionClient: ReviewSessionClient = {
       snapshot,
     };
     store.lastByUser[userKey] = key;
-    writeStore(store);
+    writeReviewSessionStore(store);
   },
 
   async loadSession(userKey, pullRequestKey) {
-    const store = readStore();
+    const store = readReviewSessionStore();
 
     return store.sessions[sessionKey(userKey, pullRequestKey)] ?? null;
   },
 
   async loadLastSession(userKey) {
-    const store = readStore();
+    const store = readReviewSessionStore();
     const key = store.lastByUser[userKey];
 
     return key ? store.sessions[key] ?? null : null;

@@ -80,6 +80,10 @@ export function writeFileChangeStore(store: FileChangeStore) {
   }
 }
 
+export function clearFileChangeStore() {
+  writeFileChangeStore({ version: 1, users: {} });
+}
+
 export function syncFileChanges(
   userKey: string,
   pullRequestKey: string,

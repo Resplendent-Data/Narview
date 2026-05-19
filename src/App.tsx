@@ -42,6 +42,15 @@ import {
 } from "./lib/diff-viewer";
 import { buildHandoffPacket, renderHandoffMarkdown } from "./lib/handoff-packet";
 import {
+  buildDiagnosticsPreview,
+  renderDiagnosticsExport,
+  summarizeFileChangeStore,
+  summarizeReviewQueueStore,
+  summarizeReviewSessionStore,
+  telemetryPolicy,
+  type DiagnosticsPreview,
+} from "./lib/privacy-diagnostics";
+import {
   buildIncrementalFetchPlan,
   cacheStats,
   clearFetchedGithubData,
@@ -57,6 +66,7 @@ import {
 import {
   buildFileChangeCounts,
   buildFileChangeViews,
+  clearFileChangeStore,
   defaultFileChangeFilters,
   filterFileChanges,
   readFileChangeStore,
@@ -69,6 +79,7 @@ import { buildReviewOverview, type RepositoryHotspotOverride } from "./lib/revie
 import {
   buildReviewQueueCounts,
   buildReviewThreadViews,
+  clearReviewQueueStore,
   defaultReviewQueueFilters,
   filterReviewThreads,
   readReviewQueueStore,
@@ -80,9 +91,11 @@ import {
   type ReviewStateFilter,
 } from "./lib/review-queue";
 import {
+  clearReviewSessionStore,
   getPullRequestKey,
   localReviewSessionClient,
   parsePullRequestUrl,
+  readReviewSessionStore,
   type ReviewSessionClient,
   type ReviewSessionSnapshot,
 } from "./lib/review-session";
@@ -505,6 +518,10 @@ export function App({
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>(idleRefreshStatus);
   const [cacheSummary, setCacheSummary] = useState<CacheStats>(() => cacheStats());
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
+  const [privacyMessage, setPrivacyMessage] = useState<string | null>(null);
+  const [diagnosticsPreview, setDiagnosticsPreview] = useState<DiagnosticsPreview | null>(null);
+  const [diagnosticsCopyMessage, setDiagnosticsCopyMessage] = useState<string | null>(null);
+  const [resetHistoryConfirmOpen, setResetHistoryConfirmOpen] = useState(false);
   const currentUserKey = authSession.accountLogin ?? "local-user";
   const routedPullRequests = useMemo(() => {
     if (!quickOpenedPullRequest) {
@@ -539,6 +556,10 @@ export function App({
     .join("|");
   const reviewQueueStore = useMemo(() => readReviewQueueStore(), [reviewQueueRevision]);
   const fileChangeStore = useMemo(() => readFileChangeStore(), [fileChangeRevision]);
+  const reviewQueueDiagnostics = summarizeReviewQueueStore(reviewQueueStore);
+  const fileChangeDiagnostics = summarizeFileChangeStore(fileChangeStore);
+  const reviewSessionDiagnostics = summarizeReviewSessionStore(readReviewSessionStore());
+  const diagnosticsPreviewText = diagnosticsPreview ? renderDiagnosticsExport(diagnosticsPreview) : "";
   const baseReviewThreadViews = buildReviewThreadViews(
     currentUserKey,
     getPullRequestKey(selectedPullRequest),
@@ -1015,7 +1036,47 @@ export function App({
   const handleClearCache = () => {
     clearFetchedGithubData();
     setCacheSummary(cacheStats());
-    setCacheMessage("Cleared fetched GitHub cache. Review Session state stays local.");
+    setCacheMessage("Cleared fetched GitHub cache. Reviewed, Viewed, and Review Session state stayed local.");
+    setPrivacyMessage("Fetched GitHub data cleared.");
+  };
+
+  const buildCurrentDiagnosticsPreview = () =>
+    buildDiagnosticsPreview({
+      cache: cacheStats(),
+      reviewQueue: summarizeReviewQueueStore(readReviewQueueStore()),
+      fileChanges: summarizeFileChangeStore(readFileChangeStore()),
+      reviewSessions: summarizeReviewSessionStore(readReviewSessionStore()),
+    });
+
+  const handlePreviewDiagnostics = () => {
+    const nextPreview = buildCurrentDiagnosticsPreview();
+    setDiagnosticsPreview(nextPreview);
+    setDiagnosticsCopyMessage(null);
+    setPrivacyMessage("Redacted diagnostics preview ready.");
+  };
+
+  const handleCopyDiagnostics = async () => {
+    const preview = diagnosticsPreview ?? buildCurrentDiagnosticsPreview();
+    setDiagnosticsPreview(preview);
+    await navigator.clipboard?.writeText(renderDiagnosticsExport(preview));
+    setDiagnosticsCopyMessage("Copied redacted diagnostics export.");
+  };
+
+  const handleResetLocalReviewHistory = () => {
+    clearReviewQueueStore();
+    clearFileChangeStore();
+    clearReviewSessionStore();
+    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+    syncFileChanges(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.fileSummaries);
+    setSelectedBulkThreadIds([]);
+    setBulkUndo(null);
+    setBulkActionResult(null);
+    setReviewQueueRevision((current) => current + 1);
+    setFileChangeRevision((current) => current + 1);
+    setResetHistoryConfirmOpen(false);
+    setDiagnosticsPreview(null);
+    setDiagnosticsCopyMessage(null);
+    setPrivacyMessage("Local review history reset.");
   };
 
   const updateReviewQueueFilter = <Key extends keyof ReviewQueueFilters>(
@@ -2410,10 +2471,65 @@ export function App({
                     {selectedPullRequestPinned ? "Unpin" : "Pin"}
                   </Button>
                   <Button variant="outline" size="sm" onClick={handleClearCache}>
-                    Clear cache
+                    Clear GitHub cache
                   </Button>
                 </div>
               </div>
+            </div>
+
+            <div className="border-b border-border p-3" aria-label="Privacy and diagnostics">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                  Privacy
+                </div>
+                <Badge variant={telemetryPolicy.enabled ? "warning" : "success"}>
+                  {telemetryPolicy.enabled ? "Telemetry on" : "Telemetry off"}
+                </Badge>
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                <div className="rounded-md bg-muted p-2">
+                  <p className="text-muted-foreground">Reviewed</p>
+                  <p className="mt-1 text-sm font-semibold">
+                    {reviewQueueDiagnostics.reviewed}/{reviewQueueDiagnostics.threads}
+                  </p>
+                </div>
+                <div className="rounded-md bg-muted p-2">
+                  <p className="text-muted-foreground">Viewed</p>
+                  <p className="mt-1 text-sm font-semibold">
+                    {fileChangeDiagnostics.viewed}/{fileChangeDiagnostics.files}
+                  </p>
+                </div>
+                <div className="rounded-md bg-muted p-2">
+                  <p className="text-muted-foreground">Sessions</p>
+                  <p className="mt-1 text-sm font-semibold">{reviewSessionDiagnostics.sessions}</p>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <Button size="sm" variant="outline" onClick={handlePreviewDiagnostics}>
+                  Preview diagnostics
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => void handleCopyDiagnostics()} disabled={!diagnosticsPreview}>
+                  Copy export
+                </Button>
+                <Button className="col-span-2" size="sm" variant="outline" onClick={() => setResetHistoryConfirmOpen(true)}>
+                  Reset local review history
+                </Button>
+              </div>
+              {privacyMessage && <p className="mt-2 rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">{privacyMessage}</p>}
+              {diagnosticsCopyMessage && (
+                <p className="mt-2 rounded-md bg-emerald-500/10 p-2 text-xs text-emerald-700 dark:text-emerald-300" role="status">
+                  {diagnosticsCopyMessage}
+                </p>
+              )}
+              {diagnosticsPreview && (
+                <pre
+                  aria-label="Diagnostics preview"
+                  className="mt-2 max-h-44 overflow-auto rounded-md border border-border bg-background p-2 text-xs text-muted-foreground"
+                >
+                  {diagnosticsPreviewText}
+                </pre>
+              )}
             </div>
 
             <div className="p-3" aria-label="Merge readiness context">
@@ -2497,6 +2613,24 @@ export function App({
               <Button onClick={() => void runConfirmedBulkThreadAction()} disabled={threadActionBusy !== null}>
                 Confirm
               </Button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={resetHistoryConfirmOpen} onOpenChange={setResetHistoryConfirmOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-24 w-[min(440px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-4 shadow-xl">
+            <Dialog.Title className="text-sm font-semibold">Reset local review history</Dialog.Title>
+            <Dialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
+              This clears local Reviewed, Viewed, and Review Session memory. Fetched GitHub cache can be cleared separately.
+            </Dialog.Description>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setResetHistoryConfirmOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={handleResetLocalReviewHistory}>Reset</Button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
