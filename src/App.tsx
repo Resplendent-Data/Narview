@@ -149,8 +149,10 @@ const selectedThread = {
 
 const commands = [
   { label: "Next review thread", shortcut: "J" },
+  { label: "Previous review thread", shortcut: "K" },
   { label: "Mark thread reviewed", shortcut: "R" },
   { label: "Resolve thread", shortcut: "E" },
+  { label: "Focus file diff", shortcut: "O" },
   { label: "Toggle focus mode", shortcut: "F" },
   { label: "Copy handoff packet", shortcut: "H" },
 ];
@@ -296,6 +298,14 @@ function getThreadTitle(body: string) {
 
 function filtersMatch(left: ReviewQueueFilters, right: ReviewQueueFilters) {
   return left.origin === right.origin && left.reviewed === right.reviewed && left.state === right.state;
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable;
 }
 
 function createOverviewCache(pullRequest: PullRequestSummary, cached?: CachedPullRequestData): CachedPullRequestData {
@@ -657,22 +667,6 @@ export function App({
   }, [authSession.state, repositories.length]);
 
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const isCommandPalette = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k";
-      if (isCommandPalette) {
-        event.preventDefault();
-        setCommandOpen(true);
-      }
-      if (!event.metaKey && !event.ctrlKey && event.key.toLowerCase() === "f") {
-        setFocusMode((current) => !current);
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
-
-  useEffect(() => {
     if (authSession.state === "checking" || activePullRequestKey) {
       return;
     }
@@ -983,6 +977,34 @@ export function App({
     setReviewQueueFilters(filters);
   };
 
+  const openThreadFileInDiff = (threadId: string) => {
+    const thread = reviewThreadViews.find((view) => view.id === threadId)?.thread;
+    const fileView = thread ? fileChangeViews.find((view) => view.file.path === thread.filePath) : null;
+    if (fileView) {
+      setSelectedFileChangeId(fileView.id);
+    }
+  };
+
+  const selectReviewThread = (threadId: string) => {
+    setSelectedReviewThreadId(threadId);
+    openThreadFileInDiff(threadId);
+  };
+
+  const moveReviewThread = (direction: 1 | -1) => {
+    if (filteredReviewThreads.length === 0) {
+      return;
+    }
+
+    const currentIndex = selectedReviewThread ? filteredReviewThreads.findIndex((view) => view.id === selectedReviewThread.id) : -1;
+    const baseIndex = currentIndex >= 0 ? currentIndex : direction > 0 ? -1 : 0;
+    const nextIndex = (baseIndex + direction + filteredReviewThreads.length) % filteredReviewThreads.length;
+    selectReviewThread(filteredReviewThreads[nextIndex].id);
+  };
+
+  const focusReplyField = () => {
+    document.querySelector<HTMLTextAreaElement>("[aria-label='Reply body']")?.focus();
+  };
+
   const handleSetFileChangeViewed = (fileChangeId: string, viewed: boolean) => {
     syncFileChanges(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.fileSummaries);
     setFileChangeViewed(currentUserKey, fileChangeId, viewed);
@@ -1164,6 +1186,50 @@ export function App({
       setThreadActionBusy(null);
     }
   };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      const commandPalette = (event.metaKey || event.ctrlKey) && key === "k";
+      if (commandPalette) {
+        event.preventDefault();
+        setCommandOpen(true);
+        return;
+      }
+
+      if (isEditableTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+
+      if (key === "j") {
+        event.preventDefault();
+        moveReviewThread(1);
+      } else if (key === "k") {
+        event.preventDefault();
+        moveReviewThread(-1);
+      } else if (key === "r" && event.shiftKey) {
+        event.preventDefault();
+        focusReplyField();
+      } else if (key === "r") {
+        event.preventDefault();
+        handleSetSelectedThreadReviewed(!(selectedReviewThread?.reviewed ?? false));
+      } else if (key === "e") {
+        event.preventDefault();
+        void runThreadAction(threadResolveAction);
+      } else if (key === "o") {
+        event.preventDefault();
+        if (selectedReviewThread) {
+          openThreadFileInDiff(selectedReviewThread.id);
+        }
+      } else if (key === "f") {
+        event.preventDefault();
+        setFocusMode((current) => !current);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [moveReviewThread, openThreadFileInDiff, selectedReviewThread, threadResolveAction]);
 
   const refreshBadge = getRefreshBadge(refreshStatus);
 
@@ -1482,7 +1548,7 @@ export function App({
                       <button
                         aria-pressed={selectedReviewThread?.id === view.id}
                         className="min-w-0 flex-1 text-left"
-                        onClick={() => setSelectedReviewThreadId(view.id)}
+                        onClick={() => selectReviewThread(view.id)}
                         type="button"
                       >
                         <div className="flex items-center justify-between gap-2">
@@ -1667,6 +1733,9 @@ export function App({
                     Review Path {selectedReviewThreadIndex + 1} of {Math.max(filteredReviewThreads.length, 1)}
                   </p>
                   <h3 className="mt-1 text-base font-semibold">{activeThreadTitle}</h3>
+                  {activeThreadState === "outdated" && (
+                    <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">Older diff context from a previous hunk.</p>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge variant={selectedReviewThread?.origin === "coderabbit" ? "warning" : "info"}>
@@ -1812,9 +1881,12 @@ export function App({
               <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <span className="inline-flex items-center gap-1"><Keyboard className="h-3.5 w-3.5" aria-hidden="true" /> Keyboard Flow</span>
                 <span>Next <Kbd>J</Kbd></span>
+                <span>Previous <Kbd>K</Kbd></span>
                 <span>Reviewed <Kbd>R</Kbd></span>
                 <span>Resolve <Kbd>E</Kbd></span>
                 <span>Reply <Kbd>⇧R</Kbd></span>
+                <span>Open file <Kbd>O</Kbd></span>
+                <span>Focus <Kbd>F</Kbd></span>
               </div>
             </div>
           </div>

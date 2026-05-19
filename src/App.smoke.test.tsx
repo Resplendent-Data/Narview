@@ -902,6 +902,89 @@ describe("App shell", () => {
     );
   });
 
+  it("selects Review Queue items into matching thread detail and diff context", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const queue = screen.getByLabelText("Review thread queue");
+
+    await user.click(within(queue).getByRole("button", { name: /src\/review\/queue\.ts/i }));
+
+    const diffViewer = screen.getByLabelText("Diff viewer");
+    expect(within(diffViewer).getByText("src/review/queue.ts")).toBeInTheDocument();
+    expect(screen.getByText("@monalisa")).toBeInTheDocument();
+    expect(screen.getByText("Review Path 2 of 3")).toBeInTheDocument();
+  });
+
+  it("presents outdated threads as older diff context in the guided flow", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const queue = screen.getByLabelText("Review thread queue");
+
+    await user.click(within(queue).getByRole("button", { name: /src-tauri\/src\/github\.rs/i }));
+
+    expect(screen.getAllByText("Outdated").length).toBeGreaterThan(0);
+    expect(screen.getByText("Older diff context from a previous hunk.")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Diff viewer")).getByText("src-tauri/src/github.rs")).toBeInTheDocument();
+  });
+
+  it("runs the keyboard review loop with visible shortcut cues", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+    render(<App threadActionClient={threadActionClient} />);
+
+    expect(screen.getByText("Previous")).toBeInTheDocument();
+    expect(screen.getByText("Open file")).toBeInTheDocument();
+    expect(screen.getAllByText("Focus").length).toBeGreaterThan(0);
+
+    await user.keyboard("j");
+    expect(within(screen.getByLabelText("Diff viewer")).getByText("src/review/queue.ts")).toBeInTheDocument();
+
+    await user.keyboard("k");
+    expect(within(screen.getByLabelText("Diff viewer")).getByText("src/auth/session.ts")).toBeInTheDocument();
+
+    await user.keyboard("r");
+    expect(await screen.findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+
+    await user.keyboard("e");
+    expect(threadActionClient.resolve).toHaveBeenCalledWith("thread-1");
+
+    await user.keyboard("{Shift>}R{/Shift}");
+    expect(screen.getByLabelText("Reply body")).toHaveFocus();
+  });
+
+  it("updates Review Session state as the reviewer navigates threads", async () => {
+    const user = userEvent.setup();
+    const reviewSessionClient = createReviewSessionClient();
+    render(<App reviewSessionClient={reviewSessionClient} />);
+
+    await user.type(screen.getByLabelText("Pull Request URL"), readyPullRequest.url);
+    await user.click(screen.getByRole("button", { name: /open/i }));
+    await screen.findAllByText("Resplendent-Data/Narview #12");
+
+    await user.keyboard("j");
+
+    await waitFor(() => {
+      const savedSnapshot = vi.mocked(reviewSessionClient.saveSession).mock.calls.at(-1)?.[2];
+      expect(savedSnapshot).toMatchObject({
+        threadKey: "thread-2",
+        filePath: "src/review/queue.ts",
+        nearbyLine: 88,
+      });
+    });
+  });
+
+  it("exposes resolve and unresolve from the inspector for the active thread", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+    render(<App threadActionClient={threadActionClient} />);
+    const queue = screen.getByLabelText("Review thread queue");
+
+    await user.click(within(queue).getByRole("button", { name: /src\/review\/queue\.ts/i }));
+    await user.click(screen.getByRole("button", { name: /^unresolve/i }));
+
+    expect(threadActionClient.unresolve).toHaveBeenCalledWith("thread-2");
+  });
+
   it("marks Review Threads reviewed locally and distinguishes outdated threads in the UI", async () => {
     const user = userEvent.setup();
     render(<App />);
