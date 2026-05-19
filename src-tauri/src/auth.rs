@@ -267,6 +267,10 @@ impl AuthState {
         self.token_store.clear_token()?;
         Ok(AuthSession::signed_out())
     }
+
+    pub(crate) fn github_token(&self) -> Result<Option<String>, AuthCommandError> {
+        self.token_store.load_token().map_err(AuthCommandError::from)
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -14,22 +14,34 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
+  RefreshCw,
   Search,
   ShieldAlert,
   ShieldCheck,
   Sun,
+  Trash2,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Kbd } from "./components/ui/kbd";
 import { type AuthClient, type AuthSession, type OAuthStartResponse, tauriAuthClient } from "./lib/auth";
 import { cn } from "./lib/utils";
+import {
+  idleRefreshStatus,
+  type PullRequestSummary,
+  type RefreshStatus,
+  type WorkspaceClient,
+  type WorkspaceRepository,
+  tauriWorkspaceClient,
+} from "./lib/workspace";
 
 type Theme = "light" | "dark";
 
 type AppProps = {
   authClient?: AuthClient;
+  workspaceClient?: WorkspaceClient;
 };
 
 const checkingSession: AuthSession = {
@@ -82,6 +94,16 @@ const commands = [
   { label: "Copy handoff packet", shortcut: "H" },
 ];
 
+const fallbackPullRequest: PullRequestSummary = {
+  repository: "acme/payments-web",
+  number: 482,
+  title: selectedThread.title,
+  authorLogin: "coderabbitai",
+  isDraft: false,
+  updatedAt: "2026-05-18T12:00:00Z",
+  url: "https://github.com/acme/payments-web/pull/482",
+};
+
 function getInitialTheme(): Theme {
   if (typeof window === "undefined") {
     return "light";
@@ -103,7 +125,30 @@ function getAuthBadge(session: AuthSession) {
   return { label: "Signed out", variant: "muted" as const };
 }
 
-export function App({ authClient = tauriAuthClient }: AppProps) {
+function getRefreshBadge(status: RefreshStatus) {
+  if (status.state === "fresh") {
+    return { label: "Fresh", variant: "success" as const };
+  }
+  if (status.state === "loading") {
+    return { label: "Refreshing", variant: "info" as const };
+  }
+  if (status.state === "rate-limited") {
+    return { label: "Rate limited", variant: "warning" as const };
+  }
+  if (status.state === "stale") {
+    return { label: "Stale", variant: "warning" as const };
+  }
+  if (status.state === "failed") {
+    return { label: "Failed", variant: "danger" as const };
+  }
+  return { label: "Idle", variant: "muted" as const };
+}
+
+function pullRequestKey(pullRequest: PullRequestSummary) {
+  return `${pullRequest.repository}#${pullRequest.number}`;
+}
+
+export function App({ authClient = tauriAuthClient, workspaceClient = tauriWorkspaceClient }: AppProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [focusMode, setFocusMode] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -111,6 +156,14 @@ export function App({ authClient = tauriAuthClient }: AppProps) {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [oauthFlow, setOauthFlow] = useState<OAuthStartResponse | null>(null);
+  const [repositories, setRepositories] = useState<WorkspaceRepository[]>([]);
+  const [repositoryInput, setRepositoryInput] = useState("");
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [includeDrafts, setIncludeDrafts] = useState(false);
+  const [pullRequests, setPullRequests] = useState<PullRequestSummary[]>([]);
+  const [selectedPullRequestKey, setSelectedPullRequestKey] = useState<string | null>(null);
+  const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>(idleRefreshStatus);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -136,6 +189,33 @@ export function App({ authClient = tauriAuthClient }: AppProps) {
       active = false;
     };
   }, [authClient]);
+
+  useEffect(() => {
+    let active = true;
+
+    workspaceClient
+      .listRepositories()
+      .then((response) => {
+        if (active) {
+          setRepositories(response.repositories);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setWorkspaceError(error instanceof Error ? error.message : String(error));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [workspaceClient]);
+
+  useEffect(() => {
+    if (authSession.state === "signed-in" && repositories.length > 0) {
+      void refreshPullRequests(includeDrafts);
+    }
+  }, [authSession.state, repositories.length]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -208,6 +288,111 @@ export function App({ authClient = tauriAuthClient }: AppProps) {
     }
   };
 
+  async function refreshPullRequests(nextIncludeDrafts = includeDrafts) {
+    setWorkspaceBusy(true);
+    setWorkspaceError(null);
+    setRefreshStatus({
+      state: "loading",
+      message: "Refreshing open pull requests from GitHub.",
+      rateLimitResetEpochSeconds: null,
+      refreshedAtEpochSeconds: refreshStatus.refreshedAtEpochSeconds,
+    });
+
+    try {
+      const response = await workspaceClient.refreshPullRequests(nextIncludeDrafts);
+      setRepositories(response.repositories);
+      setPullRequests(response.pullRequests);
+      setRefreshStatus((current) => {
+        if (response.status.state === "failed" && pullRequests.length > 0) {
+          return {
+            ...response.status,
+            state: "stale",
+            message: response.status.message ?? current.message,
+          };
+        }
+        return response.status;
+      });
+      setSelectedPullRequestKey((current) => {
+        if (current && response.pullRequests.some((pullRequest) => pullRequestKey(pullRequest) === current)) {
+          return current;
+        }
+        return response.pullRequests[0] ? pullRequestKey(response.pullRequests[0]) : null;
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setWorkspaceError(message);
+      setRefreshStatus({
+        state: pullRequests.length > 0 ? "stale" : "failed",
+        message,
+        rateLimitResetEpochSeconds: null,
+        refreshedAtEpochSeconds: refreshStatus.refreshedAtEpochSeconds,
+      });
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }
+
+  const handleSaveRepository = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!repositoryInput.trim()) {
+      return;
+    }
+
+    setWorkspaceBusy(true);
+    setWorkspaceError(null);
+    try {
+      const response = await workspaceClient.saveRepository(repositoryInput);
+      setRepositories(response.repositories);
+      setRepositoryInput("");
+      if (authSession.state === "signed-in") {
+        await refreshPullRequests(includeDrafts);
+      }
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  };
+
+  const handleRemoveRepository = async (repository: WorkspaceRepository) => {
+    setWorkspaceBusy(true);
+    setWorkspaceError(null);
+    try {
+      const response = await workspaceClient.removeRepository(repository.owner, repository.name);
+      setRepositories(response.repositories);
+      setPullRequests((current) => current.filter((pullRequest) => pullRequest.repository !== repository.slug));
+      setSelectedPullRequestKey((current) => {
+        if (!current?.startsWith(`${repository.slug}#`)) {
+          return current;
+        }
+        return null;
+      });
+      if (response.repositories.length === 0) {
+        setRefreshStatus(idleRefreshStatus);
+      } else if (authSession.state === "signed-in") {
+        await refreshPullRequests(includeDrafts);
+      }
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  };
+
+  const handleDraftFilterChange = async (checked: boolean) => {
+    setIncludeDrafts(checked);
+    if (authSession.state === "signed-in" && repositories.length > 0) {
+      await refreshPullRequests(checked);
+    }
+  };
+
+  const refreshBadge = getRefreshBadge(refreshStatus);
+  const selectedPullRequest =
+    pullRequests.find((pullRequest) => pullRequestKey(pullRequest) === selectedPullRequestKey) ??
+    pullRequests[0] ??
+    fallbackPullRequest;
+  const selectedPullRequestDisplay = `${selectedPullRequest.repository} #${selectedPullRequest.number}`;
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <header className="flex h-12 items-center justify-between border-b border-border px-4">
@@ -217,7 +402,7 @@ export function App({ authClient = tauriAuthClient }: AppProps) {
           </div>
           <div>
             <h1 className="text-sm font-semibold leading-none">Narview</h1>
-            <p className="mt-1 text-xs text-muted-foreground">acme/payments-web #482</p>
+            <p className="mt-1 text-xs text-muted-foreground">{selectedPullRequestDisplay}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -255,11 +440,110 @@ export function App({ authClient = tauriAuthClient }: AppProps) {
       <main
         className={cn(
           "grid h-[calc(100vh-3rem)] min-h-[680px]",
-          focusMode ? "grid-cols-[1fr]" : "grid-cols-[280px_minmax(520px,1fr)_340px]",
+          focusMode ? "grid-cols-[1fr]" : "grid-cols-[360px_minmax(520px,1fr)_340px]",
         )}
       >
         {!focusMode && (
           <aside aria-label="Review map" className="border-r border-border bg-card/40">
+            <section className="border-b border-border p-3" aria-label="Workspace repositories">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Workspace</h2>
+                <Badge variant={refreshBadge.variant}>{refreshBadge.label}</Badge>
+              </div>
+              <form className="flex gap-2" onSubmit={handleSaveRepository}>
+                <input
+                  aria-label="Repository slug"
+                  className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onChange={(event) => setRepositoryInput(event.target.value)}
+                  placeholder="owner/repo"
+                  value={repositoryInput}
+                />
+                <Button size="sm" type="submit" disabled={workspaceBusy || !repositoryInput.trim()}>
+                  <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                  Save
+                </Button>
+              </form>
+              <div className="mt-2 space-y-1">
+                {repositories.length === 0 ? (
+                  <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No saved repositories.</p>
+                ) : (
+                  repositories.map((repository) => (
+                    <div className="flex h-8 items-center gap-2 rounded-md border border-border px-2" key={repository.slug}>
+                      <Github className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+                      <span className="min-w-0 flex-1 truncate text-sm">{repository.slug}</span>
+                      <button
+                        aria-label={`Remove ${repository.slug}`}
+                        className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                        disabled={workspaceBusy}
+                        onClick={() => void handleRemoveRepository(repository)}
+                        type="button"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="mt-3 flex items-center justify-between gap-2">
+                <label className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    checked={includeDrafts}
+                    className="h-4 w-4 accent-primary"
+                    onChange={(event) => void handleDraftFilterChange(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Include draft Pull Requests
+                </label>
+                <Button size="sm" variant="outline" onClick={() => void refreshPullRequests(includeDrafts)} disabled={workspaceBusy || repositories.length === 0}>
+                  <RefreshCw className={cn("h-3.5 w-3.5", workspaceBusy && "animate-spin")} aria-hidden="true" />
+                  Refresh
+                </Button>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-muted-foreground" role="status">
+                {refreshStatus.message}
+                {refreshStatus.rateLimitResetEpochSeconds ? ` Reset ${refreshStatus.rateLimitResetEpochSeconds}.` : ""}
+              </p>
+              {workspaceError && <p className="mt-2 rounded-md bg-destructive/10 p-2 text-xs text-destructive">{workspaceError}</p>}
+            </section>
+
+            <section className="border-b border-border p-3" aria-label="Open Pull Requests">
+              <div className="mb-2 flex items-center justify-between">
+                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Open Pull Requests</h2>
+                <Badge variant="info">{pullRequests.length}</Badge>
+              </div>
+              <div className="max-h-56 space-y-1 overflow-auto">
+                {pullRequests.length === 0 ? (
+                  <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">Refresh saved repositories to load open Pull Requests.</p>
+                ) : (
+                  pullRequests.map((pullRequest) => {
+                    const isSelected = pullRequestKey(pullRequest) === pullRequestKey(selectedPullRequest);
+
+                    return (
+                      <button
+                        aria-pressed={isSelected}
+                        className={cn(
+                          "w-full rounded-md border border-border p-2 text-left hover:bg-accent",
+                          isSelected && "border-primary bg-accent text-accent-foreground",
+                        )}
+                        key={pullRequestKey(pullRequest)}
+                        onClick={() => setSelectedPullRequestKey(pullRequestKey(pullRequest))}
+                        type="button"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="min-w-0 truncate text-sm font-medium">{pullRequest.title}</span>
+                          {pullRequest.isDraft && <Badge variant="warning">Draft</Badge>}
+                        </div>
+                        <div className="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                          <span className="min-w-0 truncate">{pullRequest.repository} #{pullRequest.number}</span>
+                          {pullRequest.authorLogin && <span className="shrink-0">@{pullRequest.authorLogin}</span>}
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </section>
+
             <section className="border-b border-border p-3">
               <div className="mb-2 flex items-center justify-between">
                 <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Review queues</h2>
