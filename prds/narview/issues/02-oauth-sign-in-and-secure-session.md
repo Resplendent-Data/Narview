@@ -1,7 +1,7 @@
 ---
 title: "OAuth Sign-In And Secure Session"
 type: HITL
-status: ready
+status: done
 blocked_by: ["01-launchable-guided-review-shell.md"]
 depends_on_story_ids: [1, 2, 54, 55]
 slice_order: 2
@@ -13,13 +13,13 @@ Add OAuth-only GitHub sign-in for v1, backed by OS secure token storage and a cl
 
 ## Acceptance criteria
 
-- [ ] The app can start a GitHub OAuth browser sign-in flow using configured app credentials.
-- [ ] The app stores OAuth tokens only through the OS secure storage abstraction.
-- [ ] The app can restore a signed-in session without exposing the token to the frontend.
-- [ ] The app supports sign-out and clears the secure token.
-- [ ] Secure-storage unavailable states fail clearly and do not write tokens to plain files.
-- [ ] Logs and diagnostics do not include OAuth tokens.
-- [ ] Tests cover session restore, sign-out, secure-storage failure, and no-token-in-cache/log behavior.
+- [x] The app can start a GitHub OAuth browser sign-in flow using configured app credentials.
+- [x] The app stores OAuth tokens only through the OS secure storage abstraction.
+- [x] The app can restore a signed-in session without exposing the token to the frontend.
+- [x] The app supports sign-out and clears the secure token.
+- [x] Secure-storage unavailable states fail clearly and do not write tokens to plain files.
+- [x] Logs and diagnostics do not include OAuth tokens.
+- [x] Tests cover session restore, sign-out, secure-storage failure, and no-token-in-cache/log behavior.
 
 ## Blocked by
 

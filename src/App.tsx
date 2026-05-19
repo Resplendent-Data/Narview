@@ -5,23 +5,42 @@ import {
   Command,
   Eye,
   FileCode2,
-  Focus,
+  Github,
   GitPullRequest,
   Keyboard,
+  LogIn,
+  LogOut,
   MessageSquare,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Search,
+  ShieldAlert,
+  ShieldCheck,
   Sun,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Kbd } from "./components/ui/kbd";
+import { type AuthClient, type AuthSession, type OAuthStartResponse, tauriAuthClient } from "./lib/auth";
 import { cn } from "./lib/utils";
 
 type Theme = "light" | "dark";
+
+type AppProps = {
+  authClient?: AuthClient;
+};
+
+const checkingSession: AuthSession = {
+  state: "checking",
+  storage: {
+    available: true,
+    message: null,
+  },
+  accountLogin: null,
+  tokenHint: null,
+};
 
 const queues = [
   { id: "needs-attention", label: "Needs attention", count: 14, tone: "danger" as const },
@@ -71,14 +90,52 @@ function getInitialTheme(): Theme {
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-export function App() {
+function getAuthBadge(session: AuthSession) {
+  if (session.state === "signed-in") {
+    return { label: "Signed in", variant: "success" as const };
+  }
+  if (session.state === "storage-unavailable") {
+    return { label: "Secure storage unavailable", variant: "warning" as const };
+  }
+  if (session.state === "checking") {
+    return { label: "Checking session", variant: "muted" as const };
+  }
+  return { label: "Signed out", variant: "muted" as const };
+}
+
+export function App({ authClient = tauriAuthClient }: AppProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [focusMode, setFocusMode] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [authSession, setAuthSession] = useState<AuthSession>(checkingSession);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [oauthFlow, setOauthFlow] = useState<OAuthStartResponse | null>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
+
+  useEffect(() => {
+    let active = true;
+
+    authClient
+      .getStatus()
+      .then((session) => {
+        if (active) {
+          setAuthSession(session);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setAuthError(error instanceof Error ? error.message : String(error));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authClient]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -98,6 +155,58 @@ export function App() {
 
   const themeLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
   const activeQueue = useMemo(() => queues[0], []);
+  const authBadge = getAuthBadge(authSession);
+  const signInDisabled = authBusy || authSession.state === "storage-unavailable";
+
+  const handleSignIn = async () => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      const flow = await authClient.startSignIn();
+      setOauthFlow(flow);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handlePollSignIn = async () => {
+    if (!oauthFlow) {
+      return;
+    }
+
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      const response = await authClient.pollSignIn(oauthFlow.flowId);
+      if (response.session) {
+        setAuthSession(response.session);
+      }
+      if (response.state === "authorized") {
+        setOauthFlow(null);
+      } else if (response.message) {
+        setAuthError(response.message);
+      }
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      setAuthSession(await authClient.signOut());
+      setOauthFlow(null);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -112,6 +221,26 @@ export function App() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <div className="hidden min-w-0 items-center gap-2 sm:flex" aria-label="GitHub session">
+            {authSession.state === "signed-in" ? (
+              <ShieldCheck className="h-4 w-4 text-emerald-500" aria-hidden="true" />
+            ) : (
+              <ShieldAlert className="h-4 w-4 text-amber-500" aria-hidden="true" />
+            )}
+            <Badge variant={authBadge.variant}>{authBadge.label}</Badge>
+            {authSession.accountLogin && <span className="max-w-28 truncate text-xs text-muted-foreground">@{authSession.accountLogin}</span>}
+          </div>
+          {authSession.state === "signed-in" ? (
+            <Button variant="outline" size="sm" onClick={handleSignOut} disabled={authBusy}>
+              <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+              Sign out
+            </Button>
+          ) : (
+            <Button variant="outline" size="sm" onClick={handleSignIn} disabled={signInDisabled}>
+              <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
+              Sign in
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={() => setCommandOpen(true)}>
             <Command className="h-3.5 w-3.5" aria-hidden="true" />
             Command
@@ -270,6 +399,48 @@ export function App() {
                 Resolve
                 <Kbd>E</Kbd>
               </Button>
+            </div>
+
+            <div className="border-b border-border p-3" aria-label="GitHub session details">
+              <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
+                <Github className="h-4 w-4" aria-hidden="true" />
+                GitHub Session
+              </div>
+              <div className="space-y-2 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted-foreground">Status</span>
+                  <Badge variant={authBadge.variant}>{authBadge.label}</Badge>
+                </div>
+                {authSession.accountLogin && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-muted-foreground">Account</span>
+                    <span className="min-w-0 truncate">@{authSession.accountLogin}</span>
+                  </div>
+                )}
+                {authSession.tokenHint && (
+                  <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-300">
+                    <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                    OS secure storage
+                  </div>
+                )}
+                {authSession.storage.message && <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">{authSession.storage.message}</p>}
+                {oauthFlow && (
+                  <div className="space-y-2 rounded-md border border-border p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">Device code</span>
+                      <Kbd>{oauthFlow.userCode}</Kbd>
+                    </div>
+                    <a className="block truncate text-xs text-sky-700 underline dark:text-sky-300" href={oauthFlow.verificationUriComplete ?? oauthFlow.verificationUri}>
+                      {oauthFlow.verificationUri.replace("https://", "")}
+                    </a>
+                    <Button className="w-full justify-between" variant="secondary" onClick={handlePollSignIn} disabled={authBusy}>
+                      Check sign-in
+                      <Kbd>{oauthFlow.intervalSeconds}s</Kbd>
+                    </Button>
+                  </div>
+                )}
+                {authError && <p className="rounded-md bg-destructive/10 p-2 text-xs text-destructive" role="status">{authError}</p>}
+              </div>
             </div>
 
             <div className="p-3">

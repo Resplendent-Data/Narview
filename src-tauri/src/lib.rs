@@ -1,3 +1,5 @@
+mod auth;
+
 #[tauri::command]
 fn app_ready() -> &'static str {
     "narview-ready"
@@ -6,7 +8,14 @@ fn app_ready() -> &'static str {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_ready])
+        .manage(auth::AuthState::new())
+        .invoke_handler(tauri::generate_handler![
+            app_ready,
+            auth::auth_status,
+            auth::start_github_oauth,
+            auth::poll_github_oauth,
+            auth::sign_out,
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run Narview");
 }
