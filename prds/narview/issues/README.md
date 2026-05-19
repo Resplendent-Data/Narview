@@ -4,7 +4,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 | Order | Title | Type | Status | Blocked by | Stories | File |
 |---:|---|---|---|---|---|---|
-| 1 | Launchable Guided Review Shell | AFK | in-progress | None | 12, 13, 14, 31, 39, 40, 41 | [01-launchable-guided-review-shell.md](./01-launchable-guided-review-shell.md) |
+| 1 | Launchable Guided Review Shell | AFK | done | None | 12, 13, 14, 31, 39, 40, 41 | [01-launchable-guided-review-shell.md](./01-launchable-guided-review-shell.md) |
 | 2 | OAuth Sign-In And Secure Session | HITL | ready | 01-launchable-guided-review-shell.md | 1, 2, 54, 55 | [02-oauth-sign-in-and-secure-session.md](./02-oauth-sign-in-and-secure-session.md) |
 | 3 | Workspace Repositories And Active PR List | AFK | ready | 02-oauth-sign-in-and-secure-session.md | 3, 5, 6, 7, 52, 53 | [03-workspace-repositories-and-active-pr-list.md](./03-workspace-repositories-and-active-pr-list.md) |
 | 4 | Quick-Open PR And Review Session Resume | AFK | ready | 02-oauth-sign-in-and-secure-session.md | 4, 8, 12 | [04-quick-open-pr-and-review-session-resume.md](./04-quick-open-pr-and-review-session-resume.md) |
@@ -45,8 +45,8 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 ## In Progress
 
-- [Launchable Guided Review Shell](./01-launchable-guided-review-shell.md)
+None
 
 ## Done
 
-None
+- [Launchable Guided Review Shell](./01-launchable-guided-review-shell.md)
