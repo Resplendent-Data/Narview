@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import type { AuthClient, AuthSession } from "./lib/auth";
@@ -16,6 +16,13 @@ import {
   upsertCachedPullRequest,
 } from "./lib/pr-cache";
 import { buildReviewOverview, getMergeReadiness, scoreHotspots, summarizeChecks } from "./lib/review-overview";
+import {
+  buildReviewThreadViews,
+  filterReviewThreads,
+  reviewQueueStorageKey,
+  setReviewThreadReviewed,
+  syncReviewThreads,
+} from "./lib/review-queue";
 import { parsePullRequestUrl, type ReviewSessionClient, type ReviewSessionSnapshot } from "./lib/review-session";
 import type { PullRequestSummary, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
 
@@ -182,6 +189,38 @@ function createOverviewFixture(): CachedPullRequestData {
       },
     ],
   };
+}
+
+function createQueueThreads(): CachedPullRequestData["reviewThreads"] {
+  return [
+    {
+      id: "thread-coderabbit",
+      authorLogin: "coderabbitai",
+      filePath: "src/auth/session.ts",
+      line: 24,
+      state: "unresolved",
+      body: "CodeRabbit found a stale session path.",
+      updatedAt: "2026-05-18T12:00:00Z",
+    },
+    {
+      id: "thread-human",
+      authorLogin: "monalisa",
+      filePath: "src/review/queue.ts",
+      line: 88,
+      state: "resolved",
+      body: "Human review resolved this queue concern.",
+      updatedAt: "2026-05-18T12:01:00Z",
+    },
+    {
+      id: "thread-outdated",
+      authorLogin: "hubot",
+      filePath: "src-tauri/src/github.rs",
+      line: 44,
+      state: "outdated",
+      body: "This comment belongs to an older diff hunk.",
+      updatedAt: "2026-05-18T12:02:00Z",
+    },
+  ];
 }
 
 beforeEach(() => {
@@ -623,5 +662,67 @@ describe("App shell", () => {
     expect(overview.usesLlm).toBe(false);
     expect(overview.branch).toBe("feature/checkout-guard -> main");
     expect(JSON.stringify(overview)).not.toMatch(/gemini|openai/i);
+  });
+
+  it("stores reviewed state per user and GitHub review thread ID with recovery context", () => {
+    const threads = createQueueThreads();
+    syncReviewThreads("octocat", "Resplendent-Data/Narview#12", threads);
+    setReviewThreadReviewed("octocat", "thread-coderabbit", true, 1_800_000_000_000);
+
+    const store = JSON.parse(window.localStorage.getItem(reviewQueueStorageKey) ?? "{}");
+    const storedThread = store.users.octocat["thread-coderabbit"];
+
+    expect(storedThread.reviewed).toBe(true);
+    expect(storedThread.recoveryContext).toMatchObject({
+      pullRequestKey: "Resplendent-Data/Narview#12",
+      filePath: "src/auth/session.ts",
+      line: 24,
+      authorLogin: "coderabbitai",
+    });
+
+    const octocatViews = buildReviewThreadViews("octocat", "Resplendent-Data/Narview#12", threads);
+    const monalisaViews = buildReviewThreadViews("monalisa", "Resplendent-Data/Narview#12", threads);
+
+    expect(octocatViews.find((view) => view.id === "thread-coderabbit")?.reviewed).toBe(true);
+    expect(monalisaViews.find((view) => view.id === "thread-coderabbit")?.reviewed).toBe(false);
+  });
+
+  it("filters Review Queues across source, reviewed state, and thread state", () => {
+    const threads = createQueueThreads();
+    syncReviewThreads("octocat", "Resplendent-Data/Narview#12", threads);
+    setReviewThreadReviewed("octocat", "thread-human", true, 1_800_000_000_000);
+    const views = buildReviewThreadViews("octocat", "Resplendent-Data/Narview#12", threads);
+
+    expect(filterReviewThreads(views, { origin: "coderabbit", reviewed: "unreviewed", state: "unresolved" }).map((view) => view.id)).toEqual([
+      "thread-coderabbit",
+    ]);
+    expect(filterReviewThreads(views, { origin: "human", reviewed: "reviewed", state: "resolved" }).map((view) => view.id)).toEqual([
+      "thread-human",
+    ]);
+    expect(filterReviewThreads(views, { origin: "human", reviewed: "unreviewed", state: "outdated" }).map((view) => view.id)).toEqual([
+      "thread-outdated",
+    ]);
+    expect(filterReviewThreads(views, { origin: "all", reviewed: "all", state: "current" }).map((view) => view.id)).not.toContain(
+      "thread-outdated",
+    );
+  });
+
+  it("marks Review Threads reviewed locally and distinguishes outdated threads in the UI", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const queue = screen.getByLabelText("Review thread queue");
+    expect(within(queue).getAllByText("Outdated").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: /mark reviewed/i }));
+
+    expect(await screen.findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+    expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
+
+    await user.selectOptions(screen.getByLabelText("Source"), "human");
+    await user.selectOptions(screen.getByLabelText("State"), "outdated");
+
+    expect(within(queue).getByText("src-tauri/src/github.rs")).toBeInTheDocument();
+    expect(within(queue).queryByText("src/auth/session.ts")).not.toBeInTheDocument();
   });
 });

@@ -40,6 +40,19 @@ import {
 } from "./lib/pr-cache";
 import { buildReviewOverview, type RepositoryHotspotOverride } from "./lib/review-overview";
 import {
+  buildReviewQueueCounts,
+  buildReviewThreadViews,
+  defaultReviewQueueFilters,
+  filterReviewThreads,
+  readReviewQueueStore,
+  setReviewThreadReviewed,
+  syncReviewThreads,
+  type ReviewOriginFilter,
+  type ReviewQueueFilters,
+  type ReviewReviewedFilter,
+  type ReviewStateFilter,
+} from "./lib/review-queue";
+import {
   getPullRequestKey,
   localReviewSessionClient,
   parsePullRequestUrl,
@@ -64,6 +77,14 @@ type AppProps = {
   reviewSessionClient?: ReviewSessionClient;
 };
 
+type QueueButton = {
+  id: string;
+  label: string;
+  count: number;
+  tone: "danger" | "warning" | "info" | "muted";
+  filters: ReviewQueueFilters;
+};
+
 const checkingSession: AuthSession = {
   state: "checking",
   storage: {
@@ -73,13 +94,6 @@ const checkingSession: AuthSession = {
   accountLogin: null,
   tokenHint: null,
 };
-
-const queues = [
-  { id: "needs-attention", label: "Needs attention", count: 14, tone: "danger" as const },
-  { id: "coderabbit", label: "CodeRabbit", count: 11, tone: "warning" as const },
-  { id: "humans", label: "Human threads", count: 3, tone: "info" as const },
-  { id: "resolved-unreviewed", label: "Resolved + unreviewed", count: 6, tone: "muted" as const },
-];
 
 const files = [
   { path: "src/auth/session.ts", status: "modified", lines: "+128 -86", viewed: false },
@@ -190,6 +204,26 @@ function getCheckBadge(status: string, conclusion: string | null) {
   return { label: conclusion.replace("-", " "), variant: "danger" as const };
 }
 
+function getThreadStateLabel(state: "unresolved" | "resolved" | "outdated") {
+  if (state === "unresolved") {
+    return "Unresolved";
+  }
+  if (state === "resolved") {
+    return "Resolved";
+  }
+  return "Outdated";
+}
+
+function getThreadTitle(body: string) {
+  const firstLine = body.split("\n")[0]?.trim() ?? "";
+  const firstSentence = firstLine.split(".")[0]?.trim() ?? "";
+  return firstSentence.length > 0 ? firstSentence.slice(0, 96) : "Review thread";
+}
+
+function filtersMatch(left: ReviewQueueFilters, right: ReviewQueueFilters) {
+  return left.origin === right.origin && left.reviewed === right.reviewed && left.state === right.state;
+}
+
 function createOverviewCache(pullRequest: PullRequestSummary, cached?: CachedPullRequestData): CachedPullRequestData {
   const normalizedCached = cached
     ? {
@@ -234,6 +268,24 @@ function createOverviewCache(pullRequest: PullRequestSummary, cached?: CachedPul
         line: selectedThread.line,
         state: "unresolved",
         body: selectedThread.body,
+        updatedAt: pullRequest.updatedAt,
+      },
+      {
+        id: "thread-2",
+        authorLogin: "monalisa",
+        filePath: "src/review/queue.ts",
+        line: 88,
+        state: "resolved",
+        body: "The queue filter path should keep resolved review threads available for audit, even after GitHub marks them resolved.",
+        updatedAt: pullRequest.updatedAt,
+      },
+      {
+        id: "thread-3",
+        authorLogin: "hubot",
+        filePath: "src-tauri/src/github.rs",
+        line: 44,
+        state: "outdated",
+        body: "This review comment points at an older diff hunk and should stay visible as outdated context.",
         updatedAt: pullRequest.updatedAt,
       },
     ],
@@ -310,6 +362,9 @@ export function App({
   const [quickOpenError, setQuickOpenError] = useState<string | null>(null);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [selectedPullRequestKey, setSelectedPullRequestKey] = useState<string | null>(null);
+  const [selectedReviewThreadId, setSelectedReviewThreadId] = useState<string | null>(null);
+  const [reviewQueueFilters, setReviewQueueFilters] = useState<ReviewQueueFilters>(defaultReviewQueueFilters);
+  const [reviewQueueRevision, setReviewQueueRevision] = useState(0);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>(idleRefreshStatus);
   const [cacheSummary, setCacheSummary] = useState<CacheStats>(() => cacheStats());
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
@@ -339,6 +394,73 @@ export function App({
     repositoryHotspotOverrides[selectedPullRequest.repository],
   );
   const readinessBadge = getReadinessBadge(reviewOverview.readiness.state);
+  const reviewThreadSignature = reviewOverviewCache.reviewThreads
+    .map((thread) => `${thread.id}:${thread.state}:${thread.updatedAt}`)
+    .join("|");
+  const reviewQueueStore = useMemo(() => readReviewQueueStore(), [reviewQueueRevision]);
+  const reviewThreadViews = buildReviewThreadViews(
+    currentUserKey,
+    getPullRequestKey(selectedPullRequest),
+    reviewOverviewCache.reviewThreads,
+    reviewQueueStore,
+  );
+  const filteredReviewThreads = filterReviewThreads(reviewThreadViews, reviewQueueFilters);
+  const reviewQueueCounts = buildReviewQueueCounts(reviewThreadViews);
+  const queueButtons: QueueButton[] = [
+    {
+      id: "needs-attention",
+      label: "Needs attention",
+      count: reviewQueueCounts.needsAttention,
+      tone: "danger" as const,
+      filters: { origin: "all", reviewed: "unreviewed", state: "current" } satisfies ReviewQueueFilters,
+    },
+    {
+      id: "coderabbit",
+      label: "CodeRabbit",
+      count: reviewQueueCounts.coderabbit,
+      tone: "warning" as const,
+      filters: { origin: "coderabbit", reviewed: "all", state: "all" } satisfies ReviewQueueFilters,
+    },
+    {
+      id: "humans",
+      label: "Human threads",
+      count: reviewQueueCounts.humans,
+      tone: "info" as const,
+      filters: { origin: "human", reviewed: "all", state: "all" } satisfies ReviewQueueFilters,
+    },
+    {
+      id: "resolved-unreviewed",
+      label: "Resolved + unreviewed",
+      count: reviewQueueCounts.resolvedUnreviewed,
+      tone: "muted" as const,
+      filters: { origin: "all", reviewed: "unreviewed", state: "resolved" } satisfies ReviewQueueFilters,
+    },
+  ];
+  const activeQueue =
+    queueButtons.find((queue) => filtersMatch(queue.filters, reviewQueueFilters)) ??
+    ({
+      id: "custom",
+      label: "Custom",
+      count: filteredReviewThreads.length,
+      tone: "info" as const,
+      filters: reviewQueueFilters,
+    } satisfies QueueButton);
+  const selectedReviewThread =
+    reviewThreadViews.find((view) => view.id === selectedReviewThreadId) ??
+    filteredReviewThreads[0] ??
+    reviewThreadViews[0] ??
+    null;
+  const selectedReviewThreadIndex = selectedReviewThread
+    ? Math.max(filteredReviewThreads.findIndex((view) => view.id === selectedReviewThread.id), 0)
+    : 0;
+  const activeThread = selectedReviewThread?.thread ?? null;
+  const activeThreadAuthor = activeThread?.authorLogin ?? selectedThread.author;
+  const activeThreadFile = activeThread?.filePath ?? selectedThread.file;
+  const activeThreadLine = activeThread?.line ?? selectedThread.line;
+  const activeThreadState = activeThread?.state ?? "unresolved";
+  const activeThreadStateLabel = activeThread ? getThreadStateLabel(activeThread.state) : selectedThread.state;
+  const activeThreadTitle = activeThread ? getThreadTitle(activeThread.body) : selectedThread.title;
+  const activeThreadBody = activeThread?.body ?? selectedThread.body;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -436,7 +558,15 @@ export function App({
     }
 
     void reviewSessionClient.saveSession(currentUserKey, selectedPullRequest, buildReviewSessionSnapshot());
-  }, [activePullRequestKey, currentUserKey, focusMode, includeDrafts, reviewSessionClient, routedPullRequests.length]);
+  }, [
+    activePullRequestKey,
+    currentUserKey,
+    focusMode,
+    includeDrafts,
+    reviewSessionClient,
+    routedPullRequests.length,
+    selectedReviewThread?.id,
+  ]);
 
   useEffect(() => {
     if (!activePullRequestKey || routedPullRequests.length === 0) {
@@ -455,8 +585,12 @@ export function App({
     setCacheMessage(existing ? "Offline cache ready." : "Cached Pull Request metadata.");
   }, [activePullRequestKey, routedPullRequests.length, selectedPullRequest]);
 
+  useEffect(() => {
+    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+    setReviewQueueRevision((current) => current + 1);
+  }, [currentUserKey, reviewThreadSignature, selectedPullRequest]);
+
   const themeLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
-  const activeQueue = useMemo(() => queues[0], []);
   const authBadge = getAuthBadge(authSession);
   const signInDisabled = authBusy || authSession.state === "storage-unavailable";
 
@@ -515,9 +649,9 @@ export function App({
       activeQueueId: activeQueue.id,
       includeDrafts,
       focusMode,
-      threadKey: `${selectedThread.author}:${selectedThread.file}:${selectedThread.line}`,
-      filePath: selectedThread.file,
-      nearbyLine: selectedThread.line,
+      threadKey: selectedReviewThread?.id ?? `${selectedThread.author}:${selectedThread.file}:${selectedThread.line}`,
+      filePath: activeThreadFile,
+      nearbyLine: activeThreadLine ?? selectedThread.line,
       updatedAtEpochMs: Date.now(),
     };
   }
@@ -525,6 +659,7 @@ export function App({
   function applyReviewSession(snapshot: ReviewSessionSnapshot) {
     setIncludeDrafts(snapshot.includeDrafts);
     setFocusMode(snapshot.focusMode);
+    setSelectedReviewThreadId(snapshot.threadKey);
   }
 
   async function restoreReviewSessionFor(pullRequest: PullRequestSummary) {
@@ -671,6 +806,30 @@ export function App({
     clearFetchedGithubData();
     setCacheSummary(cacheStats());
     setCacheMessage("Cleared fetched GitHub cache. Review Session state stays local.");
+  };
+
+  const updateReviewQueueFilter = <Key extends keyof ReviewQueueFilters>(
+    key: Key,
+    value: ReviewQueueFilters[Key],
+  ) => {
+    setReviewQueueFilters((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  };
+
+  const applyReviewQueueFilters = (filters: ReviewQueueFilters) => {
+    setReviewQueueFilters(filters);
+  };
+
+  const handleSetSelectedThreadReviewed = (reviewed: boolean) => {
+    if (!selectedReviewThread) {
+      return;
+    }
+
+    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+    setReviewThreadReviewed(currentUserKey, selectedReviewThread.id, reviewed);
+    setReviewQueueRevision((current) => current + 1);
   };
 
   const refreshBadge = getRefreshBadge(refreshStatus);
@@ -844,22 +1003,101 @@ export function App({
             <section className="border-b border-border p-3">
               <div className="mb-2 flex items-center justify-between">
                 <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Review queues</h2>
-                <Badge variant="danger">{activeQueue.count}</Badge>
+                <Badge variant={activeQueue.tone}>{activeQueue.count}</Badge>
               </div>
               <div className="space-y-1">
-                {queues.map((queue) => (
+                {queueButtons.map((queue) => (
                   <button
                     className={cn(
                       "flex h-8 w-full items-center justify-between rounded-md px-2 text-left text-sm hover:bg-accent",
                       queue.id === activeQueue.id && "bg-accent text-accent-foreground",
                     )}
                     key={queue.id}
+                    onClick={() => applyReviewQueueFilters(queue.filters)}
                     type="button"
                   >
                     <span>{queue.label}</span>
                     <Badge variant={queue.tone}>{queue.count}</Badge>
                   </button>
                 ))}
+              </div>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                <label className="space-y-1">
+                  <span className="text-muted-foreground">Source</span>
+                  <select
+                    className="h-8 w-full rounded-md border border-input bg-background px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onChange={(event) => updateReviewQueueFilter("origin", event.target.value as ReviewOriginFilter)}
+                    value={reviewQueueFilters.origin}
+                  >
+                    <option value="all">All</option>
+                    <option value="coderabbit">CodeRabbit</option>
+                    <option value="human">Human</option>
+                  </select>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-muted-foreground">Reviewed</span>
+                  <select
+                    className="h-8 w-full rounded-md border border-input bg-background px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onChange={(event) => updateReviewQueueFilter("reviewed", event.target.value as ReviewReviewedFilter)}
+                    value={reviewQueueFilters.reviewed}
+                  >
+                    <option value="all">All</option>
+                    <option value="unreviewed">Unreviewed</option>
+                    <option value="reviewed">Reviewed</option>
+                  </select>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-muted-foreground">State</span>
+                  <select
+                    className="h-8 w-full rounded-md border border-input bg-background px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onChange={(event) => updateReviewQueueFilter("state", event.target.value as ReviewStateFilter)}
+                    value={reviewQueueFilters.state}
+                  >
+                    <option value="all">All</option>
+                    <option value="unresolved">Unresolved</option>
+                    <option value="resolved">Resolved</option>
+                    <option value="outdated">Outdated</option>
+                    <option value="current">Current</option>
+                  </select>
+                </label>
+              </div>
+            </section>
+
+            <section className="border-b border-border p-3" aria-label="Review thread queue">
+              <div className="mb-2 flex items-center justify-between">
+                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Threads</h2>
+                <Badge variant="info">{filteredReviewThreads.length}</Badge>
+              </div>
+              <div className="max-h-44 space-y-2 overflow-auto">
+                {filteredReviewThreads.length === 0 ? (
+                  <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No Review Threads match these filters.</p>
+                ) : (
+                  filteredReviewThreads.map((view) => (
+                    <button
+                      aria-pressed={selectedReviewThread?.id === view.id}
+                      className={cn(
+                        "w-full rounded-md border border-border p-2 text-left hover:bg-accent",
+                        selectedReviewThread?.id === view.id && "border-primary bg-accent text-accent-foreground",
+                        view.outdated && "border-amber-500/50 bg-amber-500/10",
+                      )}
+                      key={view.id}
+                      onClick={() => setSelectedReviewThreadId(view.id)}
+                      type="button"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate text-sm font-medium">{view.thread.filePath}</span>
+                        <Badge variant={view.outdated ? "warning" : view.reviewed ? "success" : "muted"}>
+                          {view.outdated ? "Outdated" : view.reviewed ? "Reviewed" : "Unreviewed"}
+                        </Badge>
+                      </div>
+                      <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                        <span>{view.origin === "coderabbit" ? "CodeRabbit" : "Human"}</span>
+                        <span>{getThreadStateLabel(view.thread.state)}</span>
+                        {view.thread.line && <span>line {view.thread.line}</span>}
+                      </div>
+                    </button>
+                  ))
+                )}
               </div>
             </section>
 
@@ -897,8 +1135,8 @@ export function App({
           <div className="flex h-11 items-center justify-between border-b border-border px-3">
             <div className="flex min-w-0 items-center gap-2">
               <Badge variant="danger">Needs attention</Badge>
-              <span className="truncate text-sm font-medium">{selectedThread.file}</span>
-              <span className="text-xs text-muted-foreground">line {selectedThread.line}</span>
+              <span className="truncate text-sm font-medium">{activeThreadFile}</span>
+              <span className="text-xs text-muted-foreground">line {activeThreadLine ?? "unknown"}</span>
             </div>
             <Button variant="outline" size="sm" onClick={() => setFocusMode((current) => !current)}>
               {focusMode ? <PanelLeftOpen className="h-3.5 w-3.5" aria-hidden="true" /> : <PanelLeftClose className="h-3.5 w-3.5" aria-hidden="true" />}
@@ -945,12 +1183,17 @@ export function App({
             <div className="border-b border-border bg-muted/40 px-4 py-3">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <p className="text-xs text-muted-foreground">Review Path 1 of 14</p>
-                  <h3 className="mt-1 text-base font-semibold">{selectedThread.title}</h3>
+                  <p className="text-xs text-muted-foreground">
+                    Review Path {selectedReviewThreadIndex + 1} of {Math.max(filteredReviewThreads.length, 1)}
+                  </p>
+                  <h3 className="mt-1 text-base font-semibold">{activeThreadTitle}</h3>
                 </div>
                 <div className="flex items-center gap-2">
-                  <Badge variant="warning">CodeRabbit</Badge>
-                  <Badge variant="muted">{selectedThread.state}</Badge>
+                  <Badge variant={selectedReviewThread?.origin === "coderabbit" ? "warning" : "info"}>
+                    {selectedReviewThread?.origin === "coderabbit" ? "CodeRabbit" : "Human"}
+                  </Badge>
+                  <Badge variant={activeThreadState === "outdated" ? "warning" : "muted"}>{activeThreadStateLabel}</Badge>
+                  {selectedReviewThread?.reviewed && <Badge variant="success">Reviewed</Badge>}
                 </div>
               </div>
             </div>
@@ -997,13 +1240,18 @@ export function App({
                 <MessageSquare className="h-4 w-4" aria-hidden="true" />
                 Review Thread
               </div>
-              <p className="text-xs text-muted-foreground">@{selectedThread.author}</p>
-              <p className="mt-3 text-sm leading-6">{selectedThread.body}</p>
+              <p className="text-xs text-muted-foreground">@{activeThreadAuthor ?? "unknown"}</p>
+              <p className="mt-3 text-sm leading-6">{activeThreadBody}</p>
             </div>
 
             <div className="space-y-2 border-b border-border p-3">
-              <Button className="w-full justify-between" variant="secondary">
-                Mark reviewed
+              <Button
+                className="w-full justify-between"
+                variant="secondary"
+                onClick={() => handleSetSelectedThreadReviewed(!(selectedReviewThread?.reviewed ?? false))}
+                disabled={!selectedReviewThread}
+              >
+                {selectedReviewThread?.reviewed ? "Mark unreviewed" : "Mark reviewed"}
                 <Kbd>R</Kbd>
               </Button>
               <Button className="w-full justify-between" variant="outline">
