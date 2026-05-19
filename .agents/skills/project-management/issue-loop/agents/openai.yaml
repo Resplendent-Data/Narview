@@ -1,0 +1,4 @@
+interface:
+  display_name: "Issue Loop"
+  short_description: "Run project issue slices end to end"
+  default_prompt: "Use $issue-loop to keep starting and completing issues for a project."
