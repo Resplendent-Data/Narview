@@ -1,5 +1,4 @@
 import { readFile } from "node:fs/promises";
-import { verifyReleaseArtifacts } from "./verify-release-artifacts.mjs";
 
 const files = {
   workflow: ".github/workflows/release.yml",
@@ -37,18 +36,26 @@ assert(workflow.includes("tags:"), "Release workflow must be tag-driven.");
 assert(workflow.includes("v*.*.*"), "Release workflow must listen for SemVer-shaped v*.*.* tags.");
 assert(workflow.includes("^v[0-9]+\\.[0-9]+\\.[0-9]+"), "Release workflow must validate exact SemVer tags.");
 assert(workflow.includes("tauri-apps/tauri-action@v0"), "Release workflow must use tauri-action.");
-assert(workflow.includes("uploadUpdaterJson: true"), "Release workflow must upload updater metadata.");
 assert(workflow.includes("ubuntu-22.04"), "Release workflow must build Linux AppImage on Ubuntu 22.04.");
 assert(workflow.includes("macos-latest"), "Release workflow must build macOS artifacts.");
 assert(workflow.includes("aarch64-apple-darwin"), "Release workflow must build Apple Silicon macOS artifacts.");
 assert(workflow.includes("x86_64-apple-darwin"), "Release workflow must build Intel macOS artifacts.");
-assert(workflow.includes("TAURI_SIGNING_PRIVATE_KEY"), "Release workflow must require Tauri updater signing key.");
-assert(workflow.includes("NARVIEW_UPDATER_PUBLIC_KEY"), "Release workflow must inject the updater public key.");
-assert(workflow.includes("APPLE_CERTIFICATE"), "Release workflow must support macOS signing certificates.");
-assert(workflow.includes("APPLE_API_KEY_PATH"), "Release workflow must support macOS notarization API keys.");
-assert(workflow.includes("scripts/verify-release-artifacts.mjs"), "Release workflow must verify uploaded artifact paths.");
+assert(!workflow.includes("TAURI_SIGNING_PRIVATE_KEY"), "Release workflow must not require updater signing secrets yet.");
+assert(!workflow.includes("APPLE_CERTIFICATE"), "Release workflow must not require macOS signing secrets yet.");
+assert(!workflow.includes("APPLE_API_KEY_PATH"), "Release workflow must not require macOS notarization secrets yet.");
 assert(workflow.includes("npm run test:release-config"), "Release workflow must run release dry-run checks.");
 assert(workflow.includes("npm run test:smoke"), "Release workflow must run smoke tests before publishing.");
+
+assert(
+  packageJson.dependencies?.["@tauri-apps/plugin-updater"],
+  "Runtime app must depend on the Tauri updater JavaScript plugin.",
+);
+assert(
+  packageJson.dependencies?.["@tauri-apps/plugin-process"],
+  "Runtime app must depend on the Tauri process JavaScript plugin for relaunch.",
+);
+assert(cargoToml.includes("tauri-plugin-updater"), "Rust app must register the Tauri updater plugin.");
+assert(cargoToml.includes("tauri-plugin-process"), "Rust app must register the Tauri process plugin.");
 
 assert(releaseTemplate.bundle?.createUpdaterArtifacts === true, "Release template must enable updater artifacts.");
 assert(
@@ -65,20 +72,14 @@ assert(
 );
 
 assert(tauriConfig.bundle?.targets?.includes("appimage"), "Default Tauri config must keep AppImage enabled.");
-assert(releaseDocs.includes("TAURI_SIGNING_PRIVATE_KEY"), "Release docs must describe updater signing secrets.");
-assert(releaseDocs.includes("APPLE_CERTIFICATE"), "Release docs must describe macOS signing secrets.");
+assert(tauriConfig.plugins?.updater?.pubkey, "Default Tauri config must include an updater public key.");
+assert(
+  tauriConfig.plugins?.updater?.endpoints?.includes(
+    "https://github.com/Resplendent-Data/Narview/releases/latest/download/latest.json",
+  ),
+  "Default Tauri config must point update checks at the Narview GitHub Release latest.json.",
+);
+assert(releaseDocs.includes("Signing deferred"), "Release docs must state that signing is deferred.");
 assert(releaseDocs.includes("v0.1.0"), "Release docs must show the SemVer tag shape.");
-
-verifyReleaseArtifacts({
-  platform: "linux",
-  artifactPaths:
-    '["target/release/bundle/appimage/Narview_0.1.0_amd64.AppImage","target/release/bundle/appimage/Narview_0.1.0_amd64.AppImage.sig"]',
-});
-
-verifyReleaseArtifacts({
-  platform: "macos",
-  artifactPaths:
-    '["target/release/bundle/dmg/Narview_0.1.0_aarch64.dmg","target/aarch64-apple-darwin/release/bundle/macos/Narview.app.tar.gz","target/aarch64-apple-darwin/release/bundle/macos/Narview.app.tar.gz.sig"]',
-});
 
 console.log("Release configuration dry-run checks passed.");

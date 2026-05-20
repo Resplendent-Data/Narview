@@ -1,6 +1,6 @@
 [package]
 name = "narview"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 description = "A remote-first GitHub pull request review workspace."
 authors = ["Narview"]
 edition = "2021"
@@ -18,9 +18,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 keyring = { version = "3.6.3", features = ["apple-native", "linux-native-sync-persistent", "crypto-rust", "vendored"] }
-open = "5.3.5"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
 uuid = { version = "1.23.1", features = ["v4"] }

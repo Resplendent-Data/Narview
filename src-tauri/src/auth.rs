@@ -1,4 +1,10 @@
 use std::collections::HashMap;
+#[cfg(debug_assertions)]
+use std::fs::{self, OpenOptions};
+#[cfg(debug_assertions)]
+use std::io::{ErrorKind, Write};
+#[cfg(debug_assertions)]
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,7 +17,10 @@ const KEYRING_SERVICE: &str = "com.resplendent-data.narview";
 const KEYRING_USER: &str = "github-oauth";
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+const DEFAULT_GITHUB_OAUTH_CLIENT_ID: &str = "Ov23li1PomYCgqAQ2nvr";
 const DEFAULT_GITHUB_SCOPES: &str = "repo read:user";
+#[cfg(debug_assertions)]
+const DEV_TOKEN_FILE_NAME: &str = "dev-github-token";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecureStoreError {
@@ -136,6 +145,134 @@ impl SecureTokenStore for UnavailableTokenStore {
     }
 }
 
+#[cfg(debug_assertions)]
+struct DevFileTokenStore {
+    path: PathBuf,
+}
+
+#[cfg(debug_assertions)]
+impl DevFileTokenStore {
+    fn new() -> Result<Self, SecureStoreError> {
+        Self::with_path(dev_token_path()?)
+    }
+
+    fn with_path(path: PathBuf) -> Result<Self, SecureStoreError> {
+        Ok(Self { path })
+    }
+}
+
+#[cfg(debug_assertions)]
+impl SecureTokenStore for DevFileTokenStore {
+    fn load_token(&self) -> Result<Option<String>, SecureStoreError> {
+        match fs::read_to_string(&self.path) {
+            Ok(token) => {
+                let token = token.trim().to_string();
+                Ok((!token.is_empty()).then_some(token))
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(SecureStoreError::operation(format!(
+                "Could not read dev GitHub token: {error}"
+            ))),
+        }
+    }
+
+    fn save_token(&self, token: &str) -> Result<(), SecureStoreError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                SecureStoreError::operation(format!(
+                    "Could not create dev token directory: {error}"
+                ))
+            })?;
+        }
+
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let mut file = options.open(&self.path).map_err(|error| {
+            SecureStoreError::operation(format!("Could not write dev GitHub token: {error}"))
+        })?;
+        file.write_all(token.as_bytes()).map_err(|error| {
+            SecureStoreError::operation(format!("Could not write dev GitHub token: {error}"))
+        })?;
+        file.write_all(b"\n").map_err(|error| {
+            SecureStoreError::operation(format!("Could not finish dev GitHub token write: {error}"))
+        })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600)).map_err(
+                |error| {
+                    SecureStoreError::operation(format!(
+                        "Could not secure dev GitHub token permissions: {error}"
+                    ))
+                },
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn clear_token(&self) -> Result<(), SecureStoreError> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(SecureStoreError::operation(format!(
+                "Could not remove dev GitHub token: {error}"
+            ))),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+fn dev_token_path() -> Result<PathBuf, SecureStoreError> {
+    if let Some(path) = normalize_env_value(std::env::var("NARVIEW_DEV_TOKEN_PATH").ok()) {
+        return Ok(PathBuf::from(path));
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(data_home) = normalize_env_value(std::env::var("XDG_DATA_HOME").ok()) {
+        return Ok(PathBuf::from(data_home)
+            .join(KEYRING_SERVICE)
+            .join(DEV_TOKEN_FILE_NAME));
+    }
+
+    let home = normalize_env_value(std::env::var("HOME").ok()).ok_or_else(|| {
+        SecureStoreError::unavailable("Could not locate a home directory for dev token storage.")
+    })?;
+
+    #[cfg(target_os = "macos")]
+    {
+        Ok(PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join(KEYRING_SERVICE)
+            .join(DEV_TOKEN_FILE_NAME))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Ok(PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join(KEYRING_SERVICE)
+            .join(DEV_TOKEN_FILE_NAME))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Ok(PathBuf::from(home)
+            .join(".narview")
+            .join(DEV_TOKEN_FILE_NAME))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuthSessionKind {
@@ -212,6 +349,10 @@ impl AuthCommandError {
             message: redact_secrets(&message.into()),
         }
     }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl From<SecureStoreError> for AuthCommandError {
@@ -232,19 +373,18 @@ struct PendingOAuthFlow {
 
 pub struct AuthState {
     token_store: Box<dyn SecureTokenStore>,
+    cached_token: Mutex<Option<String>>,
     pending_flows: Mutex<HashMap<String, PendingOAuthFlow>>,
     http: reqwest::Client,
 }
 
 impl AuthState {
     pub fn new() -> Self {
-        let token_store: Box<dyn SecureTokenStore> = match NativeKeyringTokenStore::new() {
-            Ok(store) => Box::new(store),
-            Err(error) => Box::new(UnavailableTokenStore::new(error)),
-        };
+        let token_store = default_token_store();
 
         Self {
             token_store,
+            cached_token: Mutex::new(None),
             pending_flows: Mutex::new(HashMap::new()),
             http: reqwest::Client::new(),
         }
@@ -254,22 +394,73 @@ impl AuthState {
     fn with_token_store(token_store: Box<dyn SecureTokenStore>) -> Self {
         Self {
             token_store,
+            cached_token: Mutex::new(None),
             pending_flows: Mutex::new(HashMap::new()),
             http: reqwest::Client::new(),
         }
     }
 
     fn session(&self) -> AuthSession {
-        session_from_store(self.token_store.as_ref())
+        match self.load_token() {
+            Ok(Some(_token)) => AuthSession::signed_in(),
+            Ok(None) => AuthSession::signed_out(),
+            Err(error) => AuthSession::storage_unavailable(error),
+        }
     }
 
     fn sign_out_session(&self) -> Result<AuthSession, AuthCommandError> {
-        self.token_store.clear_token()?;
+        let clear_result = self.token_store.clear_token();
+        self.cache_token(None)?;
+        clear_result?;
         Ok(AuthSession::signed_out())
     }
 
     pub(crate) fn github_token(&self) -> Result<Option<String>, AuthCommandError> {
-        self.token_store.load_token().map_err(AuthCommandError::from)
+        self.load_token().map_err(AuthCommandError::from)
+    }
+
+    fn load_token(&self) -> Result<Option<String>, SecureStoreError> {
+        if let Some(token) = self
+            .cached_token
+            .lock()
+            .map_err(|_| {
+                SecureStoreError::operation("Could not read the in-memory GitHub token cache.")
+            })?
+            .clone()
+        {
+            return Ok(Some(token));
+        }
+
+        let token = self.token_store.load_token()?;
+        if let Some(token_value) = token.as_ref() {
+            self.cache_token(Some(token_value.clone()))?;
+        }
+
+        Ok(token)
+    }
+
+    fn cache_token(&self, token: Option<String>) -> Result<(), SecureStoreError> {
+        *self.cached_token.lock().map_err(|_| {
+            SecureStoreError::operation("Could not update the in-memory GitHub token cache.")
+        })? = token;
+        Ok(())
+    }
+}
+
+fn default_token_store() -> Box<dyn SecureTokenStore> {
+    #[cfg(debug_assertions)]
+    if normalize_env_value(std::env::var("NARVIEW_USE_KEYCHAIN_IN_DEV").ok()).as_deref()
+        != Some("1")
+    {
+        return match DevFileTokenStore::new() {
+            Ok(store) => Box::new(store),
+            Err(error) => Box::new(UnavailableTokenStore::new(error)),
+        };
+    }
+
+    match NativeKeyringTokenStore::new() {
+        Ok(store) => Box::new(store),
+        Err(error) => Box::new(UnavailableTokenStore::new(error)),
     }
 }
 
@@ -281,26 +472,32 @@ struct OAuthConfig {
 
 impl OAuthConfig {
     fn from_env() -> Result<Self, AuthCommandError> {
-        let client_id = std::env::var("NARVIEW_GITHUB_CLIENT_ID")
-            .or_else(|_| std::env::var("NARVIEW_GITHUB_OAUTH_CLIENT_ID"))
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                AuthCommandError::new(
-                    "github-oauth-client-missing",
-                    "Set NARVIEW_GITHUB_CLIENT_ID before starting GitHub sign-in.",
-                )
-            })?;
-
-        let scopes = std::env::var("NARVIEW_GITHUB_SCOPES")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| DEFAULT_GITHUB_SCOPES.to_string());
-
-        Ok(Self { client_id, scopes })
+        Ok(Self::from_values(
+            std::env::var("NARVIEW_GITHUB_CLIENT_ID").ok(),
+            std::env::var("NARVIEW_GITHUB_OAUTH_CLIENT_ID").ok(),
+            std::env::var("NARVIEW_GITHUB_SCOPES").ok(),
+        ))
     }
+
+    fn from_values(
+        client_id: Option<String>,
+        legacy_client_id: Option<String>,
+        scopes: Option<String>,
+    ) -> Self {
+        let client_id = normalize_env_value(client_id)
+            .or_else(|| normalize_env_value(legacy_client_id))
+            .unwrap_or_else(|| DEFAULT_GITHUB_OAUTH_CLIENT_ID.to_string());
+        let scopes =
+            normalize_env_value(scopes).unwrap_or_else(|| DEFAULT_GITHUB_SCOPES.to_string());
+
+        Self { client_id, scopes }
+    }
+}
+
+fn normalize_env_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, Deserialize)]
@@ -371,16 +568,13 @@ pub async fn start_github_oauth(
     let flow_id = Uuid::new_v4().to_string();
     let interval_seconds = response.interval.unwrap_or(5);
     let expires_at_epoch_seconds = now_epoch_seconds() + response.expires_in;
-    let browser_url = response
-        .verification_uri_complete
-        .as_deref()
-        .unwrap_or(&response.verification_uri)
-        .to_string();
 
     state
         .pending_flows
         .lock()
-        .map_err(|_| AuthCommandError::new("oauth-state-lock-failed", "Could not update OAuth state."))?
+        .map_err(|_| {
+            AuthCommandError::new("oauth-state-lock-failed", "Could not update OAuth state.")
+        })?
         .insert(
             flow_id.clone(),
             PendingOAuthFlow {
@@ -390,8 +584,6 @@ pub async fn start_github_oauth(
             },
         );
 
-    let opened_browser = open::that(browser_url).is_ok();
-
     Ok(OAuthStartResponse {
         flow_id,
         user_code: response.user_code,
@@ -399,7 +591,7 @@ pub async fn start_github_oauth(
         verification_uri_complete: response.verification_uri_complete,
         expires_at_epoch_seconds,
         interval_seconds,
-        opened_browser,
+        opened_browser: false,
     })
 }
 
@@ -410,21 +602,24 @@ pub async fn poll_github_oauth(
 ) -> Result<OAuthPollResponse, AuthCommandError> {
     let config = OAuthConfig::from_env()?;
     let flow = {
-        let pending_flows = state
-            .pending_flows
-            .lock()
-            .map_err(|_| AuthCommandError::new("oauth-state-lock-failed", "Could not read OAuth state."))?;
-        pending_flows
-            .get(&flow_id)
-            .cloned()
-            .ok_or_else(|| AuthCommandError::new("oauth-flow-not-found", "This GitHub sign-in flow is no longer active."))?
+        let pending_flows = state.pending_flows.lock().map_err(|_| {
+            AuthCommandError::new("oauth-state-lock-failed", "Could not read OAuth state.")
+        })?;
+        pending_flows.get(&flow_id).cloned().ok_or_else(|| {
+            AuthCommandError::new(
+                "oauth-flow-not-found",
+                "This GitHub sign-in flow is no longer active.",
+            )
+        })?
     };
 
     if now_epoch_seconds() >= flow.expires_at_epoch_seconds {
         state
             .pending_flows
             .lock()
-            .map_err(|_| AuthCommandError::new("oauth-state-lock-failed", "Could not update OAuth state."))?
+            .map_err(|_| {
+                AuthCommandError::new("oauth-state-lock-failed", "Could not update OAuth state.")
+            })?
             .remove(&flow_id);
         return Ok(OAuthPollResponse {
             state: OAuthPollState::Expired,
@@ -437,10 +632,13 @@ pub async fn poll_github_oauth(
     let response = request_access_token(&state.http, &config, &flow.device_code).await?;
     if let Some(token) = response.access_token {
         state.token_store.save_token(&token)?;
+        state.cache_token(Some(token))?;
         state
             .pending_flows
             .lock()
-            .map_err(|_| AuthCommandError::new("oauth-state-lock-failed", "Could not update OAuth state."))?
+            .map_err(|_| {
+                AuthCommandError::new("oauth-state-lock-failed", "Could not update OAuth state.")
+            })?
             .remove(&flow_id);
         return Ok(OAuthPollResponse {
             state: OAuthPollState::Authorized,
@@ -454,7 +652,9 @@ pub async fn poll_github_oauth(
         Some("authorization_pending") => Ok(OAuthPollResponse {
             state: OAuthPollState::Pending,
             interval_seconds: flow.interval_seconds,
-            message: response.error_description.map(|value| redact_secrets(&value)),
+            message: response
+                .error_description
+                .map(|value| redact_secrets(&value)),
             session: None,
         }),
         Some("slow_down") => {
@@ -462,7 +662,12 @@ pub async fn poll_github_oauth(
             state
                 .pending_flows
                 .lock()
-                .map_err(|_| AuthCommandError::new("oauth-state-lock-failed", "Could not update OAuth state."))?
+                .map_err(|_| {
+                    AuthCommandError::new(
+                        "oauth-state-lock-failed",
+                        "Could not update OAuth state.",
+                    )
+                })?
                 .insert(
                     flow_id,
                     PendingOAuthFlow {
@@ -473,7 +678,9 @@ pub async fn poll_github_oauth(
             Ok(OAuthPollResponse {
                 state: OAuthPollState::SlowDown,
                 interval_seconds,
-                message: response.error_description.map(|value| redact_secrets(&value)),
+                message: response
+                    .error_description
+                    .map(|value| redact_secrets(&value)),
                 session: None,
             })
         }
@@ -481,12 +688,19 @@ pub async fn poll_github_oauth(
             state
                 .pending_flows
                 .lock()
-                .map_err(|_| AuthCommandError::new("oauth-state-lock-failed", "Could not update OAuth state."))?
+                .map_err(|_| {
+                    AuthCommandError::new(
+                        "oauth-state-lock-failed",
+                        "Could not update OAuth state.",
+                    )
+                })?
                 .remove(&flow_id);
             Ok(OAuthPollResponse {
                 state: OAuthPollState::Expired,
                 interval_seconds: flow.interval_seconds,
-                message: response.error_description.map(|value| redact_secrets(&value)),
+                message: response
+                    .error_description
+                    .map(|value| redact_secrets(&value)),
                 session: Some(state.session()),
             })
         }
@@ -494,12 +708,19 @@ pub async fn poll_github_oauth(
             state
                 .pending_flows
                 .lock()
-                .map_err(|_| AuthCommandError::new("oauth-state-lock-failed", "Could not update OAuth state."))?
+                .map_err(|_| {
+                    AuthCommandError::new(
+                        "oauth-state-lock-failed",
+                        "Could not update OAuth state.",
+                    )
+                })?
                 .remove(&flow_id);
             Ok(OAuthPollResponse {
                 state: OAuthPollState::Denied,
                 interval_seconds: flow.interval_seconds,
-                message: response.error_description.map(|value| redact_secrets(&value)),
+                message: response
+                    .error_description
+                    .map(|value| redact_secrets(&value)),
                 session: Some(state.session()),
             })
         }
@@ -533,7 +754,10 @@ async fn request_device_code(
     if !response.status().is_success() {
         return Err(AuthCommandError::new(
             "github-oauth-start-failed",
-            format!("GitHub rejected OAuth start with HTTP {}.", response.status()),
+            format!(
+                "GitHub rejected OAuth start with HTTP {}.",
+                response.status()
+            ),
         ));
     }
 
@@ -555,10 +779,7 @@ async fn request_access_token(
         .form(&[
             ("client_id", config.client_id.as_str()),
             ("device_code", device_code),
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:device_code",
-            ),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
         ])
         .send()
         .await
@@ -567,7 +788,10 @@ async fn request_access_token(
     if !response.status().is_success() {
         return Err(AuthCommandError::new(
             "github-oauth-poll-failed",
-            format!("GitHub rejected OAuth polling with HTTP {}.", response.status()),
+            format!(
+                "GitHub rejected OAuth polling with HTTP {}.",
+                response.status()
+            ),
         ));
     }
 
@@ -577,6 +801,7 @@ async fn request_access_token(
         .map_err(|error| AuthCommandError::new("github-oauth-response-error", error.to_string()))
 }
 
+#[cfg(test)]
 fn session_from_store(store: &dyn SecureTokenStore) -> AuthSession {
     match store.load_token() {
         Ok(Some(_token)) => AuthSession::signed_in(),
@@ -620,7 +845,7 @@ fn redact_prefixed_secret(mut value: String, prefix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
@@ -673,6 +898,44 @@ mod tests {
 
         fn clear_token(&self) -> Result<(), SecureStoreError> {
             Err(SecureStoreError::unavailable(self.message.clone()))
+        }
+    }
+
+    struct ToggleTokenStore {
+        token: Mutex<Option<String>>,
+        fail_load: Mutex<bool>,
+    }
+
+    impl ToggleTokenStore {
+        fn with_token(token: &str) -> Self {
+            Self {
+                token: Mutex::new(Some(token.to_string())),
+                fail_load: Mutex::new(false),
+            }
+        }
+
+        fn set_fail_load(&self, fail: bool) {
+            *self.fail_load.lock().unwrap() = fail;
+        }
+    }
+
+    impl SecureTokenStore for Arc<ToggleTokenStore> {
+        fn load_token(&self) -> Result<Option<String>, SecureStoreError> {
+            if *self.fail_load.lock().unwrap() {
+                return Err(SecureStoreError::operation("keychain read failed"));
+            }
+
+            Ok(self.token.lock().unwrap().clone())
+        }
+
+        fn save_token(&self, token: &str) -> Result<(), SecureStoreError> {
+            *self.token.lock().unwrap() = Some(token.to_string());
+            Ok(())
+        }
+
+        fn clear_token(&self) -> Result<(), SecureStoreError> {
+            *self.token.lock().unwrap() = None;
+            Ok(())
         }
     }
 
@@ -734,5 +997,69 @@ mod tests {
         let store = MemoryTokenStore::empty();
 
         assert_eq!(session_from_store(&store).state, AuthSessionKind::SignedOut);
+    }
+
+    #[test]
+    fn github_token_uses_process_cache_after_first_secure_store_read() {
+        let token = "gho_secretabcdefghijklmnopqrstuvwxyz123456";
+        let store = Arc::new(ToggleTokenStore::with_token(token));
+        let state = AuthState::with_token_store(Box::new(store.clone()));
+
+        assert_eq!(state.github_token().unwrap().as_deref(), Some(token));
+
+        store.set_fail_load(true);
+
+        assert_eq!(state.github_token().unwrap().as_deref(), Some(token));
+        assert_eq!(state.session().state, AuthSessionKind::SignedIn);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn dev_file_token_store_persists_without_keychain() {
+        let token = "gho_secretabcdefghijklmnopqrstuvwxyz123456";
+        let path = std::env::temp_dir().join(format!("narview-dev-token-{}", uuid::Uuid::new_v4()));
+        let store = DevFileTokenStore::with_path(path.clone()).unwrap();
+
+        assert_eq!(store.load_token().unwrap(), None);
+
+        store.save_token(token).unwrap();
+
+        assert_eq!(store.load_token().unwrap().as_deref(), Some(token));
+
+        store.clear_token().unwrap();
+
+        assert_eq!(store.load_token().unwrap(), None);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn oauth_config_uses_bundled_public_client_id_by_default() {
+        let config = OAuthConfig::from_values(None, None, None);
+
+        assert_eq!(config.client_id, DEFAULT_GITHUB_OAUTH_CLIENT_ID);
+        assert_eq!(config.scopes, DEFAULT_GITHUB_SCOPES);
+    }
+
+    #[test]
+    fn oauth_config_allows_environment_overrides() {
+        let config = OAuthConfig::from_values(
+            Some(" override-client ".to_string()),
+            Some(" legacy-client ".to_string()),
+            Some(" read:user ".to_string()),
+        );
+
+        assert_eq!(config.client_id, "override-client");
+        assert_eq!(config.scopes, "read:user");
+    }
+
+    #[test]
+    fn oauth_config_falls_back_to_legacy_client_override() {
+        let config = OAuthConfig::from_values(
+            Some(" ".to_string()),
+            Some(" legacy-client ".to_string()),
+            None,
+        );
+
+        assert_eq!(config.client_id, "legacy-client");
     }
 }

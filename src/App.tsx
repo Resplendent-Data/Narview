@@ -1,4 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Check,
   ChevronRight,
@@ -9,6 +10,7 @@ import {
   ExternalLink,
   FileCode2,
   FileText,
+  Folder,
   Github,
   GitPullRequest,
   Keyboard,
@@ -22,15 +24,18 @@ import {
   RefreshCw,
   Rows3,
   Search,
+  Settings,
   ShieldAlert,
   ShieldCheck,
   Sun,
   Trash2,
 } from "lucide-react";
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, type Ref, useEffect, useMemo, useRef, useState } from "react";
+import { MarkdownContent } from "./components/markdown-content";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Kbd } from "./components/ui/kbd";
+import { type AppUpdateClient, useAppUpdater } from "./lib/app-updater";
 import { type AuthClient, type AuthSession, type OAuthStartResponse, tauriAuthClient } from "./lib/auth";
 import {
   buildLazyDiffState,
@@ -59,6 +64,7 @@ import {
   readCachedPullRequest,
   setCachedPullRequestPinned,
   upsertCachedPullRequest,
+  writeCachedPullRequestData,
   type CachedFileSummary,
   type CachedPullRequestData,
   type CachedReviewThread,
@@ -74,9 +80,10 @@ import {
   setFileChangeViewed,
   syncFileChanges,
   type FileChangeFilters,
+  type FileChangeView,
   type FileKind,
 } from "./lib/file-changes";
-import { buildReviewOverview, type RepositoryHotspotOverride } from "./lib/review-overview";
+import { buildReviewOverview, type HotspotScore, type RepositoryHotspotOverride } from "./lib/review-overview";
 import {
   buildReviewQueueCounts,
   buildReviewThreadViews,
@@ -90,6 +97,7 @@ import {
   type ReviewQueueFilters,
   type ReviewReviewedFilter,
   type ReviewStateFilter,
+  type ReviewThreadView,
 } from "./lib/review-queue";
 import {
   clearReviewSessionStore,
@@ -123,6 +131,7 @@ type AppProps = {
   workspaceClient?: WorkspaceClient;
   reviewSessionClient?: ReviewSessionClient;
   threadActionClient?: ThreadActionClient;
+  updaterClient?: AppUpdateClient;
 };
 
 type CommandPaletteItem = {
@@ -144,6 +153,25 @@ type QueueButton = {
   tone: "danger" | "warning" | "info" | "muted";
   filters: ReviewQueueFilters;
 };
+
+type FileExplorerRow =
+  | {
+      type: "directory";
+      id: string;
+      name: string;
+      path: string;
+      depth: number;
+    }
+  | {
+      type: "file";
+      id: string;
+      name: string;
+      path: string;
+      depth: number;
+      view: FileChangeView;
+      threadCount: number;
+      hotspot: HotspotScore | null;
+    };
 
 const checkingSession: AuthSession = {
   state: "checking",
@@ -169,10 +197,8 @@ const selectedThread = {
   file: "src/auth/session.ts",
   line: 142,
   state: "Unresolved",
-  reviewed: false,
-  outdated: false,
   body:
-    "The rotated token path can still reuse the previous session cache entry. Consider invalidating the session record before returning the new credential.",
+    "_⚠️ Potential issue_ | _Major_ | _Quick win_\n\nThe rotated token path can still reuse the previous session cache entry. Consider invalidating the session record before returning the new credential.\n\n<details><summary>Suggested migration hardening</summary>\n\n```ts\nsessionCache.invalidate(previousSession.id);\nreturn nextCredential;\n```\n\nVerify the rotated credential cannot read the old session record.\n</details>",
 };
 
 const handoffIntentOptions = [
@@ -182,7 +208,6 @@ const handoffIntentOptions = [
 ];
 
 const reviewThreadRenderLimit = 80;
-const fileChangeRenderLimit = 120;
 const fullFileRenderLimit = 320;
 
 const fallbackPullRequest: PullRequestSummary = {
@@ -261,10 +286,29 @@ function getCheckBadge(status: string, conclusion: string | null) {
   if (conclusion === "success") {
     return { label: "Passing", variant: "success" as const };
   }
+  if (conclusion === "skipped") {
+    return { label: "skipped", variant: "warning" as const };
+  }
   if (!conclusion) {
     return { label: "Completed", variant: "muted" as const };
   }
   return { label: conclusion.replace("-", " "), variant: "danger" as const };
+}
+
+function getLiveChecksBadge(checks: { total: number; passing: number; failing: number; pending: number }, loading: boolean) {
+  if (loading) {
+    return { label: "Syncing", variant: "info" as const };
+  }
+  if (checks.failing > 0) {
+    return { label: `${checks.failing} failing`, variant: "danger" as const };
+  }
+  if (checks.pending > 0) {
+    return { label: `${checks.pending} running`, variant: "warning" as const };
+  }
+  if (checks.total === 0) {
+    return { label: "No checks", variant: "muted" as const };
+  }
+  return { label: `${checks.passing}/${checks.total} passing`, variant: "success" as const };
 }
 
 function getThreadStateLabel(state: "unresolved" | "resolved" | "outdated") {
@@ -275,6 +319,19 @@ function getThreadStateLabel(state: "unresolved" | "resolved" | "outdated") {
     return "Resolved";
   }
   return "Outdated";
+}
+
+function getLastCheckedLabel(timestamp: number | null) {
+  if (!timestamp) {
+    return "Never";
+  }
+
+  return new Date(timestamp).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function getFileStatusLabel(status: CachedFileSummary["status"]) {
@@ -298,14 +355,61 @@ function getFileLineLabel(file: CachedFileSummary) {
   return `${additions} ${deletions}`;
 }
 
+function buildFileExplorerRows(
+  files: FileChangeView[],
+  threads: ReviewThreadView[],
+  hotspots: HotspotScore[],
+): FileExplorerRow[] {
+  const rows: FileExplorerRow[] = [];
+  const seenDirectories = new Set<string>();
+  const threadCountByPath = new Map<string, number>();
+  const hotspotByPath = new Map(hotspots.map((hotspot) => [hotspot.path, hotspot]));
+
+  for (const view of threads) {
+    const path = view.thread.filePath;
+    threadCountByPath.set(path, (threadCountByPath.get(path) ?? 0) + 1);
+  }
+
+  for (const view of [...files].sort((left, right) => left.file.path.localeCompare(right.file.path))) {
+    const parts = view.file.path.split("/");
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      const path = parts.slice(0, index + 1).join("/");
+      if (seenDirectories.has(path)) {
+        continue;
+      }
+      seenDirectories.add(path);
+      rows.push({
+        type: "directory",
+        id: `directory:${path}`,
+        name: parts[index],
+        path,
+        depth: index,
+      });
+    }
+
+    rows.push({
+      type: "file",
+      id: view.id,
+      name: parts.at(-1) ?? view.file.path,
+      path: view.file.path,
+      depth: Math.max(parts.length - 1, 0),
+      view,
+      threadCount: threadCountByPath.get(view.file.path) ?? 0,
+      hotspot: hotspotByPath.get(view.file.path) ?? null,
+    });
+  }
+
+  return rows;
+}
+
 function getDiffLineClass(kind: DiffLine["kind"]) {
   if (kind === "addition") {
-    return "bg-emerald-500/10 text-emerald-800 dark:text-emerald-200";
+    return "diff-line-addition";
   }
   if (kind === "deletion") {
-    return "bg-rose-500/10 text-rose-800 dark:text-rose-200";
+    return "diff-line-deletion";
   }
-  return "bg-background text-foreground";
+  return "diff-line-context";
 }
 
 function getDiffPrefix(kind: DiffLine["kind"]) {
@@ -318,10 +422,262 @@ function getDiffPrefix(kind: DiffLine["kind"]) {
   return " ";
 }
 
+function getDiffThreadAnchorKey(diffState: { filePath: string; hunks: { id: string; loaded: boolean; lines: DiffLine[] }[] }, thread: CachedReviewThread | null) {
+  if (!thread || thread.line === null || diffState.filePath !== thread.filePath) {
+    return null;
+  }
+
+  for (const hunk of diffState.hunks) {
+    if (!hunk.loaded) {
+      continue;
+    }
+    const lineIndex = hunk.lines.findIndex((line) => line.newLine === thread.line);
+    if (lineIndex >= 0) {
+      return `${hunk.id}:${lineIndex}`;
+    }
+  }
+
+  for (const hunk of diffState.hunks) {
+    if (!hunk.loaded) {
+      continue;
+    }
+    const lineIndex = hunk.lines.findIndex((line) => line.oldLine === thread.line);
+    if (lineIndex >= 0) {
+      return `${hunk.id}:${lineIndex}`;
+    }
+  }
+
+  return null;
+}
+
+type DiffSyntaxToken = {
+  text: string;
+  className?: string;
+};
+
+const baseSyntaxKeywords = [
+  "as",
+  "async",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "default",
+  "do",
+  "else",
+  "enum",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "from",
+  "function",
+  "if",
+  "import",
+  "in",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "return",
+  "static",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "type",
+  "undefined",
+  "var",
+  "void",
+  "while",
+  "yield",
+];
+
+const languageSyntaxKeywords: Record<string, string[]> = {
+  c: ["bool", "char", "double", "float", "include", "int", "long", "short", "sizeof", "struct", "typedef", "unsigned"],
+  cpp: ["auto", "bool", "char", "double", "float", "include", "int", "long", "namespace", "private", "protected", "public", "short", "template", "typename", "using"],
+  csharp: ["bool", "decimal", "delegate", "double", "event", "foreach", "int", "namespace", "private", "protected", "public", "string", "using"],
+  css: ["important"],
+  dart: ["final", "late", "mixin", "required", "typedef"],
+  go: ["chan", "defer", "fallthrough", "func", "go", "map", "package", "range", "select", "struct"],
+  java: ["boolean", "double", "final", "implements", "int", "package", "private", "protected", "public", "string", "throws"],
+  kotlin: ["data", "fun", "object", "package", "val", "var"],
+  php: ["echo", "namespace", "private", "protected", "public", "use"],
+  python: ["and", "def", "elif", "except", "global", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "self", "with"],
+  ruby: ["begin", "def", "end", "module", "nil", "require", "rescue", "unless"],
+  rust: ["crate", "impl", "let", "match", "mod", "mut", "pub", "self", "trait", "use"],
+  shell: ["case", "done", "elif", "esac", "fi", "then"],
+  sql: ["add", "alter", "and", "as", "by", "column", "create", "delete", "drop", "from", "group", "insert", "into", "join", "not", "null", "on", "or", "order", "select", "set", "table", "update", "values", "where"],
+  swift: ["associatedtype", "extension", "func", "guard", "let", "protocol", "var"],
+};
+
+function getDiffSyntaxTokens(content: string, language: string): DiffSyntaxToken[] {
+  if (!content) {
+    return [{ text: " " }];
+  }
+
+  const tokens: DiffSyntaxToken[] = [];
+  const specialPattern = /("""(?:\\.|[\s\S])*?"""|'''(?:\\.|[\s\S])*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\/\/.*|#.*|--.*)/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = specialPattern.exec(content))) {
+    if (match.index > cursor) {
+      tokens.push(...tokenizePlainCode(content.slice(cursor, match.index), language));
+    }
+
+    tokens.push({
+      text: match[0],
+      className: isCommentToken(match[0]) ? "diff-token-comment" : "diff-token-string",
+    });
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < content.length) {
+    tokens.push(...tokenizePlainCode(content.slice(cursor), language));
+  }
+
+  return tokens.length > 0 ? tokens : [{ text: content }];
+}
+
+function tokenizePlainCode(content: string, language: string): DiffSyntaxToken[] {
+  const keywords = new Set([...baseSyntaxKeywords, ...(languageSyntaxKeywords[language] ?? [])].map((keyword) => keyword.toLowerCase()));
+  const keywordAlternation = Array.from(keywords)
+    .sort((left, right) => right.length - left.length)
+    .map(escapeRegExp)
+    .join("|");
+  const tokenPattern = new RegExp(`\\b(?:${keywordAlternation})\\b|\\b\\d+(?:\\.\\d+)?\\b|\\b[A-Z][A-Z0-9_]+\\b`, "gi");
+  const tokens: DiffSyntaxToken[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenPattern.exec(content))) {
+    if (match.index > cursor) {
+      tokens.push({ text: content.slice(cursor, match.index) });
+    }
+
+    const text = match[0];
+    const lower = text.toLowerCase();
+    tokens.push({
+      text,
+      className: keywords.has(lower)
+        ? "diff-token-keyword"
+        : /^\d/.test(text)
+          ? "diff-token-number"
+          : /^[A-Z][A-Z0-9_]+$/.test(text)
+            ? "diff-token-constant"
+            : undefined,
+    });
+    cursor = match.index + text.length;
+  }
+
+  if (cursor < content.length) {
+    tokens.push({ text: content.slice(cursor) });
+  }
+
+  return tokens;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isCommentToken(token: string) {
+  const trimmed = token.trimStart();
+  return trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("--");
+}
+
+function DiffCodeLine({ line, muted = false }: { line: DiffLine; muted?: boolean }) {
+  const tokens = line.highlighted ? getDiffSyntaxTokens(line.content, line.language) : [{ text: line.content || " " }];
+
+  return (
+    <span className={cn("diff-code-line", muted && "text-muted-foreground")}>
+      {tokens.map((token, index) =>
+        token.className ? (
+          <span className={token.className} key={`${index}-${token.text}`}>
+            {token.text}
+          </span>
+        ) : (
+          <span key={`${index}-${token.text}`}>{token.text}</span>
+        ),
+      )}
+    </span>
+  );
+}
+
+function InlineReviewThread({
+  anchorRef,
+  pathCount,
+  pathIndex,
+  stateLabel,
+  view,
+}: {
+  anchorRef?: Ref<HTMLDivElement>;
+  pathCount: number;
+  pathIndex: number;
+  stateLabel: string;
+  view: ReviewThreadView;
+}) {
+  return (
+    <div aria-label="Inline review thread" className="diff-inline-thread" ref={anchorRef}>
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">
+            Review Path {pathIndex} of {pathCount}
+            {view.thread.line !== null ? ` · line ${view.thread.line}` : ""}
+          </p>
+          <p className="truncate text-xs text-muted-foreground">
+            @{view.thread.authorLogin ?? "unknown"} on {view.thread.filePath}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge variant={view.origin === "coderabbit" ? "warning" : "info"}>{view.origin === "coderabbit" ? "CodeRabbit" : "Human"}</Badge>
+          <Badge variant={view.thread.state === "outdated" ? "warning" : "muted"}>{stateLabel}</Badge>
+          {view.reviewed && <Badge variant="success">Reviewed</Badge>}
+        </div>
+      </div>
+      <MarkdownContent
+        value={view.thread.body}
+        emptyFallback={<p className="text-sm text-muted-foreground">No review comment body was returned by GitHub.</p>}
+      />
+    </div>
+  );
+}
+
+function stripMarkdownPreview(value: string, maxLength = 140) {
+  const stripped = value
+    .replace(/```[\s\S]*?```/g, " code block ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)]\([^)]*\)/g, "$1")
+    .replace(/<\/?(details|summary|br|p|div|span|strong|em|ul|ol|li|code|pre|blockquote|h[1-6])[^>]*>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^[\s>*_-]*[-+*]\s+/gm, "")
+    .replace(/[*_~>#|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (stripped.length <= maxLength) {
+    return stripped;
+  }
+
+  return `${stripped.slice(0, maxLength - 1).trim()}…`;
+}
+
+function getPullRequestSummaryPreview(value: string) {
+  const withoutLeadHeading = value.replace(/^\s{0,3}#{1,6}\s+(summary|overview|description)\s*\n+/i, "");
+  return stripMarkdownPreview(withoutLeadHeading, 120);
+}
+
 function getThreadTitle(body: string) {
-  const firstLine = body.split("\n")[0]?.trim() ?? "";
-  const firstSentence = firstLine.split(".")[0]?.trim() ?? "";
-  return firstSentence.length > 0 ? firstSentence.slice(0, 96) : "Review thread";
+  return stripMarkdownPreview(body, 96) || "Review thread";
 }
 
 function filtersMatch(left: ReviewQueueFilters, right: ReviewQueueFilters) {
@@ -334,6 +690,18 @@ function isEditableTarget(target: EventTarget | null) {
   }
 
   return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable;
+}
+
+function getNumericShortcutIndex(key: string) {
+  if (key === "0") {
+    return 9;
+  }
+
+  if (/^[1-9]$/.test(key)) {
+    return Number(key) - 1;
+  }
+
+  return null;
 }
 
 function commandMatchesQuery(command: CommandPaletteItem, query: string) {
@@ -369,20 +737,51 @@ function createOverviewCache(pullRequest: PullRequestSummary, cached?: CachedPul
       }
     : null;
 
-  if (
-    normalizedCached &&
-    (normalizedCached.fileSummaries.length > 0 ||
-      normalizedCached.reviewThreads.length > 0 ||
-      normalizedCached.checks.length > 0)
-  ) {
+  if (normalizedCached) {
     return normalizedCached;
+  }
+
+  if (pullRequest.repository === fallbackPullRequest.repository && pullRequest.number === fallbackPullRequest.number) {
+    return createDemoOverviewCache(pullRequest, cached);
   }
 
   return {
     pullRequest,
     metadata: {
       title: pullRequest.title,
-      description: "Remote-first PR review workspace shell with deterministic overview signals.",
+      description: null,
+      repository: pullRequest.repository,
+      number: pullRequest.number,
+      authorLogin: pullRequest.authorLogin,
+      baseBranch: null,
+      headBranch: null,
+      mergeable: null,
+      mergeStateStatus: null,
+      reviewDecision: null,
+      url: pullRequest.url,
+      isDraft: pullRequest.isDraft,
+      updatedAt: pullRequest.updatedAt,
+    },
+    reviewThreads: [],
+    fileSummaries: [],
+    checks: [],
+    rateLimit: {
+      remaining: null,
+      resetEpochSeconds: null,
+    },
+    fetchedAtEpochMs: Date.now(),
+    lastAccessedEpochMs: Date.now(),
+    pinned: cached?.pinned ?? false,
+  };
+}
+
+function createDemoOverviewCache(pullRequest: PullRequestSummary, cached?: CachedPullRequestData): CachedPullRequestData {
+  return {
+    pullRequest,
+    metadata: {
+      title: pullRequest.title,
+      description:
+        "## Summary\n\nRemote-first PR review workspace shell with deterministic overview signals.\n\n- Shows **high-level review state** before the diff.\n- Keeps GitHub-provided Pull Request context local and markdown-rendered.\n\nThe reviewer should be able to read the whole Pull Request summary before deciding which thread or file deserves attention.",
       repository: pullRequest.repository,
       number: pullRequest.number,
       authorLogin: pullRequest.authorLogin,
@@ -474,15 +873,23 @@ export function App({
   workspaceClient = tauriWorkspaceClient,
   reviewSessionClient = localReviewSessionClient,
   threadActionClient = tauriThreadActionClient,
+  updaterClient,
 }: AppProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [focusMode, setFocusMode] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
+  const [pullRequestDialogOpen, setPullRequestDialogOpen] = useState(false);
+  const [pullRequestDialogQuery, setPullRequestDialogQuery] = useState("");
+  const [threadDialogOpen, setThreadDialogOpen] = useState(false);
+  const [threadDialogQuery, setThreadDialogQuery] = useState("");
+  const [hotspotsDialogOpen, setHotspotsDialogOpen] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [authSession, setAuthSession] = useState<AuthSession>(checkingSession);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [oauthFlow, setOauthFlow] = useState<OAuthStartResponse | null>(null);
+  const [oauthCopyMessage, setOauthCopyMessage] = useState<string | null>(null);
   const [repositories, setRepositories] = useState<WorkspaceRepository[]>([]);
   const [repositoryInput, setRepositoryInput] = useState("");
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
@@ -523,10 +930,24 @@ export function App({
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>(idleRefreshStatus);
   const [cacheSummary, setCacheSummary] = useState<CacheStats>(() => cacheStats());
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
+  const [pullRequestDataStatus, setPullRequestDataStatus] = useState<{ key: string | null; state: "idle" | "loading" | "loaded" | "failed"; message: string | null }>({
+    key: null,
+    state: "idle",
+    message: null,
+  });
+  const [checkRefreshStatus, setCheckRefreshStatus] = useState<{ key: string | null; state: "idle" | "loading" | "loaded" | "failed"; message: string | null }>({
+    key: null,
+    state: "idle",
+    message: null,
+  });
+  const pullRequestDataInFlightKeyRef = useRef<string | null>(null);
+  const checkRefreshInFlightKeyRef = useRef<string | null>(null);
+  const activeInlineThreadRef = useRef<HTMLDivElement | null>(null);
   const [privacyMessage, setPrivacyMessage] = useState<string | null>(null);
   const [diagnosticsPreview, setDiagnosticsPreview] = useState<DiagnosticsPreview | null>(null);
   const [diagnosticsCopyMessage, setDiagnosticsCopyMessage] = useState<string | null>(null);
   const [resetHistoryConfirmOpen, setResetHistoryConfirmOpen] = useState(false);
+  const updater = useAppUpdater({ client: updaterClient });
   const currentUserKey = authSession.accountLogin ?? "local-user";
   const routedPullRequests = useMemo(() => {
     if (!quickOpenedPullRequest) {
@@ -539,6 +960,22 @@ export function App({
       ...pullRequests.filter((pullRequest) => getPullRequestKey(pullRequest) !== quickOpenKey),
     ];
   }, [pullRequests, quickOpenedPullRequest]);
+  const normalizedPullRequestDialogQuery = pullRequestDialogQuery.trim().toLowerCase();
+  const pullRequestDialogPullRequests = normalizedPullRequestDialogQuery
+    ? routedPullRequests.filter((pullRequest) => {
+        const haystack = [
+          pullRequest.title,
+          pullRequest.repository,
+          String(pullRequest.number),
+          pullRequest.authorLogin ?? "",
+          pullRequest.isDraft ? "draft" : "open",
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return normalizedPullRequestDialogQuery.split(/\s+/).every((term) => haystack.includes(term));
+      })
+    : routedPullRequests;
   const selectedPullRequest =
     routedPullRequests.find((pullRequest) => getPullRequestKey(pullRequest) === selectedPullRequestKey) ??
     routedPullRequests[0] ??
@@ -547,6 +984,10 @@ export function App({
   const activePullRequestKey = routedPullRequests.length > 0 ? getPullRequestKey(selectedPullRequest) : null;
   const selectedCacheEntry = activePullRequestKey ? readCacheStore().entries[activePullRequestKey] : null;
   const selectedPullRequestPinned = selectedCacheEntry?.pinned ?? false;
+  const selectedPullRequestLoadingData =
+    activePullRequestKey !== null &&
+    pullRequestDataStatus.key === activePullRequestKey &&
+    pullRequestDataStatus.state === "loading";
   const reviewOverviewCache = createOverviewCache(selectedPullRequest, selectedCacheEntry ?? undefined);
   const rateLimitMessage =
     reviewOverviewCache.rateLimit.remaining === 0
@@ -557,6 +998,17 @@ export function App({
     repositoryHotspotOverrides[selectedPullRequest.repository],
   );
   const readinessBadge = getReadinessBadge(reviewOverview.readiness.state);
+  const selectedPullRequestRefreshingChecks =
+    activePullRequestKey !== null &&
+    checkRefreshStatus.key === activePullRequestKey &&
+    checkRefreshStatus.state === "loading";
+  const liveChecksBadge = getLiveChecksBadge(reviewOverview.checks, selectedPullRequestRefreshingChecks);
+  const liveChecksCanRefresh = Boolean(activePullRequestKey) && authSession.state === "signed-in" && !selectedPullRequestRefreshingChecks;
+  const liveChecksRefreshDisabledReason = !activePullRequestKey
+    ? "Open a Pull Request first."
+    : authSession.state !== "signed-in"
+      ? "Sign in to refresh GitHub checks."
+      : null;
   const reviewThreadSignature = reviewOverviewCache.reviewThreads
     .map((thread) => `${thread.id}:${thread.state}:${thread.updatedAt}`)
     .join("|");
@@ -569,6 +1021,13 @@ export function App({
   const fileChangeDiagnostics = summarizeFileChangeStore(fileChangeStore);
   const reviewSessionDiagnostics = summarizeReviewSessionStore(readReviewSessionStore());
   const diagnosticsPreviewText = diagnosticsPreview ? renderDiagnosticsExport(diagnosticsPreview) : "";
+  const updaterBadge = updater.error
+    ? { label: "Check failed", variant: "warning" as const }
+    : updater.isUpdating
+      ? { label: "Updating", variant: "info" as const }
+      : updater.updateInfo
+        ? { label: `v${updater.updateInfo.version}`, variant: "info" as const }
+        : { label: "Ready", variant: "success" as const };
   const baseReviewThreadViews = buildReviewThreadViews(
     currentUserKey,
     getPullRequestKey(selectedPullRequest),
@@ -591,6 +1050,26 @@ export function App({
     };
   });
   const filteredReviewThreads = filterReviewThreads(reviewThreadViews, reviewQueueFilters);
+  const normalizedThreadDialogQuery = threadDialogQuery.trim().toLowerCase();
+  const threadDialogSourceViews = filteredReviewThreads;
+  const threadDialogViews = normalizedThreadDialogQuery
+    ? threadDialogSourceViews.filter((view) => {
+        const haystack = [
+          getThreadTitle(view.thread.body),
+          stripMarkdownPreview(view.thread.body, 240),
+          view.thread.filePath,
+          view.thread.authorLogin ?? "",
+          view.thread.state,
+          view.origin,
+          view.reviewed ? "reviewed" : "unreviewed",
+          view.thread.line !== null ? `line ${view.thread.line}` : "",
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return normalizedThreadDialogQuery.split(/\s+/).every((term) => haystack.includes(term));
+      })
+    : threadDialogSourceViews;
   const reviewQueueCounts = buildReviewQueueCounts(reviewThreadViews);
   const fileChangeViews = buildFileChangeViews(
     currentUserKey,
@@ -601,8 +1080,6 @@ export function App({
   const filteredFileChanges = filterFileChanges(fileChangeViews, fileChangeFilters);
   const reviewThreadWindow = getBoundedRenderWindow(filteredReviewThreads, { limit: reviewThreadRenderLimit });
   const renderedReviewThreads = reviewThreadWindow.items;
-  const fileChangeWindow = getBoundedRenderWindow(filteredFileChanges, { limit: fileChangeRenderLimit });
-  const renderedFileChanges = fileChangeWindow.items;
   const fileChangeCounts = buildFileChangeCounts(fileChangeViews);
   const queueButtons: QueueButton[] = [
     {
@@ -657,19 +1134,19 @@ export function App({
     ? Math.max(filteredReviewThreads.findIndex((view) => view.id === selectedReviewThread.id), 0)
     : 0;
   const activeThread = selectedReviewThread?.thread ?? null;
-  const activeThreadAuthor = activeThread?.authorLogin ?? selectedThread.author;
-  const activeThreadFile = activeThread?.filePath ?? selectedThread.file;
-  const activeThreadLine = activeThread?.line ?? selectedThread.line;
-  const activeThreadState = activeThread?.state ?? "unresolved";
-  const activeThreadStateLabel = activeThread ? getThreadStateLabel(activeThread.state) : selectedThread.state;
-  const activeThreadTitle = activeThread ? getThreadTitle(activeThread.body) : selectedThread.title;
-  const activeThreadBody = activeThread?.body ?? selectedThread.body;
-  const threadResolveAction: ThreadWriteAction = activeThreadState === "resolved" ? "unresolve" : "resolve";
+  const activeThreadFileHint = activeThread?.filePath ?? null;
   const selectedFileChange =
     fileChangeViews.find((view) => view.id === selectedFileChangeId) ??
-    fileChangeViews.find((view) => view.file.path === activeThreadFile) ??
+    (activeThreadFileHint ? fileChangeViews.find((view) => view.file.path === activeThreadFileHint) : null) ??
     fileChangeViews[0] ??
     null;
+  const activeThreadAuthor = activeThread?.authorLogin ?? null;
+  const activeThreadFile = activeThread?.filePath ?? selectedFileChange?.file.path ?? "No file selected";
+  const activeThreadLine = activeThread?.line ?? null;
+  const activeThreadState = activeThread?.state ?? "unresolved";
+  const activeThreadStateLabel = activeThread ? getThreadStateLabel(activeThread.state) : "No thread";
+  const activeThreadBody = activeThread?.body ?? "No GitHub review thread is selected for this Pull Request.";
+  const threadResolveAction: ThreadWriteAction = activeThreadState === "resolved" ? "unresolve" : "resolve";
   const selectedFileDiffState = selectedFileChange
     ? buildLazyDiffState(selectedFileChange.file, {
         mode: diffMode,
@@ -680,9 +1157,12 @@ export function App({
         fullFileLoaded: fullFileDiffs[selectedFileChange.id],
       })
     : null;
+  const activeThreadAnchorKey = selectedFileDiffState ? getDiffThreadAnchorKey(selectedFileDiffState, activeThread) : null;
+  const activeThreadAnchoredInDiff = Boolean(selectedReviewThread && activeThreadAnchorKey);
   const fullFileLineWindow = selectedFileDiffState?.fullFileLines
     ? getBoundedRenderWindow(selectedFileDiffState.fullFileLines, { limit: fullFileRenderLimit })
     : null;
+  const fileExplorerRows = buildFileExplorerRows(filteredFileChanges, reviewThreadViews, reviewOverview.hotspots);
   const handoffThreadViews = selectedBulkThreads.length > 0 ? selectedBulkThreads : selectedReviewThread ? [selectedReviewThread] : [];
   const handoffIntent = handoffCustomIntent.trim() || handoffIntentPreset;
   const handoffDiffContextByPath = Object.fromEntries(
@@ -719,6 +1199,18 @@ export function App({
   useEffect(() => {
     writeDiffModePreference(diffMode);
   }, [diffMode]);
+
+  useEffect(() => {
+    if (!activeThreadAnchoredInDiff) {
+      return;
+    }
+
+    const scrollTimer = window.setTimeout(() => {
+      activeInlineThreadRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    }, 0);
+
+    return () => window.clearTimeout(scrollTimer);
+  }, [activeThreadAnchoredInDiff, activeThreadAnchorKey, selectedReviewThread?.id]);
 
   useEffect(() => {
     let active = true;
@@ -824,6 +1316,102 @@ export function App({
   }, [activePullRequestKey, routedPullRequests.length, selectedPullRequest]);
 
   useEffect(() => {
+    if (!activePullRequestKey || routedPullRequests.length === 0) {
+      return;
+    }
+
+    const cachedAtStart = readCacheStore().entries[activePullRequestKey];
+    const hasRemoteDataAtStart = Boolean(
+      cachedAtStart &&
+        (cachedAtStart.fileSummaries.length > 0 ||
+          cachedAtStart.reviewThreads.length > 0 ||
+          cachedAtStart.checks.length > 0),
+    );
+
+    if (authSession.state !== "signed-in") {
+      if (!hasRemoteDataAtStart) {
+        setPullRequestDataStatus({
+          key: activePullRequestKey,
+          state: "failed",
+          message: "Sign in to load Pull Request files, checks, and review threads from GitHub.",
+        });
+      }
+      return;
+    }
+
+    if (pullRequestDataInFlightKeyRef.current === activePullRequestKey) {
+      return;
+    }
+
+    let active = true;
+    pullRequestDataInFlightKeyRef.current = activePullRequestKey;
+    setPullRequestDataStatus({
+      key: activePullRequestKey,
+      state: "loading",
+      message: hasRemoteDataAtStart
+        ? "Refreshing latest Pull Request threads and checks in the background."
+        : "Loading Pull Request review data from GitHub.",
+    });
+
+    workspaceClient
+      .fetchPullRequestData(selectedPullRequest)
+      .then((data) => {
+        if (!active) {
+          return;
+        }
+
+        writeCachedPullRequestData(data);
+        syncReviewThreads(currentUserKey, getPullRequestKey(data.pullRequest), data.reviewThreads);
+        syncFileChanges(currentUserKey, getPullRequestKey(data.pullRequest), data.fileSummaries);
+        setCacheSummary(cacheStats());
+        setCacheMessage(
+          hasRemoteDataAtStart
+            ? "Background refreshed latest GitHub Pull Request review data."
+            : "Loaded GitHub Pull Request review data.",
+        );
+        setPullRequestDataStatus({
+          key: activePullRequestKey,
+          state: "loaded",
+          message: `${hasRemoteDataAtStart ? "Background refreshed" : "Loaded"} ${data.fileSummaries.length} file changes and ${data.reviewThreads.length} review threads.`,
+        });
+        setReviewQueueRevision((current) => current + 1);
+        setFileChangeRevision((current) => current + 1);
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        setPullRequestDataStatus({
+          key: activePullRequestKey,
+          state: "failed",
+          message,
+        });
+        setCacheMessage(message);
+      })
+      .finally(() => {
+        if (pullRequestDataInFlightKeyRef.current === activePullRequestKey) {
+          pullRequestDataInFlightKeyRef.current = null;
+        }
+      });
+
+    return () => {
+      active = false;
+      if (pullRequestDataInFlightKeyRef.current === activePullRequestKey) {
+        pullRequestDataInFlightKeyRef.current = null;
+      }
+    };
+  }, [
+    activePullRequestKey,
+    authSession.state,
+    currentUserKey,
+    routedPullRequests.length,
+    selectedPullRequest,
+    workspaceClient,
+  ]);
+
+  useEffect(() => {
     syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
     setReviewQueueRevision((current) => current + 1);
   }, [currentUserKey, reviewThreadSignature, selectedPullRequest]);
@@ -834,23 +1422,98 @@ export function App({
   }, [currentUserKey, fileChangeSignature, selectedPullRequest]);
 
   useEffect(() => {
+    if (
+      !activePullRequestKey ||
+      routedPullRequests.length === 0 ||
+      authSession.state !== "signed-in" ||
+      reviewOverview.checks.pending === 0
+    ) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void refreshSelectedPullRequestChecks(selectedPullRequest, "Auto-refreshed GitHub checks.");
+    }, 45_000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [
+    activePullRequestKey,
+    authSession.state,
+    reviewOverview.checks.pending,
+    routedPullRequests.length,
+    selectedPullRequest.repository,
+    selectedPullRequest.number,
+  ]);
+
+  useEffect(() => {
     setThreadActionResult(null);
   }, [selectedReviewThread?.id]);
 
   const themeLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
   const authBadge = getAuthBadge(authSession);
-  const signInDisabled = authBusy || authSession.state === "storage-unavailable";
+  const signInDisabled = authBusy || authSession.state === "storage-unavailable" || oauthFlow !== null;
+  const oauthVerificationUrl = oauthFlow?.verificationUriComplete ?? oauthFlow?.verificationUri ?? "#";
 
   const handleSignIn = async () => {
     setAuthBusy(true);
     setAuthError(null);
+    setOauthCopyMessage(null);
     try {
       const flow = await authClient.startSignIn();
       setOauthFlow(flow);
+      try {
+        if (navigator.clipboard) {
+          await navigator.clipboard.writeText(flow.userCode);
+          setOauthCopyMessage("Code copied to clipboard.");
+        }
+      } catch {
+        setOauthCopyMessage("Code ready to copy.");
+      }
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : String(error));
     } finally {
       setAuthBusy(false);
+    }
+  };
+
+  const handleCopyDeviceCode = async () => {
+    if (!oauthFlow) {
+      return;
+    }
+
+    if (!navigator.clipboard) {
+      setOauthCopyMessage("Copy unavailable. Select the code and copy it manually.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(oauthFlow.userCode);
+      setOauthCopyMessage("Code copied to clipboard.");
+    } catch {
+      setOauthCopyMessage("Copy unavailable. Select the code and copy it manually.");
+    }
+  };
+
+  const handleCancelSignIn = () => {
+    setOauthFlow(null);
+    setAuthError(null);
+    setOauthCopyMessage(null);
+  };
+
+  const handleOpenGithub = async () => {
+    if (!oauthFlow) {
+      return;
+    }
+
+    setAuthError(null);
+    try {
+      await openUrl(oauthVerificationUrl);
+      setOauthCopyMessage("GitHub opened in your browser.");
+    } catch (error) {
+      setOauthCopyMessage("Open github.com/login/device in your browser, then paste the code.");
+      setAuthError(error instanceof Error ? `Could not open GitHub: ${error.message}` : "Could not open GitHub from Narview.");
     }
   };
 
@@ -868,6 +1531,7 @@ export function App({
       }
       if (response.state === "authorized") {
         setOauthFlow(null);
+        setOauthCopyMessage(null);
       } else if (response.message) {
         setAuthError(response.message);
       }
@@ -884,6 +1548,7 @@ export function App({
     try {
       setAuthSession(await authClient.signOut());
       setOauthFlow(null);
+      setOauthCopyMessage(null);
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -896,9 +1561,9 @@ export function App({
       activeQueueId: activeQueue.id,
       includeDrafts,
       focusMode,
-      threadKey: selectedReviewThread?.id ?? `${selectedThread.author}:${selectedThread.file}:${selectedThread.line}`,
+      threadKey: selectedReviewThread?.id ?? "",
       filePath: activeThreadFile,
-      nearbyLine: activeThreadLine ?? selectedThread.line,
+      nearbyLine: activeThreadLine ?? 1,
       updatedAtEpochMs: Date.now(),
     };
   }
@@ -936,12 +1601,134 @@ export function App({
       setSelectedPullRequestKey(getPullRequestKey(pullRequest));
       setQuickOpenInput("");
       await restoreReviewSessionFor(pullRequest);
+      closePullRequestDialog();
     } catch (error) {
       setQuickOpenError(error instanceof Error ? error.message : String(error));
     }
   };
 
-  async function refreshPullRequests(nextIncludeDrafts = includeDrafts) {
+  async function refreshSelectedPullRequestData(pullRequest: PullRequestSummary, successMessage = "Refreshed GitHub Pull Request review data.") {
+    const pullRequestKey = getPullRequestKey(pullRequest);
+    if (authSession.state !== "signed-in") {
+      setPullRequestDataStatus({
+        key: pullRequestKey,
+        state: "failed",
+        message: "Sign in to refresh Pull Request files, checks, and review threads from GitHub.",
+      });
+      return;
+    }
+
+    if (pullRequestDataInFlightKeyRef.current === pullRequestKey) {
+      return;
+    }
+
+    pullRequestDataInFlightKeyRef.current = pullRequestKey;
+    setPullRequestDataStatus({
+      key: pullRequestKey,
+      state: "loading",
+      message: "Refreshing Pull Request review data from GitHub.",
+    });
+
+    try {
+      const data = await workspaceClient.fetchPullRequestData(pullRequest);
+      writeCachedPullRequestData(data);
+      syncReviewThreads(currentUserKey, getPullRequestKey(data.pullRequest), data.reviewThreads);
+      syncFileChanges(currentUserKey, getPullRequestKey(data.pullRequest), data.fileSummaries);
+      setThreadStateOverrides((current) => {
+        const next = { ...current };
+        for (const thread of data.reviewThreads) {
+          delete next[thread.id];
+        }
+        return next;
+      });
+      setCacheSummary(cacheStats());
+      setCacheMessage(successMessage);
+      setPullRequestDataStatus({
+        key: pullRequestKey,
+        state: "loaded",
+        message: `${successMessage} Loaded ${data.fileSummaries.length} file changes and ${data.reviewThreads.length} review threads.`,
+      });
+      setReviewQueueRevision((current) => current + 1);
+      setFileChangeRevision((current) => current + 1);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPullRequestDataStatus({
+        key: pullRequestKey,
+        state: "failed",
+        message,
+      });
+      setCacheMessage(message);
+    } finally {
+      if (pullRequestDataInFlightKeyRef.current === pullRequestKey) {
+        pullRequestDataInFlightKeyRef.current = null;
+      }
+    }
+  }
+
+  async function refreshSelectedPullRequestChecks(pullRequest: PullRequestSummary, successMessage = "Refreshed GitHub checks.") {
+    const pullRequestKey = getPullRequestKey(pullRequest);
+    const checksWerePending = activePullRequestKey === pullRequestKey && reviewOverview.checks.pending > 0;
+    if (authSession.state !== "signed-in") {
+      setCheckRefreshStatus({
+        key: pullRequestKey,
+        state: "failed",
+        message: "Sign in to refresh GitHub checks.",
+      });
+      return;
+    }
+
+    if (checkRefreshInFlightKeyRef.current === pullRequestKey) {
+      return;
+    }
+
+    checkRefreshInFlightKeyRef.current = pullRequestKey;
+    setCheckRefreshStatus({
+      key: pullRequestKey,
+      state: "loading",
+      message: "Refreshing GitHub checks.",
+    });
+
+    try {
+      const response = await workspaceClient.fetchPullRequestChecks(pullRequest);
+      const checksFinished = checksWerePending && response.checks.every((check) => check.status === "completed");
+      upsertCachedPullRequest(pullRequest, {
+        checks: response.checks,
+        rateLimit: response.rateLimit,
+        fetchedAtEpochMs: response.fetchedAtEpochMs,
+      });
+      setCacheSummary(cacheStats());
+      setCheckRefreshStatus({
+        key: pullRequestKey,
+        state: "loaded",
+        message: `${successMessage} Loaded ${response.checks.length} check${response.checks.length === 1 ? "" : "s"}.`,
+      });
+
+      if (checksFinished) {
+        setCheckRefreshStatus({
+          key: pullRequestKey,
+          state: "loaded",
+          message: "Checks finished. Refreshing Pull Request threads and merge state.",
+        });
+        await refreshSelectedPullRequestData(pullRequest, "Checks completed; refreshed GitHub Pull Request review data.");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCheckRefreshStatus({
+        key: pullRequestKey,
+        state: "failed",
+        message,
+      });
+    } finally {
+      if (checkRefreshInFlightKeyRef.current === pullRequestKey) {
+        checkRefreshInFlightKeyRef.current = null;
+      }
+    }
+  }
+
+  async function refreshPullRequests(
+    nextIncludeDrafts = includeDrafts,
+    options: { refreshSelectedPullRequestData?: boolean } = {},
+  ) {
     setWorkspaceBusy(true);
     setWorkspaceError(null);
     setRefreshStatus({
@@ -955,6 +1742,12 @@ export function App({
       const response = await workspaceClient.refreshPullRequests(nextIncludeDrafts);
       setRepositories(response.repositories);
       setPullRequests(response.pullRequests);
+      const nextSelectedPullRequest =
+        (activePullRequestKey
+          ? response.pullRequests.find((pullRequest) => getPullRequestKey(pullRequest) === activePullRequestKey)
+          : null) ??
+        response.pullRequests[0] ??
+        null;
       setRefreshStatus((current) => {
         if (response.status.state === "failed" && pullRequests.length > 0) {
           return {
@@ -971,6 +1764,9 @@ export function App({
         }
         return response.pullRequests[0] ? getPullRequestKey(response.pullRequests[0]) : null;
       });
+      if (options.refreshSelectedPullRequestData && response.status.state === "fresh" && nextSelectedPullRequest) {
+        await refreshSelectedPullRequestData(nextSelectedPullRequest);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setWorkspaceError(message);
@@ -1189,6 +1985,17 @@ export function App({
     setReviewQueueRevision((current) => current + 1);
   };
 
+  const markResolvedThreadsReviewed = (threadIds: string[]) => {
+    if (threadIds.length === 0) {
+      return;
+    }
+
+    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+    for (const threadId of threadIds) {
+      setReviewThreadReviewed(currentUserKey, threadId, true);
+    }
+  };
+
   const runThreadAction = async (action: ThreadWriteAction) => {
     if (!selectedReviewThread) {
       return;
@@ -1211,8 +2018,7 @@ export function App({
         setReplyDraft("");
       }
       if (result.ok && action === "resolve") {
-        syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
-        setReviewThreadReviewed(currentUserKey, selectedReviewThread.id, true);
+        markResolvedThreadsReviewed([selectedReviewThread.id]);
         setThreadStateOverrides((current) => ({
           ...current,
           [selectedReviewThread.id]: "resolved",
@@ -1310,12 +2116,13 @@ export function App({
         }));
 
       if (successes.length > 0) {
-        syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+        if (action === "resolve") {
+          markResolvedThreadsReviewed(successes);
+        } else {
+          syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+        }
       }
       for (const threadId of successes) {
-        if (action === "resolve") {
-          setReviewThreadReviewed(currentUserKey, threadId, true);
-        }
         setThreadStateOverrides((current) => ({
           ...current,
           [threadId]: action === "resolve" ? "resolved" : "unresolved",
@@ -1344,6 +2151,59 @@ export function App({
     setCommandQuery("");
   };
 
+  const openPullRequestDialog = () => {
+    setPullRequestDialogQuery("");
+    setPullRequestDialogOpen(true);
+  };
+
+  const closePullRequestDialog = () => {
+    setPullRequestDialogOpen(false);
+    setPullRequestDialogQuery("");
+  };
+
+  const selectPullRequestFromDialog = async (pullRequest: PullRequestSummary) => {
+    await handleSelectPullRequest(pullRequest);
+    closePullRequestDialog();
+  };
+
+  const openThreadDialog = () => {
+    setThreadDialogQuery("");
+    setThreadDialogOpen(true);
+  };
+
+  const closeThreadDialog = () => {
+    setThreadDialogOpen(false);
+    setThreadDialogQuery("");
+  };
+
+  const selectThreadFromDialog = (threadId: string) => {
+    selectReviewThread(threadId);
+    closeThreadDialog();
+  };
+
+  const openHotspotsDialog = () => {
+    setHotspotsDialogOpen(true);
+  };
+
+  const closeHotspotsDialog = () => {
+    setHotspotsDialogOpen(false);
+  };
+
+  const selectHotspotFile = (path: string) => {
+    const fileView = fileChangeViews.find((view) => view.file.path === path);
+    if (fileView) {
+      setSelectedFileChangeId(fileView.id);
+    }
+    closeHotspotsDialog();
+  };
+
+  const toggleSelectedFileViewed = () => {
+    if (!selectedFileChange) {
+      return;
+    }
+    handleSetFileChangeViewed(selectedFileChange.id, !selectedFileChange.viewed);
+  };
+
   const noActiveThreadReason = "No Review Thread is selected.";
   const noVisibleThreadReason = "No Review Threads match the current filters.";
   const noSelectedBulkReason = "Select one or more Review Threads first.";
@@ -1354,7 +2214,7 @@ export function App({
       category: "Navigation",
       label: "Next Review Thread",
       description: `Move to the next visible Review Thread in ${activeQueue.label}.`,
-      shortcut: "J",
+      shortcut: "K",
       disabled: filteredReviewThreads.length === 0,
       disabledReason: noVisibleThreadReason,
       keywords: ["review path", "queue"],
@@ -1365,11 +2225,60 @@ export function App({
       category: "Navigation",
       label: "Previous Review Thread",
       description: `Move to the previous visible Review Thread in ${activeQueue.label}.`,
-      shortcut: "K",
+      shortcut: "J",
       disabled: filteredReviewThreads.length === 0,
       disabledReason: noVisibleThreadReason,
       keywords: ["review path", "queue"],
       run: () => moveReviewThread(-1),
+    },
+    {
+      id: "navigation.open-pull-request-dialog",
+      category: "Navigation",
+      label: "Open Pull Requests",
+      description: `Switch between ${routedPullRequests.length} loaded Pull Request${routedPullRequests.length === 1 ? "" : "s"}.`,
+      shortcut: "P",
+      keywords: ["pull request switcher", "prs", "github"],
+      run: openPullRequestDialog,
+    },
+    {
+      id: "navigation.refresh-current-pr",
+      category: "Navigation",
+      label: "Refresh Current Pull Request",
+      description: "Reload files, Review Threads, checks, and merge state for the active Pull Request.",
+      disabled: !activePullRequestKey || selectedPullRequestLoadingData,
+      disabledReason: !activePullRequestKey ? "Open a Pull Request first." : "This Pull Request is already refreshing.",
+      keywords: ["pull request", "github", "sync"],
+      run: () => void refreshSelectedPullRequestData(selectedPullRequest),
+    },
+    {
+      id: "navigation.open-settings",
+      category: "Navigation",
+      label: "Open Settings",
+      description: "Manage GitHub session, updates, cache, and local review history.",
+      keywords: ["preferences", "account", "cache", "privacy", "updates"],
+      run: () => setSettingsDialogOpen(true),
+    },
+    {
+      id: "navigation.open-thread-dialog",
+      category: "Navigation",
+      label: "Open Review Threads",
+      description: `Browse all ${reviewThreadViews.length} Review Thread${reviewThreadViews.length === 1 ? "" : "s"} for the current Pull Request.`,
+      shortcut: "T",
+      disabled: reviewThreadViews.length === 0,
+      disabledReason: "No Review Threads are loaded for this Pull Request.",
+      keywords: ["thread switcher", "review queue", "dialog"],
+      run: openThreadDialog,
+    },
+    {
+      id: "navigation.open-hotspots-dialog",
+      category: "Navigation",
+      label: "Open Hotspots",
+      description: `Browse ${reviewOverview.hotspots.length} high-signal changed file${reviewOverview.hotspots.length === 1 ? "" : "s"}.`,
+      shortcut: "S",
+      disabled: reviewOverview.hotspots.length === 0,
+      disabledReason: "No hotspots are available for this Pull Request.",
+      keywords: ["hotspots", "risk", "files"],
+      run: openHotspotsDialog,
     },
     {
       id: "navigation.open-active-file",
@@ -1485,6 +2394,19 @@ export function App({
           fetchWholeFile(selectedFileChange.id);
         }
       },
+    },
+    {
+      id: "files.toggle-viewed",
+      category: "Files",
+      label: selectedFileChange?.viewed ? "Mark Selected File Unviewed" : "Mark Selected File Viewed",
+      description: selectedFileChange
+        ? `Toggle Viewed state for ${selectedFileChange.file.path}.`
+        : "Toggle Viewed state for the selected file.",
+      shortcut: "V",
+      disabled: !selectedFileChange,
+      disabledReason: noSelectedFileReason,
+      keywords: ["file changes", "viewed"],
+      run: toggleSelectedFileViewed,
     },
     ...fileChangeViews.slice(0, 8).map((view) => ({
       id: `files.jump.${view.id}`,
@@ -1608,16 +2530,35 @@ export function App({
         return;
       }
 
+      if (pullRequestDialogOpen && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        const shortcutIndex = getNumericShortcutIndex(key);
+        const shortcutPullRequest = shortcutIndex !== null ? pullRequestDialogPullRequests[shortcutIndex] : null;
+        if (shortcutPullRequest) {
+          event.preventDefault();
+          void selectPullRequestFromDialog(shortcutPullRequest);
+          return;
+        }
+      }
+
       if (isEditableTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) {
         return;
       }
 
-      if (key === "j") {
+      if (key === "k") {
         event.preventDefault();
         moveReviewThread(1);
-      } else if (key === "k") {
+      } else if (key === "j") {
         event.preventDefault();
         moveReviewThread(-1);
+      } else if (key === "t") {
+        event.preventDefault();
+        openThreadDialog();
+      } else if (key === "p") {
+        event.preventDefault();
+        openPullRequestDialog();
+      } else if (key === "s") {
+        event.preventDefault();
+        openHotspotsDialog();
       } else if (key === "r" && event.shiftKey) {
         event.preventDefault();
         focusReplyField();
@@ -1638,6 +2579,9 @@ export function App({
       } else if (key === "a") {
         event.preventDefault();
         toggleAllFilteredThreadSelection(!allFilteredThreadsSelected);
+      } else if (key === "v") {
+        event.preventDefault();
+        toggleSelectedFileViewed();
       } else if (key === "f") {
         event.preventDefault();
         setFocusMode((current) => !current);
@@ -1646,23 +2590,30 @@ export function App({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [allFilteredThreadsSelected, moveReviewThread, openThreadFileInDiff, openCommandPalette, selectedReviewThread, threadResolveAction]);
+  }, [allFilteredThreadsSelected, moveReviewThread, openCommandPalette, openHotspotsDialog, openPullRequestDialog, openThreadDialog, openThreadFileInDiff, pullRequestDialogOpen, pullRequestDialogPullRequests, selectPullRequestFromDialog, selectedReviewThread, threadResolveAction, toggleSelectedFileViewed]);
 
   const refreshBadge = getRefreshBadge(refreshStatus);
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="h-screen overflow-hidden bg-background text-foreground">
       <header className="flex h-12 items-center justify-between border-b border-border px-4">
         <div className="flex items-center gap-3">
-          <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <GitPullRequest className="h-4 w-4" aria-hidden="true" />
-          </div>
+          <img
+            alt="Narview logo"
+            className="h-8 w-8 rounded-md border border-border object-cover shadow-sm"
+            src="/app-logo.png"
+          />
           <div>
             <h1 className="text-sm font-semibold leading-none">Narview</h1>
             <p className="mt-1 text-xs text-muted-foreground">{selectedPullRequestDisplay}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={openPullRequestDialog}>
+            <GitPullRequest className="h-3.5 w-3.5" aria-hidden="true" />
+            Pull Requests
+            <Kbd>P</Kbd>
+          </Button>
           <div className="hidden min-w-0 items-center gap-2 sm:flex" aria-label="GitHub session">
             {authSession.state === "signed-in" ? (
               <ShieldCheck className="h-4 w-4 text-emerald-500" aria-hidden="true" />
@@ -1688,6 +2639,10 @@ export function App({
             Command
             <Kbd>⌘K</Kbd>
           </Button>
+          <Button variant="outline" size="sm" onClick={() => setSettingsDialogOpen(true)}>
+            <Settings className="h-3.5 w-3.5" aria-hidden="true" />
+            Settings
+          </Button>
           <Button variant="ghost" size="icon" aria-label={themeLabel} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
             {theme === "dark" ? <Sun className="h-4 w-4" aria-hidden="true" /> : <Moon className="h-4 w-4" aria-hidden="true" />}
           </Button>
@@ -1696,324 +2651,34 @@ export function App({
 
       <main
         className={cn(
-          "grid h-[calc(100vh-3rem)] min-h-[680px]",
+          "grid h-[calc(100vh-3rem)] min-h-0 overflow-hidden",
           focusMode ? "grid-cols-[1fr]" : "grid-cols-[360px_minmax(520px,1fr)_340px]",
         )}
       >
         {!focusMode && (
-          <aside aria-label="Review map" className="border-r border-border bg-card/40">
-            <section className="border-b border-border p-3" aria-label="Workspace repositories">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Workspace</h2>
-                <Badge variant={refreshBadge.variant}>{refreshBadge.label}</Badge>
-              </div>
-              <form className="flex gap-2" onSubmit={handleSaveRepository}>
-                <input
-                  aria-label="Repository slug"
-                  className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  onChange={(event) => setRepositoryInput(event.target.value)}
-                  placeholder="owner/repo"
-                  value={repositoryInput}
-                />
-                <Button size="sm" type="submit" disabled={workspaceBusy || !repositoryInput.trim()}>
-                  <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                  Save
-                </Button>
-              </form>
-              <form className="mt-2 flex gap-2" onSubmit={handleQuickOpenPullRequest} aria-label="Quick open Pull Request">
-                <input
-                  aria-label="Pull Request URL"
-                  className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  onChange={(event) => setQuickOpenInput(event.target.value)}
-                  placeholder="github.com/owner/repo/pull/123"
-                  value={quickOpenInput}
-                />
-                <Button size="sm" variant="outline" type="submit" disabled={!quickOpenInput.trim()}>
-                  <GitPullRequest className="h-3.5 w-3.5" aria-hidden="true" />
-                  Open
-                </Button>
-              </form>
-              {quickOpenError && <p className="mt-2 rounded-md bg-destructive/10 p-2 text-xs text-destructive">{quickOpenError}</p>}
-              {sessionNotice && <p className="mt-2 rounded-md bg-emerald-500/10 p-2 text-xs text-emerald-700 dark:text-emerald-300">{sessionNotice}</p>}
-              <div className="mt-2 space-y-1">
-                {repositories.length === 0 ? (
-                  <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No saved repositories.</p>
-                ) : (
-                  repositories.map((repository) => (
-                    <div className="flex h-8 items-center gap-2 rounded-md border border-border px-2" key={repository.slug}>
-                      <Github className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
-                      <span className="min-w-0 flex-1 truncate text-sm">{repository.slug}</span>
-                      <button
-                        aria-label={`Remove ${repository.slug}`}
-                        className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                        disabled={workspaceBusy}
-                        onClick={() => void handleRemoveRepository(repository)}
-                        type="button"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-              <div className="mt-3 flex items-center justify-between gap-2">
-                <label className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    checked={includeDrafts}
-                    className="h-4 w-4 accent-primary"
-                    onChange={(event) => void handleDraftFilterChange(event.target.checked)}
-                    type="checkbox"
-                  />
-                  Include draft Pull Requests
-                </label>
-                <Button size="sm" variant="outline" onClick={() => void refreshPullRequests(includeDrafts)} disabled={workspaceBusy || repositories.length === 0}>
-                  <RefreshCw className={cn("h-3.5 w-3.5", workspaceBusy && "animate-spin")} aria-hidden="true" />
-                  Refresh
-                </Button>
-              </div>
-              <p className="mt-2 text-xs leading-5 text-muted-foreground" role="status">
-                {refreshStatus.message}
-                {refreshStatus.rateLimitResetEpochSeconds ? ` Reset ${refreshStatus.rateLimitResetEpochSeconds}.` : ""}
-              </p>
-              {workspaceError && <p className="mt-2 rounded-md bg-destructive/10 p-2 text-xs text-destructive">{workspaceError}</p>}
-            </section>
-
-            <section className="border-b border-border p-3" aria-label="Open Pull Requests">
-              <div className="mb-2 flex items-center justify-between">
-                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Open Pull Requests</h2>
-                <Badge variant="info">{routedPullRequests.length}</Badge>
-              </div>
-              <div className="max-h-56 space-y-1 overflow-auto">
-                {routedPullRequests.length === 0 ? (
-                  <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">Refresh saved repositories to load open Pull Requests.</p>
-                ) : (
-                  routedPullRequests.map((pullRequest) => {
-                    const isSelected = getPullRequestKey(pullRequest) === getPullRequestKey(selectedPullRequest);
-
-                    return (
-                      <button
-                        aria-pressed={isSelected}
-                        className={cn(
-                          "w-full rounded-md border border-border p-2 text-left hover:bg-accent",
-                          isSelected && "border-primary bg-accent text-accent-foreground",
-                        )}
-                        key={getPullRequestKey(pullRequest)}
-                        onClick={() => void handleSelectPullRequest(pullRequest)}
-                        type="button"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="min-w-0 truncate text-sm font-medium">{pullRequest.title}</span>
-                          {pullRequest.isDraft && <Badge variant="warning">Draft</Badge>}
-                        </div>
-                        <div className="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                          <span className="min-w-0 truncate">{pullRequest.repository} #{pullRequest.number}</span>
-                          {pullRequest.authorLogin && <span className="shrink-0">@{pullRequest.authorLogin}</span>}
-                        </div>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-            </section>
-
+          <aside aria-label="File explorer" className="pane-scroll-y border-r border-border bg-card/40">
             <section className="border-b border-border p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Review queues</h2>
-                <Badge variant={activeQueue.tone}>{activeQueue.count}</Badge>
-              </div>
-              <div className="space-y-1">
-                {queueButtons.map((queue) => (
-                  <button
-                    className={cn(
-                      "flex h-8 w-full items-center justify-between rounded-md px-2 text-left text-sm hover:bg-accent",
-                      queue.id === activeQueue.id && "bg-accent text-accent-foreground",
-                    )}
-                    key={queue.id}
-                    onClick={() => applyReviewQueueFilters(queue.filters)}
-                    type="button"
-                  >
-                    <span>{queue.label}</span>
-                    <Badge variant={queue.tone}>{queue.count}</Badge>
-                  </button>
-                ))}
-              </div>
-              <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                <label className="space-y-1">
-                  <span className="text-muted-foreground">Source</span>
-                  <select
-                    className="h-8 w-full rounded-md border border-input bg-background px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    onChange={(event) => updateReviewQueueFilter("origin", event.target.value as ReviewOriginFilter)}
-                    value={reviewQueueFilters.origin}
-                  >
-                    <option value="all">All</option>
-                    <option value="coderabbit">CodeRabbit</option>
-                    <option value="human">Human</option>
-                  </select>
-                </label>
-                <label className="space-y-1">
-                  <span className="text-muted-foreground">Reviewed</span>
-                  <select
-                    className="h-8 w-full rounded-md border border-input bg-background px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    onChange={(event) => updateReviewQueueFilter("reviewed", event.target.value as ReviewReviewedFilter)}
-                    value={reviewQueueFilters.reviewed}
-                  >
-                    <option value="all">All</option>
-                    <option value="unreviewed">Unreviewed</option>
-                    <option value="reviewed">Reviewed</option>
-                  </select>
-                </label>
-                <label className="space-y-1">
-                  <span className="text-muted-foreground">State</span>
-                  <select
-                    className="h-8 w-full rounded-md border border-input bg-background px-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    onChange={(event) => updateReviewQueueFilter("state", event.target.value as ReviewStateFilter)}
-                    value={reviewQueueFilters.state}
-                  >
-                    <option value="all">All</option>
-                    <option value="unresolved">Unresolved</option>
-                    <option value="resolved">Resolved</option>
-                    <option value="outdated">Outdated</option>
-                    <option value="current">Current</option>
-                  </select>
-                </label>
-              </div>
-            </section>
-
-            <section className="border-b border-border p-3" aria-label="Review thread queue">
-              <div className="mb-2 flex items-center justify-between">
-                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Threads</h2>
-                <Badge variant="info">{filteredReviewThreads.length}</Badge>
-              </div>
-              <div className="mb-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                <label className="flex items-center gap-2">
-                  <input
-                    checked={allFilteredThreadsSelected}
-                    className="h-4 w-4 accent-primary"
-                    onChange={(event) => toggleAllFilteredThreadSelection(event.target.checked)}
-                    type="checkbox"
-                  />
-                  Select visible <Kbd>A</Kbd>
-                </label>
-                {selectedBulkThreadIds.length > 0 && <span>{selectedBulkThreadIds.length} selected</span>}
-              </div>
-              {selectedBulkThreadIds.length > 0 && (
-                <div className="mb-2 grid grid-cols-2 gap-2">
-                  <Button size="sm" variant="outline" onClick={() => applyBulkReviewedState(true)}>
-                    Mark reviewed
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => applyBulkReviewedState(false)}>
-                    Mark unreviewed
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setBulkConfirmAction("resolve")}>
-                    Resolve selected
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setBulkConfirmAction("unresolve")}>
-                    Unresolve selected
-                  </Button>
-                </div>
-              )}
-              {bulkUndo && (
-                <div className="mb-2 flex items-center justify-between gap-2 rounded-md bg-emerald-500/10 p-2 text-xs text-emerald-700 dark:text-emerald-300">
-                  <span>{bulkUndo.message}</span>
-                  <button className="font-medium underline" onClick={undoBulkReviewedState} type="button">
-                    Undo
-                  </button>
-                </div>
-              )}
-              {bulkActionResult && (
-                <div className="mb-2 space-y-1 rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">
-                  <p>{bulkActionResult.message}</p>
-                  {bulkActionResult.failures.map((failure) => (
-                    <p key={failure.id}>
-                      {failure.id}: {failure.message} {failure.retryable ? "Retryable." : "Terminal."}
-                    </p>
-                  ))}
-                  {retryableBulkFailureIds.length > 0 && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        setSelectedBulkThreadIds(retryableBulkFailureIds);
-                        setBulkConfirmAction(bulkActionResult.action);
-                      }}
-                    >
-                      Retry failed
-                    </Button>
-                  )}
-                </div>
-              )}
-              <div className="max-h-44 space-y-2 overflow-auto">
-                {filteredReviewThreads.length === 0 ? (
-                  <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No Review Threads match these filters.</p>
-                ) : (
-                  renderedReviewThreads.map((view) => (
-                    <div
-                      className={cn(
-                        "flex w-full items-start gap-2 rounded-md border border-border p-2 text-left hover:bg-accent",
-                        selectedReviewThread?.id === view.id && "border-primary bg-accent text-accent-foreground",
-                        view.outdated && "border-amber-500/50 bg-amber-500/10",
-                      )}
-                      key={view.id}
-                    >
-                      <input
-                        aria-label={`Select ${view.thread.filePath}`}
-                        checked={selectedBulkThreadSet.has(view.id)}
-                        className="mt-1 h-4 w-4 accent-primary"
-                        onChange={(event) => toggleBulkThreadSelection(view.id, event.target.checked)}
-                        type="checkbox"
-                      />
-                      <button
-                        aria-pressed={selectedReviewThread?.id === view.id}
-                        className="min-w-0 flex-1 text-left"
-                        onClick={() => selectReviewThread(view.id)}
-                        type="button"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="min-w-0 truncate text-sm font-medium">{view.thread.filePath}</span>
-                          <Badge variant={view.outdated ? "warning" : view.reviewed ? "success" : "muted"}>
-                            {view.outdated ? "Outdated" : view.reviewed ? "Reviewed" : "Unreviewed"}
-                          </Badge>
-                        </div>
-                        <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-                          <span>{view.origin === "coderabbit" ? "CodeRabbit" : "Human"}</span>
-                          <span>{getThreadStateLabel(view.thread.state)}</span>
-                          {view.thread.line && <span>line {view.thread.line}</span>}
-                        </div>
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-              {reviewThreadWindow.omitted > 0 && (
-                <p className="mt-2 rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">
-                  Showing {reviewThreadWindow.rendered} of {reviewThreadWindow.total} matching Review Threads.
-                </p>
-              )}
-            </section>
-
-            <section className="border-b border-border p-3">
-              <h2 className="mb-2 text-xs font-semibold uppercase tracking-normal text-muted-foreground">Hotspots</h2>
-              <div className="space-y-2">
-                {reviewOverview.hotspots.slice(0, 4).map((hotspot) => (
-                  <button className="w-full rounded-md border border-border p-2 text-left hover:bg-accent" key={hotspot.path} type="button">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-medium">{hotspot.path}</span>
-                      <Badge variant={hotspot.score > 80 ? "danger" : "warning"}>{hotspot.score}</Badge>
-                    </div>
-                    <p className="mt-1 truncate text-xs text-muted-foreground">{hotspot.reasons.join(", ")}</p>
-                  </button>
-                ))}
-              </div>
-            </section>
-
-            <section className="p-3" aria-label="File changes">
               <div className="mb-2 flex items-center justify-between gap-2">
-                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">File changes</h2>
+                <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Files</h2>
                 <Badge variant="info">
                   {fileChangeCounts.viewed}/{fileChangeCounts.total} viewed
                 </Badge>
               </div>
-              <div className="mb-2 grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
+                <Button size="sm" variant="outline" onClick={openPullRequestDialog}>
+                  PRs
+                  <Kbd>P</Kbd>
+                </Button>
+                <Button size="sm" variant="outline" onClick={openThreadDialog} disabled={reviewThreadViews.length === 0}>
+                  Threads
+                  <Kbd>T</Kbd>
+                </Button>
+                <Button size="sm" variant="outline" onClick={openHotspotsDialog} disabled={reviewOverview.hotspots.length === 0}>
+                  Hotspots
+                  <Kbd>S</Kbd>
+                </Button>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
                 <label className="text-xs text-muted-foreground">
                   Viewed
                   <select
@@ -2043,83 +2708,212 @@ export function App({
                   </select>
                 </label>
               </div>
-              <div className="space-y-2">
-                {filteredFileChanges.length === 0 ? (
-                  <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No File Changes match these filters.</p>
-                ) : (
-                  renderedFileChanges.map((view) => (
-                    <div className="rounded-md border border-border p-2 text-sm" key={view.id}>
-                      <div className="flex items-start gap-2">
-                        {view.viewed ? (
-                          <Eye className="mt-0.5 h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
-                        ) : (
-                          <FileCode2 className="mt-0.5 h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+            </section>
+
+            <section className="p-2" aria-label="File tree">
+              {fileExplorerRows.length === 0 ? (
+                <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">No files match these filters.</p>
+              ) : (
+                <div className="space-y-0.5">
+                  {fileExplorerRows.map((row) =>
+                    row.type === "directory" ? (
+                      <div
+                        className="flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground"
+                        key={row.id}
+                        style={{ paddingLeft: `${row.depth * 14 + 8}px` }}
+                      >
+                        <ChevronRight className="h-3 w-3" aria-hidden="true" />
+                        <Folder className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span className="min-w-0 truncate">{row.name}</span>
+                      </div>
+                    ) : (
+                      <button
+                        aria-pressed={selectedFileChange?.id === row.view.id}
+                        className={cn(
+                          "flex min-h-8 w-full items-center gap-2 rounded-md px-2 py-1 text-left text-sm hover:bg-accent",
+                          selectedFileChange?.id === row.view.id && "bg-accent text-accent-foreground",
                         )}
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="min-w-0 truncate font-medium">{view.file.path}</span>
-                            <Badge variant={view.viewed ? "success" : "muted"}>{view.viewed ? "Viewed" : "Unviewed"}</Badge>
-                          </div>
-                          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                            <span>{getFileStatusLabel(view.file.status)}</span>
-                            <span>{getFileLineLabel(view.file)}</span>
-                            <span>{view.changedLines} lines</span>
-                            <span>{getFileKindLabel(view.kind)}</span>
-                            {view.fallbackLabel && <span>{view.fallbackLabel}</span>}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="mt-2 grid grid-cols-2 gap-2">
-                        <Button
-                          aria-label={`View diff for ${view.file.path}`}
-                          onClick={() => setSelectedFileChangeId(view.id)}
-                          size="sm"
-                          variant={selectedFileChange?.id === view.id ? "secondary" : "outline"}
-                        >
-                          <FileText className="h-3.5 w-3.5" aria-hidden="true" />
-                          View diff
-                        </Button>
-                        <Button
-                          aria-label={`Mark ${view.file.path} ${view.viewed ? "unviewed" : "viewed"}`}
-                          onClick={() => handleSetFileChangeViewed(view.id, !view.viewed)}
-                          size="sm"
-                          variant="outline"
-                        >
-                          {view.viewed ? "Mark unviewed" : "Mark viewed"}
-                        </Button>
-                      </div>
-                    </div>
-                  ))
-                )}
-                {fileChangeWindow.omitted > 0 && (
-                  <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">
-                    Showing {fileChangeWindow.rendered} of {fileChangeWindow.total} matching File Changes.
-                  </p>
-                )}
-                {fileChangeCounts.nonText > 0 && (
-                  <p className="text-xs text-muted-foreground">{fileChangeCounts.nonText} binary or non-text change{fileChangeCounts.nonText === 1 ? "" : "s"} listed with fallback states.</p>
-                )}
-              </div>
+                        key={row.id}
+                        onClick={() => setSelectedFileChangeId(row.view.id)}
+                        style={{ paddingLeft: `${row.depth * 14 + 8}px` }}
+                        type="button"
+                      >
+                        {row.view.viewed ? (
+                          <Eye className="h-3.5 w-3.5 shrink-0 text-emerald-500" aria-hidden="true" />
+                        ) : (
+                          <FileCode2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                        )}
+                        <span className="min-w-0 flex-1 truncate">{row.name}</span>
+                        {row.threadCount > 0 && <Badge variant="info">{row.threadCount}</Badge>}
+                        {row.hotspot && row.hotspot.score > 0 && (
+                          <Badge variant={row.hotspot.score > 80 ? "danger" : "warning"}>{row.hotspot.score}</Badge>
+                        )}
+                      </button>
+                    ),
+                  )}
+                </div>
+              )}
+              {fileChangeCounts.nonText > 0 && (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {fileChangeCounts.nonText} binary or non-text change{fileChangeCounts.nonText === 1 ? "" : "s"} included.
+                </p>
+              )}
             </section>
           </aside>
         )}
 
-        <section aria-label="Review canvas" className="flex min-w-0 flex-col">
+        <section aria-label="Review canvas" className="flex min-h-0 min-w-0 flex-col overflow-hidden">
           <div className="flex h-11 items-center justify-between border-b border-border px-3">
             <div className="flex min-w-0 items-center gap-2">
-              <Badge variant="danger">Needs attention</Badge>
+              <Badge variant={selectedReviewThread ? "danger" : selectedPullRequestLoadingData ? "info" : "muted"}>
+                {selectedReviewThread ? "Needs attention" : selectedPullRequestLoadingData ? "Loading" : "No thread"}
+              </Badge>
               <span className="truncate text-sm font-medium">{activeThreadFile}</span>
-              <span className="text-xs text-muted-foreground">line {activeThreadLine ?? "unknown"}</span>
+              {activeThreadLine !== null && <span className="text-xs text-muted-foreground">line {activeThreadLine}</span>}
             </div>
-            <Button variant="outline" size="sm" onClick={() => setFocusMode((current) => !current)}>
-              {focusMode ? <PanelLeftOpen className="h-3.5 w-3.5" aria-hidden="true" /> : <PanelLeftClose className="h-3.5 w-3.5" aria-hidden="true" />}
-              {focusMode ? "Exit focus" : "Focus"}
-              <Kbd>F</Kbd>
-            </Button>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                aria-label="Refresh current Pull Request"
+                variant="outline"
+                size="sm"
+                onClick={() => void refreshSelectedPullRequestData(selectedPullRequest)}
+                disabled={!activePullRequestKey || selectedPullRequestLoadingData}
+              >
+                <RefreshCw className={cn("h-3.5 w-3.5", selectedPullRequestLoadingData && "animate-spin")} aria-hidden="true" />
+                Refresh PR
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setFocusMode((current) => !current)}>
+                {focusMode ? <PanelLeftOpen className="h-3.5 w-3.5" aria-hidden="true" /> : <PanelLeftClose className="h-3.5 w-3.5" aria-hidden="true" />}
+                {focusMode ? "Exit focus" : "Focus"}
+                <Kbd>F</Kbd>
+              </Button>
+            </div>
           </div>
 
-          <div className="grid flex-1 grid-rows-[auto_auto_1fr] overflow-hidden">
-            <div className="border-b border-border bg-background px-4 py-3" aria-label="Review overview">
+          <div aria-label="Review queue summary" className="border-b border-border bg-card/50 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="mr-1 text-xs font-semibold uppercase tracking-normal text-muted-foreground">Queues</span>
+              {queueButtons.map((queue) => (
+                <Button
+                  aria-pressed={activeQueue.id === queue.id}
+                  key={queue.id}
+                  onClick={() => applyReviewQueueFilters(queue.filters)}
+                  size="sm"
+                  variant={activeQueue.id === queue.id ? "secondary" : "ghost"}
+                >
+                  {queue.label}
+                  <Badge variant={queue.tone}>{queue.count}</Badge>
+                </Button>
+              ))}
+              <Button size="sm" variant="outline" onClick={openThreadDialog} disabled={reviewThreadViews.length === 0}>
+                Browse threads
+                <Kbd>T</Kbd>
+              </Button>
+              <span className="ml-auto text-xs text-muted-foreground">
+                {filteredReviewThreads.length} matching filters · {selectedBulkThreadIds.length} selected
+              </span>
+            </div>
+            <div className="mt-2 flex flex-wrap items-end gap-2">
+              <label className="min-w-24 text-xs text-muted-foreground">
+                Source
+                <select
+                  aria-label="Source"
+                  className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground"
+                  onChange={(event) => updateReviewQueueFilter("origin", event.target.value as ReviewOriginFilter)}
+                  value={reviewQueueFilters.origin}
+                >
+                  <option value="all">All</option>
+                  <option value="coderabbit">CodeRabbit</option>
+                  <option value="human">Human</option>
+                </select>
+              </label>
+              <label className="min-w-24 text-xs text-muted-foreground">
+                Reviewed
+                <select
+                  aria-label="Reviewed"
+                  className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground"
+                  onChange={(event) => updateReviewQueueFilter("reviewed", event.target.value as ReviewReviewedFilter)}
+                  value={reviewQueueFilters.reviewed}
+                >
+                  <option value="all">All</option>
+                  <option value="reviewed">Reviewed</option>
+                  <option value="unreviewed">Unreviewed</option>
+                </select>
+              </label>
+              <label className="min-w-24 text-xs text-muted-foreground">
+                State
+                <select
+                  aria-label="State"
+                  className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground"
+                  onChange={(event) => updateReviewQueueFilter("state", event.target.value as ReviewStateFilter)}
+                  value={reviewQueueFilters.state}
+                >
+                  <option value="all">All</option>
+                  <option value="current">Current</option>
+                  <option value="unresolved">Unresolved</option>
+                  <option value="resolved">Resolved</option>
+                  <option value="outdated">Outdated</option>
+                </select>
+              </label>
+              <div aria-label="Bulk review actions" className="ml-auto flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="outline" onClick={() => toggleAllFilteredThreadSelection(!allFilteredThreadsSelected)} disabled={renderedReviewThreads.length === 0}>
+                  {allFilteredThreadsSelected ? "Clear visible" : "Select visible"}
+                  <Kbd>A</Kbd>
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => applyBulkReviewedState(true)} disabled={selectedBulkThreads.length === 0}>
+                  Bulk mark reviewed
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => applyBulkReviewedState(false)} disabled={selectedBulkThreads.length === 0}>
+                  Bulk mark unreviewed
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setBulkConfirmAction("resolve")} disabled={selectedBulkThreads.length === 0 || threadActionBusy !== null}>
+                  Resolve selected
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setBulkConfirmAction("unresolve")} disabled={selectedBulkThreads.length === 0 || threadActionBusy !== null}>
+                  Unresolve selected
+                </Button>
+                {bulkUndo && (
+                  <Button size="sm" variant="ghost" onClick={undoBulkReviewedState}>
+                    Undo
+                  </Button>
+                )}
+              </div>
+            </div>
+            {(bulkUndo || bulkActionResult) && (
+              <div className="mt-2 space-y-1 text-xs" role="status">
+                {bulkUndo && <p className="rounded-md bg-muted px-2 py-1 text-muted-foreground">{bulkUndo.message}</p>}
+                {bulkActionResult && (
+                  <div className="rounded-md bg-muted px-2 py-1 text-muted-foreground">
+                    <p>{bulkActionResult.message}</p>
+                    {bulkActionResult.failures.length > 0 && (
+                      <div className="mt-1 space-y-1">
+                        {bulkActionResult.failures.map((failure) => (
+                          <p key={failure.id}>
+                            {failure.id}: {failure.message}
+                          </p>
+                        ))}
+                        {retryableBulkFailureIds.length > 0 && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setSelectedBulkThreadIds(retryableBulkFailureIds);
+                              setBulkConfirmAction(bulkActionResult.action);
+                            }}
+                          >
+                            Retry failed
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div aria-label="Review canvas scroll area" className="pane-scroll flex-1 p-4">
+            <section className="rounded-md border border-border bg-background p-4" aria-label="Review overview">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <p className="truncate text-xs text-muted-foreground">
@@ -2127,7 +2921,17 @@ export function App({
                   </p>
                   <h2 className="mt-1 truncate text-base font-semibold">{reviewOverview.title}</h2>
                   <p className="mt-1 truncate text-xs text-muted-foreground">{reviewOverview.branch}</p>
-                  <p className="mt-1 line-clamp-2 text-sm leading-5 text-muted-foreground">{reviewOverview.description}</p>
+                  {selectedPullRequestLoadingData && (
+                    <p className="mt-2 rounded-md bg-muted p-2 text-xs text-muted-foreground">Loading Pull Request files, checks, and review threads from GitHub.</p>
+                  )}
+                  {pullRequestDataStatus.key === activePullRequestKey && pullRequestDataStatus.state === "loaded" && (
+                    <p className="mt-2 rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">
+                      {pullRequestDataStatus.message}
+                    </p>
+                  )}
+                  {pullRequestDataStatus.key === activePullRequestKey && pullRequestDataStatus.state === "failed" && (
+                    <p className="mt-2 rounded-md bg-destructive/10 p-2 text-xs text-destructive">{pullRequestDataStatus.message}</p>
+                  )}
                 </div>
                 <div className="flex shrink-0 items-start">
                   <Badge variant={readinessBadge.variant}>{readinessBadge.label}</Badge>
@@ -2151,32 +2955,56 @@ export function App({
                   <p className="font-semibold">{reviewOverview.counts.checks}</p>
                 </div>
               </div>
-            </div>
 
-            <div className="border-b border-border bg-muted/40 px-4 py-3">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-xs text-muted-foreground">
-                    Review Path {selectedReviewThreadIndex + 1} of {Math.max(filteredReviewThreads.length, 1)}
-                  </p>
-                  <h3 className="mt-1 text-base font-semibold">{activeThreadTitle}</h3>
-                  {activeThreadState === "outdated" && (
-                    <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">Older diff context from a previous hunk.</p>
+              <details className="mt-3 rounded-md border border-border bg-card/60" aria-label="Pull Request summary">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-semibold">PR Summary</h3>
+                    <p className="mt-0.5 truncate text-xs text-muted-foreground">{getPullRequestSummaryPreview(reviewOverview.description)}</p>
+                  </div>
+                  <Badge variant="muted">Open</Badge>
+                </summary>
+                <div className="border-t border-border px-3 py-3">
+                  <MarkdownContent
+                    value={reviewOverview.description}
+                    emptyFallback={<p className="text-sm text-muted-foreground">No description provided.</p>}
+                  />
+                </div>
+              </details>
+            </section>
+
+            {!activeThreadAnchoredInDiff && (
+              <section className="mt-4 rounded-md border border-border bg-background p-4" aria-label="Active review thread">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <p className="text-xs text-muted-foreground">
+                      Review Path {selectedReviewThread ? selectedReviewThreadIndex + 1 : 0} of {filteredReviewThreads.length}
+                    </p>
+                    {activeThreadState === "outdated" && (
+                      <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">Older diff context from a previous hunk.</p>
+                    )}
+                  </div>
+                  {selectedReviewThread && (
+                    <div className="flex items-center gap-2">
+                      <Badge variant={selectedReviewThread.origin === "coderabbit" ? "warning" : "info"}>
+                        {selectedReviewThread.origin === "coderabbit" ? "CodeRabbit" : "Human"}
+                      </Badge>
+                      <Badge variant={activeThreadState === "outdated" ? "warning" : "muted"}>{activeThreadStateLabel}</Badge>
+                      {selectedReviewThread.reviewed && <Badge variant="success">Reviewed</Badge>}
+                    </div>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
-                  <Badge variant={selectedReviewThread?.origin === "coderabbit" ? "warning" : "info"}>
-                    {selectedReviewThread?.origin === "coderabbit" ? "CodeRabbit" : "Human"}
-                  </Badge>
-                  <Badge variant={activeThreadState === "outdated" ? "warning" : "muted"}>{activeThreadStateLabel}</Badge>
-                  {selectedReviewThread?.reviewed && <Badge variant="success">Reviewed</Badge>}
+                <div className="mt-3">
+                  <MarkdownContent
+                    value={activeThread?.body}
+                    emptyFallback={<p className="text-sm text-muted-foreground">{activeThreadBody}</p>}
+                  />
                 </div>
-              </div>
-            </div>
+              </section>
+            )}
 
-            <div className="overflow-auto p-4">
-              <div className="rounded-md border border-border" aria-label="Diff viewer">
-                <div className="flex items-center justify-between gap-3 border-b border-border bg-muted/50 px-3 py-2">
+            <div className="diff-shell mt-4 rounded-md border border-border" aria-label="Diff viewer">
+                <div className="diff-file-header flex items-center justify-between gap-3 border-b border-border px-3 py-2">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-semibold">{selectedFileDiffState?.filePath ?? activeThreadFile}</p>
                     <p className="mt-1 text-xs text-muted-foreground">
@@ -2184,6 +3012,25 @@ export function App({
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
+                    {selectedFileChange && (
+                      <Badge variant={selectedFileChange.viewed ? "success" : "muted"}>
+                        {selectedFileChange.viewed ? "Viewed" : "Unviewed"}
+                      </Badge>
+                    )}
+                    <Button
+                      aria-label={
+                        selectedFileChange
+                          ? `Mark ${selectedFileChange.file.path} ${selectedFileChange.viewed ? "unviewed" : "viewed"}`
+                          : "Mark selected file viewed"
+                      }
+                      onClick={toggleSelectedFileViewed}
+                      size="sm"
+                      variant="outline"
+                      disabled={!selectedFileChange}
+                    >
+                      {selectedFileChange?.viewed ? "Mark unviewed" : "Mark viewed"}
+                      <Kbd>V</Kbd>
+                    </Button>
                     <Button
                       aria-pressed={diffMode === "unified"}
                       onClick={() => setDiffMode("unified")}
@@ -2224,54 +3071,117 @@ export function App({
                     </a>
                   </div>
                 ) : (
-                  <div className="divide-y divide-border">
+                  <div className="diff-content divide-y divide-border">
+                    {selectedFileDiffState.hunks.length === 0 && (
+                      <div className="space-y-2 p-4">
+                        <p className="text-sm font-medium">No cached text diff for this file.</p>
+                        <p className="text-sm text-muted-foreground">
+                          GitHub did not return a patch for this file, or Narview skipped it because the patch is too large.
+                        </p>
+                        <a
+                          className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent"
+                          href={selectedFileDiffState.githubUrl}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                          Open in GitHub
+                        </a>
+                      </div>
+                    )}
                     {selectedFileDiffState.hunks.map((hunk) => (
                       <div key={hunk.id}>
-                        <div className="flex items-center justify-between gap-2 bg-muted/30 px-3 py-2">
+                        <div className="diff-hunk-header flex items-center justify-between gap-2 px-3 py-2">
                           <p className="min-w-0 truncate font-mono text-xs text-muted-foreground">{hunk.header}</p>
                           {!hunk.loaded ? (
                             <Button size="sm" variant="outline" onClick={() => loadDiffHunk(selectedFileChange.id, selectedFileChange.file, hunk.id)}>
                               Load hunk
                             </Button>
-                          ) : !hunk.expanded ? (
+                          ) : hunk.expandable && !hunk.expanded ? (
                             <Button size="sm" variant="outline" onClick={() => expandDiffHunk(selectedFileChange.id, hunk.id)}>
                               Expand context
                             </Button>
-                          ) : (
+                          ) : hunk.expandable ? (
                             <Badge variant="muted">Context expanded</Badge>
-                          )}
+                          ) : null}
                         </div>
                         {hunk.loaded ? (
                           diffMode === "unified" ? (
-                            <div className="font-mono text-xs">
-                              {hunk.lines.map((line, lineIndex) => (
-                                <div
-                                  className={cn("grid grid-cols-[56px_56px_1fr] border-t border-border first:border-t-0", getDiffLineClass(line.kind))}
-                                  key={`${hunk.id}-${lineIndex}`}
-                                >
-                                  <div className="border-r border-border px-2 py-1 text-right text-muted-foreground">{line.oldLine ?? ""}</div>
-                                  <div className="border-r border-border px-2 py-1 text-right text-muted-foreground">{line.newLine ?? ""}</div>
-                                  <div className="min-w-0 px-3 py-1">
-                                    <span className="mr-2 text-muted-foreground">{getDiffPrefix(line.kind)}</span>
-                                    <span>{line.content || " "}</span>
+                            <div className="diff-code-grid font-mono text-xs">
+                              {hunk.lines.map((line, lineIndex) => {
+                                const lineKey = `${hunk.id}:${lineIndex}`;
+                                const showInlineThread = selectedReviewThread && activeThreadAnchorKey === lineKey;
+
+                                return (
+                                  <div className="contents" key={lineKey}>
+                                    <div
+                                      className={cn(
+                                        "diff-row grid grid-cols-[52px_52px_24px_max-content] border-t first:border-t-0",
+                                        getDiffLineClass(line.kind),
+                                        showInlineThread && "diff-row-comment-anchor",
+                                      )}
+                                    >
+                                      <div className="diff-gutter px-2 py-1 text-right">{line.oldLine ?? ""}</div>
+                                      <div className="diff-gutter px-2 py-1 text-right">{line.newLine ?? ""}</div>
+                                      <div className="diff-marker px-1 py-1 text-center">{getDiffPrefix(line.kind)}</div>
+                                      <div className="diff-code-cell py-1 pl-2 pr-8">
+                                        <DiffCodeLine line={line} />
+                                      </div>
+                                    </div>
+                                    {showInlineThread && (
+                                      <InlineReviewThread
+                                        anchorRef={activeInlineThreadRef}
+                                        pathCount={filteredReviewThreads.length}
+                                        pathIndex={selectedReviewThreadIndex + 1}
+                                        stateLabel={activeThreadStateLabel}
+                                        view={selectedReviewThread}
+                                      />
+                                    )}
                                   </div>
-                                </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           ) : (
-                            <div className="grid grid-cols-2 font-mono text-xs">
-                              {hunk.lines.map((line, lineIndex) => (
-                                <div className="contents" key={`${hunk.id}-${lineIndex}`}>
-                                  <div className={cn("min-w-0 border-t border-r border-border px-3 py-1", line.kind === "addition" ? "bg-muted/30 text-muted-foreground" : getDiffLineClass(line.kind))}>
-                                    <span className="mr-2 text-muted-foreground">{line.oldLine ?? ""}</span>
-                                    {line.kind !== "addition" ? line.content || " " : " "}
+                            <div className="diff-code-grid font-mono text-xs">
+                              {hunk.lines.map((line, lineIndex) => {
+                                const lineKey = `${hunk.id}:${lineIndex}`;
+                                const showInlineThread = selectedReviewThread && activeThreadAnchorKey === lineKey;
+
+                                return (
+                                  <div className="contents" key={lineKey}>
+                                    <div
+                                      className={cn(
+                                        "diff-side-row grid border-t border-border",
+                                        showInlineThread && "diff-row-comment-anchor",
+                                      )}
+                                    >
+                                      <div className={cn("diff-side-cell grid border-r", line.kind === "addition" ? "diff-side-placeholder" : getDiffLineClass(line.kind))}>
+                                        <span className="diff-gutter px-2 py-1 text-right">{line.oldLine ?? ""}</span>
+                                        <span className="diff-marker px-1 py-1 text-center">{line.kind === "deletion" ? "-" : " "}</span>
+                                        <span className="diff-code-cell py-1 pl-2 pr-8">
+                                          {line.kind !== "addition" ? <DiffCodeLine line={line} /> : <span className="diff-code-line"> </span>}
+                                        </span>
+                                      </div>
+                                      <div className={cn("diff-side-cell grid", line.kind === "deletion" ? "diff-side-placeholder" : getDiffLineClass(line.kind))}>
+                                        <span className="diff-gutter px-2 py-1 text-right">{line.newLine ?? ""}</span>
+                                        <span className="diff-marker px-1 py-1 text-center">{line.kind === "addition" ? "+" : " "}</span>
+                                        <span className="diff-code-cell py-1 pl-2 pr-8">
+                                          {line.kind !== "deletion" ? <DiffCodeLine line={line} /> : <span className="diff-code-line"> </span>}
+                                        </span>
+                                      </div>
+                                    </div>
+                                    {showInlineThread && (
+                                      <InlineReviewThread
+                                        anchorRef={activeInlineThreadRef}
+                                        pathCount={filteredReviewThreads.length}
+                                        pathIndex={selectedReviewThreadIndex + 1}
+                                        stateLabel={activeThreadStateLabel}
+                                        view={selectedReviewThread}
+                                      />
+                                    )}
                                   </div>
-                                  <div className={cn("min-w-0 border-t border-border px-3 py-1", line.kind === "deletion" ? "bg-muted/30 text-muted-foreground" : getDiffLineClass(line.kind))}>
-                                    <span className="mr-2 text-muted-foreground">{line.newLine ?? ""}</span>
-                                    {line.kind !== "deletion" ? line.content || " " : " "}
-                                  </div>
-                                </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           )
                         ) : (
@@ -2291,11 +3201,14 @@ export function App({
                         View whole file
                       </Button>
                       {fullFileLineWindow && (
-                        <div className="mt-3 rounded-md border border-border" aria-label="Full file view">
+                        <div className="diff-full-file mt-3 rounded-md border border-border" aria-label="Full file view">
                           {fullFileLineWindow.items.map((line, lineIndex) => (
-                            <div className="grid grid-cols-[56px_1fr] border-b border-border last:border-b-0 font-mono text-xs" key={`full-${lineIndex}`}>
-                              <div className="border-r border-border px-2 py-1 text-right text-muted-foreground">{line.newLine ?? line.oldLine ?? ""}</div>
-                              <div className={cn("min-w-0 px-3 py-1", getDiffLineClass(line.kind))}>{line.content || " "}</div>
+                            <div className={cn("diff-row grid grid-cols-[52px_24px_max-content] border-b last:border-b-0 font-mono text-xs", getDiffLineClass(line.kind))} key={`full-${lineIndex}`}>
+                              <div className="diff-gutter px-2 py-1 text-right">{line.newLine ?? line.oldLine ?? ""}</div>
+                              <div className="diff-marker px-1 py-1 text-center">{getDiffPrefix(line.kind)}</div>
+                              <div className="diff-code-cell py-1 pl-2 pr-8">
+                                <DiffCodeLine line={line} />
+                              </div>
                             </div>
                           ))}
                           {fullFileLineWindow.omitted > 0 && (
@@ -2312,29 +3225,52 @@ export function App({
 
               <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <span className="inline-flex items-center gap-1"><Keyboard className="h-3.5 w-3.5" aria-hidden="true" /> Keyboard Flow</span>
-                <span>Next <Kbd>J</Kbd></span>
-                <span>Previous <Kbd>K</Kbd></span>
+                <span>Next <Kbd>K</Kbd></span>
+                <span>Previous <Kbd>J</Kbd></span>
+                <span>Threads <Kbd>T</Kbd></span>
                 <span>Reviewed <Kbd>R</Kbd></span>
                 <span>Resolve <Kbd>E</Kbd></span>
                 <span>Reply <Kbd>⇧R</Kbd></span>
                 <span>Open file <Kbd>O</Kbd></span>
+                <span>Viewed <Kbd>V</Kbd></span>
                 <span>Focus <Kbd>F</Kbd></span>
                 <span>Select visible <Kbd>A</Kbd></span>
                 <span>Handoff <Kbd>H</Kbd></span>
               </div>
             </div>
-          </div>
         </section>
 
         {!focusMode && (
-          <aside aria-label="Inspector" className="border-l border-border bg-card/40">
+          <aside aria-label="Inspector" className="pane-scroll-y border-l border-border bg-card/40">
             <div className="border-b border-border p-3">
-              <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
-                <MessageSquare className="h-4 w-4" aria-hidden="true" />
-                Review Thread
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                  <MessageSquare className="h-4 w-4" aria-hidden="true" />
+                  <span>Review Thread</span>
+                </div>
+                <Badge variant={selectedReviewThread ? "info" : "muted"}>{selectedReviewThread ? "Selected" : "None"}</Badge>
               </div>
-              <p className="text-xs text-muted-foreground">@{activeThreadAuthor ?? "unknown"}</p>
-              <p className="mt-3 text-sm leading-6">{activeThreadBody}</p>
+              <dl className="space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-muted-foreground">Author</dt>
+                  <dd className="min-w-0 truncate">@{activeThreadAuthor ?? "unknown"}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-muted-foreground">File</dt>
+                  <dd className="min-w-0 truncate">{activeThreadFile}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-muted-foreground">Line</dt>
+                  <dd>{activeThreadLine ?? "None"}</dd>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <dt className="text-muted-foreground">State</dt>
+                  <dd className="flex items-center gap-1">
+                    <Badge variant={activeThreadState === "outdated" ? "warning" : "muted"}>{activeThreadStateLabel}</Badge>
+                    {selectedReviewThread?.reviewed && <Badge variant="success">Reviewed</Badge>}
+                  </dd>
+                </div>
+              </dl>
             </div>
 
             <div className="space-y-2 border-b border-border p-3">
@@ -2389,6 +3325,98 @@ export function App({
               )}
             </div>
 
+            <div className="space-y-3 border-b border-border p-3" aria-label="Live checks">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                  <RefreshCw className={cn("h-4 w-4", selectedPullRequestRefreshingChecks && "animate-spin")} aria-hidden="true" />
+                  <span>Live Checks</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge variant={liveChecksBadge.variant}>{liveChecksBadge.label}</Badge>
+                  <Button
+                    aria-label="Refresh live checks"
+                    title={liveChecksRefreshDisabledReason ?? "Refresh GitHub Actions checks"}
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => void refreshSelectedPullRequestChecks(selectedPullRequest)}
+                    disabled={!liveChecksCanRefresh}
+                  >
+                    <RefreshCw className={cn("h-3.5 w-3.5", selectedPullRequestRefreshingChecks && "animate-spin")} aria-hidden="true" />
+                  </Button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                <div className="rounded-md bg-muted p-2">
+                  <p className="text-muted-foreground">Passing</p>
+                  <p className="mt-1 text-sm font-semibold">{reviewOverview.checks.passing}</p>
+                </div>
+                <div className="rounded-md bg-muted p-2">
+                  <p className="text-muted-foreground">Running</p>
+                  <p className="mt-1 text-sm font-semibold">{reviewOverview.checks.pending}</p>
+                </div>
+                <div className="rounded-md bg-muted p-2">
+                  <p className="text-muted-foreground">Failing</p>
+                  <p className="mt-1 text-sm font-semibold">{reviewOverview.checks.failing}</p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span>Last synced {getLastCheckedLabel(reviewOverviewCache.fetchedAtEpochMs)}</span>
+                {reviewOverview.checks.pending > 0 && <span>Auto-refreshing</span>}
+              </div>
+
+              {checkRefreshStatus.key === activePullRequestKey && checkRefreshStatus.message && (
+                <p
+                  className={cn(
+                    "rounded-md p-2 text-xs",
+                    checkRefreshStatus.state === "failed" ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground",
+                  )}
+                  role="status"
+                >
+                  {checkRefreshStatus.message}
+                </p>
+              )}
+
+              <div className="pane-scroll-y max-h-56 space-y-2 pr-1">
+                {reviewOverview.checks.details.length > 0 ? (
+                  reviewOverview.checks.details.map((check) => {
+                    const checkBadge = getCheckBadge(check.status, check.conclusion);
+
+                    return (
+                      <div className="rounded-md border border-border bg-background/70 p-2 text-sm" key={check.name}>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="min-w-0 truncate font-medium">{check.name}</span>
+                          <Badge variant={checkBadge.variant}>{checkBadge.label}</Badge>
+                        </div>
+                        <div className="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                          <span>{check.timingLabel}</span>
+                          {check.url ? (
+                            <Button
+                              aria-label={`Open ${check.name} check details`}
+                              className="h-6 px-1.5"
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => void openUrl(check.url as string)}
+                            >
+                              Details
+                              <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                            </Button>
+                          ) : (
+                            <span>No link</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">
+                    No GitHub Actions checks are loaded for this Pull Request.
+                  </p>
+                )}
+              </div>
+            </div>
+
             <div className="space-y-2 border-b border-border p-3" aria-label="Handoff packet">
               <div className="mb-2 flex items-center justify-between gap-2 text-sm font-semibold">
                 <span>Handoff Packet</span>
@@ -2433,137 +3461,6 @@ export function App({
               )}
             </div>
 
-            <div className="border-b border-border p-3" aria-label="GitHub session details">
-              <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
-                <Github className="h-4 w-4" aria-hidden="true" />
-                GitHub Session
-              </div>
-              <div className="space-y-2 text-sm">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-muted-foreground">Status</span>
-                  <Badge variant={authBadge.variant}>{authBadge.label}</Badge>
-                </div>
-                {authSession.accountLogin && (
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-muted-foreground">Account</span>
-                    <span className="min-w-0 truncate">@{authSession.accountLogin}</span>
-                  </div>
-                )}
-                {authSession.tokenHint && (
-                  <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-300">
-                    <ShieldCheck className="h-4 w-4" aria-hidden="true" />
-                    OS secure storage
-                  </div>
-                )}
-                {authSession.storage.message && <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">{authSession.storage.message}</p>}
-                {oauthFlow && (
-                  <div className="space-y-2 rounded-md border border-border p-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-muted-foreground">Device code</span>
-                      <Kbd>{oauthFlow.userCode}</Kbd>
-                    </div>
-                    <a className="block truncate text-xs text-sky-700 underline dark:text-sky-300" href={oauthFlow.verificationUriComplete ?? oauthFlow.verificationUri}>
-                      {oauthFlow.verificationUri.replace("https://", "")}
-                    </a>
-                    <Button className="w-full justify-between" variant="secondary" onClick={handlePollSignIn} disabled={authBusy}>
-                      Check sign-in
-                      <Kbd>{oauthFlow.intervalSeconds}s</Kbd>
-                    </Button>
-                  </div>
-                )}
-                {authError && <p className="rounded-md bg-destructive/10 p-2 text-xs text-destructive" role="status">{authError}</p>}
-              </div>
-            </div>
-
-            <div className="border-b border-border p-3" aria-label="Pull Request cache">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-sm font-semibold">
-                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
-                  PR Cache
-                </div>
-                <Badge variant={selectedPullRequestPinned ? "success" : "muted"}>{selectedPullRequestPinned ? "Pinned" : "Unpinned"}</Badge>
-              </div>
-              <div className="space-y-2 text-sm">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-muted-foreground">Entries</span>
-                  <span>{cacheSummary.entries}</span>
-                </div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-muted-foreground">Pinned</span>
-                  <span>{cacheSummary.pinned}</span>
-                </div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-muted-foreground">Next refresh</span>
-                  <span className="truncate">{buildIncrementalFetchPlan("manual").join(", ")}</span>
-                </div>
-                {rateLimitMessage && <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">{rateLimitMessage}</p>}
-                {cacheMessage && <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">{cacheMessage}</p>}
-                <div className="grid grid-cols-2 gap-2">
-                  <Button variant="outline" size="sm" onClick={handleTogglePin} disabled={!activePullRequestKey || !selectedCacheEntry}>
-                    {selectedPullRequestPinned ? "Unpin" : "Pin"}
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={handleClearCache}>
-                    Clear GitHub cache
-                  </Button>
-                </div>
-              </div>
-            </div>
-
-            <div className="border-b border-border p-3" aria-label="Privacy and diagnostics">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-sm font-semibold">
-                  <ShieldCheck className="h-4 w-4" aria-hidden="true" />
-                  Privacy
-                </div>
-                <Badge variant={telemetryPolicy.enabled ? "warning" : "success"}>
-                  {telemetryPolicy.enabled ? "Telemetry on" : "Telemetry off"}
-                </Badge>
-              </div>
-              <div className="grid grid-cols-3 gap-2 text-xs">
-                <div className="rounded-md bg-muted p-2">
-                  <p className="text-muted-foreground">Reviewed</p>
-                  <p className="mt-1 text-sm font-semibold">
-                    {reviewQueueDiagnostics.reviewed}/{reviewQueueDiagnostics.threads}
-                  </p>
-                </div>
-                <div className="rounded-md bg-muted p-2">
-                  <p className="text-muted-foreground">Viewed</p>
-                  <p className="mt-1 text-sm font-semibold">
-                    {fileChangeDiagnostics.viewed}/{fileChangeDiagnostics.files}
-                  </p>
-                </div>
-                <div className="rounded-md bg-muted p-2">
-                  <p className="text-muted-foreground">Sessions</p>
-                  <p className="mt-1 text-sm font-semibold">{reviewSessionDiagnostics.sessions}</p>
-                </div>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <Button size="sm" variant="outline" onClick={handlePreviewDiagnostics}>
-                  Preview diagnostics
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => void handleCopyDiagnostics()} disabled={!diagnosticsPreview}>
-                  Copy export
-                </Button>
-                <Button className="col-span-2" size="sm" variant="outline" onClick={() => setResetHistoryConfirmOpen(true)}>
-                  Reset local review history
-                </Button>
-              </div>
-              {privacyMessage && <p className="mt-2 rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">{privacyMessage}</p>}
-              {diagnosticsCopyMessage && (
-                <p className="mt-2 rounded-md bg-emerald-500/10 p-2 text-xs text-emerald-700 dark:text-emerald-300" role="status">
-                  {diagnosticsCopyMessage}
-                </p>
-              )}
-              {diagnosticsPreview && (
-                <pre
-                  aria-label="Diagnostics preview"
-                  className="mt-2 max-h-44 overflow-auto rounded-md border border-border bg-background p-2 text-xs text-muted-foreground"
-                >
-                  {diagnosticsPreviewText}
-                </pre>
-              )}
-            </div>
-
             <div className="p-3" aria-label="Merge readiness context">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Merge readiness</h2>
@@ -2589,32 +3486,6 @@ export function App({
               </div>
 
               <div className="mt-3 space-y-2">
-                <p className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Checks</p>
-                {reviewOverview.checks.details.map((check) => {
-                  const checkBadge = getCheckBadge(check.status, check.conclusion);
-
-                  return (
-                    <div className="rounded-md border border-border p-2 text-sm" key={check.name}>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="min-w-0 truncate font-medium">{check.name}</span>
-                        <Badge variant={checkBadge.variant}>{checkBadge.label}</Badge>
-                      </div>
-                      <div className="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                        <span>{check.timingLabel}</span>
-                        {check.url ? (
-                          <a className="truncate text-sky-700 underline dark:text-sky-300" href={check.url} rel="noreferrer" target="_blank">
-                            Details
-                          </a>
-                        ) : (
-                          <span>No link</span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="mt-3 space-y-2">
                 <p className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Visible blockers</p>
                 {reviewOverview.readiness.blockers.map((blocker) => (
                   <div className="rounded-md bg-muted p-2 text-xs text-muted-foreground" key={blocker}>
@@ -2627,10 +3498,554 @@ export function App({
         )}
       </main>
 
+      <Dialog.Root open={pullRequestDialogOpen} onOpenChange={(open) => (open ? setPullRequestDialogOpen(true) : closePullRequestDialog())}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-8 z-50 flex max-h-[90vh] w-[min(1040px,calc(100vw-2rem))] -translate-x-1/2 flex-col rounded-lg border border-border bg-card shadow-xl">
+            <div className="border-b border-border p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <Dialog.Title className="text-base font-semibold">Open Pull Requests</Dialog.Title>
+                  <Dialog.Description className="mt-1 truncate text-sm text-muted-foreground">
+                    Switch Pull Requests, refresh GitHub data, or manage the saved GitHub repositories Narview watches.
+                  </Dialog.Description>
+                </div>
+                <Kbd>P</Kbd>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <div className="flex h-10 min-w-[260px] flex-1 items-center gap-2 rounded-md border border-input bg-background px-3">
+                  <Search className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                  <input
+                    autoFocus
+                    aria-label="Search pull requests"
+                    className="h-full flex-1 bg-transparent text-sm outline-none"
+                    onChange={(event) => setPullRequestDialogQuery(event.target.value)}
+                    placeholder="Search title, repo, number, author, branch"
+                    value={pullRequestDialogQuery}
+                  />
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => void refreshPullRequests(includeDrafts, { refreshSelectedPullRequestData: true })}
+                  disabled={workspaceBusy}
+                >
+                  <RefreshCw className={cn("h-3.5 w-3.5", workspaceBusy && "animate-spin")} aria-hidden="true" />
+                  Refresh
+                </Button>
+                <Badge variant={refreshBadge.variant}>{refreshBadge.label}</Badge>
+              </div>
+            </div>
+
+            <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px] overflow-hidden">
+              <div className="pane-scroll-y min-h-0 border-r border-border p-3">
+                {pullRequestDialogPullRequests.length === 0 ? (
+                  <p className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground" role="status">
+                    No open Pull Requests match this search.
+                  </p>
+                ) : (
+                  <div className="grid min-w-0 gap-2" aria-label="Open Pull Request results">
+                    {pullRequestDialogPullRequests.map((pullRequest, index) => {
+                      const pullRequestKey = getPullRequestKey(pullRequest);
+                      const selected = pullRequestKey === activePullRequestKey;
+                      const shortcut = index < 9 ? String(index + 1) : index === 9 ? "0" : null;
+
+                      return (
+                        <button
+                          aria-pressed={selected}
+                          className={cn(
+                            "min-w-0 overflow-hidden rounded-md border border-border p-3 text-left hover:bg-accent",
+                            selected && "border-primary bg-accent text-accent-foreground",
+                          )}
+                          key={pullRequestKey}
+                          onClick={() => void selectPullRequestFromDialog(pullRequest)}
+                          type="button"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-semibold">{pullRequest.title}</p>
+                              <p className="mt-1 truncate text-xs text-muted-foreground">
+                                {pullRequest.repository} #{pullRequest.number}
+                                {pullRequest.authorLogin ? ` · @${pullRequest.authorLogin}` : ""}
+                              </p>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1">
+                              {shortcut && <Kbd>{shortcut}</Kbd>}
+                              {pullRequest.isDraft && <Badge variant="warning">Draft</Badge>}
+                              {selected && <Badge variant="success">Current</Badge>}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="pane-scroll-y min-h-0 p-3" aria-label="Workspace">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Workspace</h2>
+                  <Badge variant={refreshBadge.variant}>{refreshBadge.label}</Badge>
+                </div>
+                <form className="flex gap-2" onSubmit={handleSaveRepository}>
+                  <input
+                    aria-label="Repository slug"
+                    className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onChange={(event) => setRepositoryInput(event.target.value)}
+                    placeholder="owner/repo"
+                    value={repositoryInput}
+                  />
+                  <Button size="sm" type="submit" disabled={workspaceBusy || !repositoryInput.trim()}>
+                    <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                    Save
+                  </Button>
+                </form>
+                <form className="mt-2 flex gap-2" onSubmit={handleQuickOpenPullRequest}>
+                  <input
+                    aria-label="Pull Request URL"
+                    className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onChange={(event) => setQuickOpenInput(event.target.value)}
+                    placeholder="github.com/owner/repo/pull/123"
+                    value={quickOpenInput}
+                  />
+                  <Button size="sm" type="submit" variant="outline" disabled={!quickOpenInput.trim()}>
+                    Open
+                  </Button>
+                </form>
+                <label className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
+                  <input
+                    aria-label="Include draft Pull Requests"
+                    checked={includeDrafts}
+                    onChange={(event) => void handleDraftFilterChange(event.currentTarget.checked)}
+                    type="checkbox"
+                  />
+                  Include draft Pull Requests
+                </label>
+
+                <div className="mt-4 space-y-2">
+                  <p className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Saved repositories</p>
+                  {repositories.length === 0 ? (
+                    <p className="rounded-md border border-dashed border-border p-2 text-sm text-muted-foreground">No saved repositories.</p>
+                  ) : (
+                    repositories.map((repository) => (
+                      <div className="flex items-center justify-between gap-2 rounded-md border border-border p-2 text-sm" key={repository.slug}>
+                        <span className="min-w-0 truncate">{repository.slug}</span>
+                        <Button
+                          aria-label={`Remove ${repository.slug}`}
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => void handleRemoveRepository(repository)}
+                          disabled={workspaceBusy}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                        </Button>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="mt-4 space-y-2 text-xs">
+                  {refreshStatus.message && <p className="rounded-md bg-muted p-2 text-muted-foreground">{refreshStatus.message}</p>}
+                  {sessionNotice && <p className="rounded-md bg-emerald-500/10 p-2 text-emerald-700 dark:text-emerald-300">{sessionNotice}</p>}
+                  {workspaceError && <p className="rounded-md bg-destructive/10 p-2 text-destructive" role="status">{workspaceError}</p>}
+                  {quickOpenError && <p className="rounded-md bg-destructive/10 p-2 text-destructive" role="status">{quickOpenError}</p>}
+                  {pullRequestDataStatus.key === activePullRequestKey && pullRequestDataStatus.message && (
+                    <p className="rounded-md bg-muted p-2 text-muted-foreground">{pullRequestDataStatus.message}</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={hotspotsDialogOpen} onOpenChange={(open) => (open ? setHotspotsDialogOpen(true) : closeHotspotsDialog())}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-12 z-50 flex max-h-[86vh] w-[min(760px,calc(100vw-2rem))] -translate-x-1/2 flex-col rounded-lg border border-border bg-card shadow-xl">
+            <div className="border-b border-border p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <Dialog.Title className="text-base font-semibold">Hotspots</Dialog.Title>
+                  <Dialog.Description className="mt-1 truncate text-sm text-muted-foreground">
+                    High-signal changed files for {selectedPullRequestDisplay}. Open one to inspect it in the diff viewer.
+                  </Dialog.Description>
+                </div>
+                <Kbd>S</Kbd>
+              </div>
+            </div>
+            <div className="pane-scroll-y min-h-0 p-3">
+              {reviewOverview.hotspots.length === 0 ? (
+                <p className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground" role="status">
+                  No hotspots are available for this Pull Request.
+                </p>
+              ) : (
+                <div className="grid gap-2" aria-label="Hotspot results">
+                  {reviewOverview.hotspots.map((hotspot) => (
+                    <button
+                      className="rounded-md border border-border p-3 text-left hover:bg-accent"
+                      key={hotspot.path}
+                      onClick={() => selectHotspotFile(hotspot.path)}
+                      type="button"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate font-mono text-sm font-semibold">{hotspot.path}</p>
+                          <p className="mt-1 truncate text-xs text-muted-foreground">{hotspot.reasons.join(", ")}</p>
+                        </div>
+                        <Badge variant={hotspot.score > 80 ? "danger" : "warning"}>{hotspot.score}</Badge>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={threadDialogOpen} onOpenChange={(open) => (open ? setThreadDialogOpen(true) : closeThreadDialog())}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-10 z-50 flex max-h-[86vh] w-[min(960px,calc(100vw-2rem))] -translate-x-1/2 flex-col rounded-lg border border-border bg-card shadow-xl">
+            <div className="border-b border-border p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <Dialog.Title className="text-base font-semibold">Review Threads</Dialog.Title>
+                  <Dialog.Description className="mt-1 truncate text-sm text-muted-foreground">
+                    {selectedPullRequestDisplay} · {threadDialogSourceViews.length} matching thread
+                    {threadDialogSourceViews.length === 1 ? "" : "s"}
+                    {threadDialogSourceViews.length !== reviewThreadViews.length ? ` of ${reviewThreadViews.length}` : ""}
+                  </Dialog.Description>
+                </div>
+                <Kbd>T</Kbd>
+              </div>
+              <div className="mt-4 flex h-10 items-center gap-2 rounded-md border border-input bg-background px-3">
+                <Search className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                <input
+                  autoFocus
+                  aria-label="Search review threads"
+                  className="h-full flex-1 bg-transparent text-sm outline-none"
+                  onChange={(event) => setThreadDialogQuery(event.target.value)}
+                  placeholder="Search title, body, file, author, state"
+                  value={threadDialogQuery}
+                />
+                <Badge variant="muted">{threadDialogViews.length} shown</Badge>
+              </div>
+            </div>
+
+            <div className="pane-scroll-y min-h-0 p-3">
+              {threadDialogViews.length === 0 ? (
+                <p className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground" role="status">
+                  No Review Threads match this search.
+                </p>
+              ) : (
+                <div className="grid gap-2" aria-label="Review thread search results">
+                  {threadDialogViews.map((view) => (
+                    <button
+                      aria-pressed={selectedReviewThread?.id === view.id}
+                      className={cn(
+                        "rounded-md border border-border p-3 text-left hover:bg-accent",
+                        selectedReviewThread?.id === view.id && "border-primary bg-accent text-accent-foreground",
+                        view.outdated && "border-amber-500/50 bg-amber-500/10",
+                      )}
+                      key={view.id}
+                      onClick={() => selectThreadFromDialog(view.id)}
+                      type="button"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold">{getThreadTitle(view.thread.body)}</p>
+                          <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                            {view.thread.filePath}
+                            {view.thread.line !== null ? `:${view.thread.line}` : ""}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                          <Badge variant={view.origin === "coderabbit" ? "warning" : "info"}>
+                            {view.origin === "coderabbit" ? "CodeRabbit" : "Human"}
+                          </Badge>
+                          <Badge variant={view.thread.state === "outdated" ? "warning" : "muted"}>
+                            {getThreadStateLabel(view.thread.state)}
+                          </Badge>
+                          {view.reviewed && <Badge variant="success">Reviewed</Badge>}
+                        </div>
+                      </div>
+                      <p className="mt-2 line-clamp-2 text-sm leading-6 text-muted-foreground">
+                        {stripMarkdownPreview(view.thread.body, 220)}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-10 z-50 flex max-h-[86vh] w-[min(920px,calc(100vw-2rem))] -translate-x-1/2 flex-col rounded-lg border border-border bg-card shadow-xl">
+            <div className="border-b border-border p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <Dialog.Title className="text-base font-semibold">Settings</Dialog.Title>
+                  <Dialog.Description className="mt-1 text-sm text-muted-foreground">
+                    GitHub account, app updates, cached Pull Request data, and local-only diagnostics.
+                  </Dialog.Description>
+                </div>
+                <Settings className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+              </div>
+            </div>
+
+            <div className="pane-scroll-y min-h-0 p-4">
+              <div className="grid gap-3 md:grid-cols-2">
+                <section className="rounded-md border border-border bg-background/70 p-3" aria-label="GitHub session details">
+                  <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
+                    <Github className="h-4 w-4" aria-hidden="true" />
+                    GitHub Session
+                  </div>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">Status</span>
+                      <Badge variant={authBadge.variant}>{authBadge.label}</Badge>
+                    </div>
+                    {authSession.accountLogin && (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground">Account</span>
+                        <span className="min-w-0 truncate">@{authSession.accountLogin}</span>
+                      </div>
+                    )}
+                    {authSession.tokenHint && (
+                      <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-300">
+                        <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                        OS secure storage
+                      </div>
+                    )}
+                    {authSession.storage.message && (
+                      <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">{authSession.storage.message}</p>
+                    )}
+                    {oauthFlow && (
+                      <div className="space-y-2 rounded-md border border-border p-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-muted-foreground">Device code</span>
+                          <Kbd>{oauthFlow.userCode}</Kbd>
+                        </div>
+                        <a
+                          className="block truncate text-xs text-sky-700 underline dark:text-sky-300"
+                          href={oauthFlow.verificationUriComplete ?? oauthFlow.verificationUri}
+                        >
+                          {oauthFlow.verificationUri.replace("https://", "")}
+                        </a>
+                        <Button className="w-full justify-between" variant="secondary" onClick={handlePollSignIn} disabled={authBusy}>
+                          Check sign-in
+                          <Kbd>{oauthFlow.intervalSeconds}s</Kbd>
+                        </Button>
+                      </div>
+                    )}
+                    {authError && (
+                      <p className="rounded-md bg-destructive/10 p-2 text-xs text-destructive" role="status">
+                        {authError}
+                      </p>
+                    )}
+                  </div>
+                </section>
+
+                <section className="rounded-md border border-border bg-background/70 p-3" aria-label="App updates">
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-sm font-semibold">
+                      <RefreshCw className={cn("h-4 w-4", (updater.isChecking || updater.isUpdating) && "animate-spin")} aria-hidden="true" />
+                      Updates
+                    </div>
+                    <Badge variant={updaterBadge.variant}>{updaterBadge.label}</Badge>
+                  </div>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">Version</span>
+                      <span>v{updater.currentVersion}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">Last checked</span>
+                      <span>{getLastCheckedLabel(updater.lastCheckedAt)}</span>
+                    </div>
+                    <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">
+                      {updater.statusMessage}
+                    </p>
+                    {updater.progress?.total && (
+                      <div>
+                        <div className="h-2 overflow-hidden rounded-full border border-border bg-muted">
+                          <div
+                            className="h-full bg-primary transition-all"
+                            style={{
+                              width: `${Math.round((updater.progress.downloaded / updater.progress.total) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {Math.round(updater.progress.downloaded / 1024)} KB / {Math.round(updater.progress.total / 1024)} KB
+                        </p>
+                      </div>
+                    )}
+                    {updater.error && <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">{updater.error}</p>}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="w-full"
+                      onClick={() => void updater.checkForUpdates()}
+                      disabled={updater.isChecking || updater.isUpdating}
+                    >
+                      {updater.isChecking ? "Checking..." : updater.isUpdating ? "Updating..." : "Check updates"}
+                    </Button>
+                  </div>
+                </section>
+
+                <section className="rounded-md border border-border bg-background/70 p-3" aria-label="Pull Request cache">
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-sm font-semibold">
+                      <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                      Pull Request Cache
+                    </div>
+                    <Badge variant={selectedPullRequestPinned ? "success" : "muted"}>{selectedPullRequestPinned ? "Pinned" : "Unpinned"}</Badge>
+                  </div>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">Cached entries</span>
+                      <span>{cacheSummary.entries}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">Pinned entries</span>
+                      <span>{cacheSummary.pinned}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">Next refresh</span>
+                      <span className="truncate">{buildIncrementalFetchPlan("manual").join(", ")}</span>
+                    </div>
+                    {rateLimitMessage && <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">{rateLimitMessage}</p>}
+                    {cacheMessage && <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">{cacheMessage}</p>}
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button variant="outline" size="sm" onClick={handleTogglePin} disabled={!activePullRequestKey || !selectedCacheEntry}>
+                        {selectedPullRequestPinned ? "Unpin" : "Pin"}
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={handleClearCache}>
+                        Clear GitHub cache
+                      </Button>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="rounded-md border border-border bg-background/70 p-3" aria-label="Privacy and diagnostics">
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-sm font-semibold">
+                      <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                      Privacy & Diagnostics
+                    </div>
+                    <Badge variant={telemetryPolicy.enabled ? "warning" : "success"}>
+                      {telemetryPolicy.enabled ? "Telemetry on" : "Telemetry off"}
+                    </Badge>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="rounded-md bg-muted p-2">
+                      <p className="text-muted-foreground">Reviewed threads</p>
+                      <p className="mt-1 text-sm font-semibold">
+                        {reviewQueueDiagnostics.reviewed}/{reviewQueueDiagnostics.threads}
+                      </p>
+                    </div>
+                    <div className="rounded-md bg-muted p-2">
+                      <p className="text-muted-foreground">Viewed files</p>
+                      <p className="mt-1 text-sm font-semibold">
+                        {fileChangeDiagnostics.viewed}/{fileChangeDiagnostics.files}
+                      </p>
+                    </div>
+                    <div className="rounded-md bg-muted p-2">
+                      <p className="text-muted-foreground">Saved sessions</p>
+                      <p className="mt-1 text-sm font-semibold">{reviewSessionDiagnostics.sessions}</p>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <Button size="sm" variant="outline" onClick={handlePreviewDiagnostics}>
+                      Preview diagnostics
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => void handleCopyDiagnostics()} disabled={!diagnosticsPreview}>
+                      Copy export
+                    </Button>
+                    <Button className="col-span-2" size="sm" variant="outline" onClick={() => setResetHistoryConfirmOpen(true)}>
+                      Reset local review history
+                    </Button>
+                  </div>
+                  {privacyMessage && (
+                    <p className="mt-2 rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">
+                      {privacyMessage}
+                    </p>
+                  )}
+                  {diagnosticsCopyMessage && (
+                    <p className="mt-2 rounded-md bg-emerald-500/10 p-2 text-xs text-emerald-700 dark:text-emerald-300" role="status">
+                      {diagnosticsCopyMessage}
+                    </p>
+                  )}
+                  {diagnosticsPreview && (
+                    <pre
+                      aria-label="Diagnostics preview"
+                      className="pane-scroll mt-2 max-h-44 rounded-md border border-border bg-background p-2 text-xs text-muted-foreground"
+                    >
+                      {diagnosticsPreviewText}
+                    </pre>
+                  )}
+                </section>
+              </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      {oauthFlow && (
+        <Dialog.Root open>
+          <Dialog.Portal>
+            <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+            <Dialog.Content className="fixed left-1/2 top-16 z-50 w-[min(520px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-4 shadow-xl">
+              <Dialog.Title className="text-base font-semibold">Enter This Code In GitHub</Dialog.Title>
+              <Dialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
+                Copy this code, open GitHub, and paste it into the device authorization page. Narview will check the sign-in after you finish in the browser.
+              </Dialog.Description>
+
+              <div
+                aria-label="GitHub device code"
+                className="mt-4 rounded-md border border-border bg-background px-4 py-5 text-center font-mono text-4xl font-semibold"
+              >
+                {oauthFlow.userCode}
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <Button variant="outline" onClick={() => void handleCopyDeviceCode()}>
+                  <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                  Copy code
+                </Button>
+                <Button onClick={() => void handleOpenGithub()}>
+                  <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                  Open GitHub
+                </Button>
+              </div>
+
+              {oauthCopyMessage && <p className="mt-3 rounded-md bg-muted p-2 text-xs text-muted-foreground">{oauthCopyMessage}</p>}
+              {authError && <p className="mt-3 rounded-md bg-destructive/10 p-2 text-xs text-destructive" role="status">{authError}</p>}
+
+              <div className="mt-4 flex justify-between gap-2">
+                <Button variant="ghost" onClick={handleCancelSignIn}>
+                  Cancel sign-in
+                </Button>
+                <Button onClick={handlePollSignIn} disabled={authBusy}>
+                  {authBusy ? "Checking..." : "I entered it"}
+                  <Kbd>{oauthFlow.intervalSeconds}s</Kbd>
+                </Button>
+              </div>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
+      )}
+
       <Dialog.Root open={bulkConfirmAction !== null} onOpenChange={(open) => !open && setBulkConfirmAction(null)}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-background/70 backdrop-blur-sm" />
-          <Dialog.Content className="fixed left-1/2 top-24 w-[min(420px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-4 shadow-xl">
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-24 z-50 w-[min(420px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-4 shadow-xl">
             <Dialog.Title className="text-sm font-semibold">
               Confirm bulk {bulkConfirmAction === "unresolve" ? "unresolve" : "resolve"}
             </Dialog.Title>
@@ -2652,8 +4067,8 @@ export function App({
 
       <Dialog.Root open={resetHistoryConfirmOpen} onOpenChange={setResetHistoryConfirmOpen}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-background/70 backdrop-blur-sm" />
-          <Dialog.Content className="fixed left-1/2 top-24 w-[min(440px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-4 shadow-xl">
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-24 z-50 w-[min(440px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-4 shadow-xl">
             <Dialog.Title className="text-sm font-semibold">Reset local review history</Dialog.Title>
             <Dialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
               This clears local Reviewed, Viewed, and Review Session memory. Fetched GitHub cache can be cleared separately.
@@ -2670,8 +4085,8 @@ export function App({
 
       <Dialog.Root open={commandOpen} onOpenChange={(open) => (open ? setCommandOpen(true) : closeCommandPalette())}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-background/70 backdrop-blur-sm" />
-          <Dialog.Content className="fixed left-1/2 top-20 w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-2 shadow-xl">
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-20 z-50 w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-border bg-card p-2 shadow-xl">
             <Dialog.Title className="sr-only">Command palette</Dialog.Title>
             <Dialog.Description className="sr-only">
               Search and run Narview review actions from the keyboard.
@@ -2688,7 +4103,7 @@ export function App({
               />
               <Kbd>Esc</Kbd>
             </div>
-            <div className="max-h-[70vh] overflow-auto py-2">
+            <div className="pane-scroll-y max-h-[70vh] py-2">
               {groupedCommandItems.length === 0 ? (
                 <p className="px-2 py-6 text-center text-sm text-muted-foreground" role="status">
                   No commands match.

@@ -80,7 +80,19 @@ export function writeDiffModePreference(mode: DiffMode) {
 }
 
 export function getDefaultLoadedDiffHunkIds(file: CachedFileSummary) {
-  return getFileKind(file) === "text" ? [getDiffHunkDescriptors(file)[0]?.id].filter((id): id is string => Boolean(id)) : [];
+  if (getFileKind(file) !== "text") {
+    return [];
+  }
+
+  if (file.patch) {
+    return parsePatch(file.patch, file.path).map((hunk) => hunk.id);
+  }
+
+  if (file.patch === null) {
+    return [];
+  }
+
+  return getDiffHunkDescriptors(file).map((descriptor) => descriptor.id);
 }
 
 export function buildLazyDiffState(file: CachedFileSummary, options: LazyDiffOptions): LazyDiffState {
@@ -100,7 +112,46 @@ export function buildLazyDiffState(file: CachedFileSummary, options: LazyDiffOpt
     };
   }
 
-  const loaded = new Set(options.loadedHunkIds ?? getDefaultLoadedDiffHunkIds(file));
+  const patchHunks = file.patch ? parsePatch(file.patch, file.path) : [];
+  if (patchHunks.length > 0) {
+    const loaded = new Set([...getDefaultLoadedDiffHunkIds(file), ...(options.loadedHunkIds ?? [])]);
+    const hunks = patchHunks.map((hunk) => {
+      const isLoaded = loaded.has(hunk.id);
+
+      return {
+        id: hunk.id,
+        header: hunk.header,
+        loaded: isLoaded,
+        expandable: false,
+        expanded: false,
+        lines: isLoaded ? highlightLoadedDiffLines(hunk.lines, file.path) : [],
+      };
+    });
+
+    return {
+      filePath: file.path,
+      mode: options.mode,
+      kind,
+      language,
+      githubUrl,
+      hunks,
+      fullFileLines: options.fullFileLoaded ? highlightLoadedDiffLines(patchHunks.flatMap((hunk) => hunk.lines), file.path) : null,
+    };
+  }
+
+  if (file.patch === null) {
+    return {
+      filePath: file.path,
+      mode: options.mode,
+      kind,
+      language,
+      githubUrl,
+      hunks: [],
+      fullFileLines: null,
+    };
+  }
+
+  const loaded = new Set([...getDefaultLoadedDiffHunkIds(file), ...(options.loadedHunkIds ?? [])]);
   const expanded = new Set(options.expandedHunkIds ?? []);
   const descriptors = getDiffHunkDescriptors(file);
   const hunks = descriptors.map((descriptor, index) => {
@@ -114,11 +165,7 @@ export function buildLazyDiffState(file: CachedFileSummary, options: LazyDiffOpt
       loaded: isLoaded,
       expandable: isLoaded,
       expanded: isExpanded,
-      lines: highlightDiffLines(rawLines, file.path, {
-        visibleStart: 0,
-        visibleEnd: Math.min(rawLines.length - 1, 16),
-        overscan: 4,
-      }),
+      lines: highlightLoadedDiffLines(rawLines, file.path),
     };
   });
 
@@ -142,6 +189,16 @@ export function highlightDiffLines(lines: DiffLine[], filePath: string, window: 
   return lines.map((line, index) => ({
     ...line,
     highlighted: index >= start && index <= end,
+    language,
+  }));
+}
+
+function highlightLoadedDiffLines(lines: DiffLine[], filePath: string) {
+  const language = getLanguageForPath(filePath);
+
+  return lines.map((line) => ({
+    ...line,
+    highlighted: true,
     language,
   }));
 }
@@ -201,6 +258,55 @@ function getDiffHunkDescriptors(file: CachedFileSummary): HunkDescriptor[] {
       startLine: secondStart,
     },
   ];
+}
+
+function parsePatch(patch: string, filePath: string): DiffHunkView[] {
+  const hunks: DiffHunkView[] = [];
+  let current: { id: string; header: string; lines: DiffLine[]; oldLine: number; newLine: number } | null = null;
+
+  for (const rawLine of patch.split("\n")) {
+    if (rawLine.startsWith("@@")) {
+      const match = rawLine.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      const hunkIndex = hunks.length + 1;
+      current = {
+        id: `${filePath}:hunk-${hunkIndex}`,
+        header: rawLine,
+        lines: [],
+        oldLine: match ? Number(match[1]) : 0,
+        newLine: match ? Number(match[2]) : 0,
+      };
+      hunks.push({
+        id: current.id,
+        header: current.header,
+        loaded: false,
+        expandable: false,
+        expanded: false,
+        lines: current.lines,
+      });
+      continue;
+    }
+
+    if (!current || rawLine.startsWith("\\ No newline")) {
+      continue;
+    }
+
+    const prefix = rawLine[0];
+    const content = rawLine.slice(1);
+
+    if (prefix === "+") {
+      current.lines.push(createLine(null, current.newLine, "addition", content));
+      current.newLine += 1;
+    } else if (prefix === "-") {
+      current.lines.push(createLine(current.oldLine, null, "deletion", content));
+      current.oldLine += 1;
+    } else {
+      current.lines.push(createLine(current.oldLine, current.newLine, "context", rawLine.startsWith(" ") ? content : rawLine));
+      current.oldLine += 1;
+      current.newLine += 1;
+    }
+  }
+
+  return hunks;
 }
 
 function buildHunkLines(file: CachedFileSummary, descriptor: HunkDescriptor, index: number, expanded: boolean): DiffLine[] {

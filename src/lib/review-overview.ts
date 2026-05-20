@@ -135,17 +135,40 @@ export function scoreHotspots(
 }
 
 export function summarizeChecks(checks: CachedCheckRun[]): ChecksSummary {
-  const failing = checks.filter((check) => check.status === "completed" && check.conclusion && check.conclusion !== "success");
-  const pending = checks.filter((check) => check.status !== "completed");
+  // Deduplicate checks by name, keeping only the latest run based on startedAt timestamp
+  const uniqueChecksMap = new Map<string, CachedCheckRun>();
+  for (const check of checks) {
+    const existing = uniqueChecksMap.get(check.name);
+    if (!existing) {
+      uniqueChecksMap.set(check.name, check);
+      continue;
+    }
+
+    const existingTime = existing.startedAt ? Date.parse(existing.startedAt) : 0;
+    const checkTime = check.startedAt ? Date.parse(check.startedAt) : 0;
+    if (checkTime > existingTime) {
+      uniqueChecksMap.set(check.name, check);
+    }
+  }
+  const deduplicatedChecks = Array.from(uniqueChecksMap.values());
+
+  const failing = deduplicatedChecks.filter(
+    (check) =>
+      check.status === "completed" &&
+      check.conclusion &&
+      check.conclusion !== "success" &&
+      check.conclusion !== "skipped",
+  );
+  const pending = deduplicatedChecks.filter((check) => check.status !== "completed");
 
   return {
-    total: checks.length,
-    passing: checks.filter((check) => check.status === "completed" && check.conclusion === "success").length,
+    total: deduplicatedChecks.length,
+    passing: deduplicatedChecks.filter((check) => check.status === "completed" && check.conclusion === "success").length,
     failing: failing.length,
     pending: pending.length,
     failingNames: failing.map((check) => check.name),
-    detailUrls: checks.map((check) => check.url).filter((url): url is string => Boolean(url)),
-    details: checks.map((check) => {
+    detailUrls: deduplicatedChecks.map((check) => check.url).filter((url): url is string => Boolean(url)),
+    details: deduplicatedChecks.map((check) => {
       const durationSeconds = getDurationSeconds(check.startedAt, check.completedAt);
 
       return {

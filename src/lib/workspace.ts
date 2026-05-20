@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { CachedCheckRun, CachedPullRequestData, CachedRateLimit } from "./pr-cache";
 
 export interface WorkspaceRepository {
   owner: string;
@@ -39,11 +40,19 @@ export interface PullRequestRefreshResponse {
   status: BackendRefreshStatus;
 }
 
+export interface PullRequestChecksResponse {
+  checks: CachedCheckRun[];
+  rateLimit: CachedRateLimit;
+  fetchedAtEpochMs: number;
+}
+
 export interface WorkspaceClient {
   listRepositories: () => Promise<WorkspaceRepositoriesResponse>;
   saveRepository: (slug: string) => Promise<WorkspaceRepositoriesResponse>;
   removeRepository: (owner: string, name: string) => Promise<WorkspaceRepositoriesResponse>;
   refreshPullRequests: (includeDrafts: boolean) => Promise<PullRequestRefreshResponse>;
+  fetchPullRequestData: (pullRequest: PullRequestSummary) => Promise<CachedPullRequestData>;
+  fetchPullRequestChecks: (pullRequest: PullRequestSummary) => Promise<PullRequestChecksResponse>;
 }
 
 export const idleRefreshStatus: RefreshStatus = {
@@ -143,6 +152,14 @@ const localWorkspaceClient: WorkspaceClient = {
       },
     };
   },
+
+  async fetchPullRequestData() {
+    throw new Error("Desktop runtime unavailable for Pull Request review data.");
+  },
+
+  async fetchPullRequestChecks() {
+    throw new Error("Desktop runtime unavailable for GitHub checks.");
+  },
 };
 
 export const tauriWorkspaceClient: WorkspaceClient = {
@@ -183,6 +200,28 @@ export const tauriWorkspaceClient: WorkspaceClient = {
       if (messageFromError(error).includes("command")) {
         return localWorkspaceClient.refreshPullRequests(includeDrafts);
       }
+      throw new Error(messageFromError(error));
+    }
+  },
+
+  async fetchPullRequestData(pullRequest) {
+    try {
+      return await invoke<CachedPullRequestData>("fetch_pull_request_data", {
+        repository: pullRequest.repository,
+        number: pullRequest.number,
+      });
+    } catch (error) {
+      throw new Error(messageFromError(error));
+    }
+  },
+
+  async fetchPullRequestChecks(pullRequest) {
+    try {
+      return await invoke<PullRequestChecksResponse>("fetch_pull_request_checks", {
+        repository: pullRequest.repository,
+        number: pullRequest.number,
+      });
+    } catch (error) {
       throw new Error(messageFromError(error));
     }
   },

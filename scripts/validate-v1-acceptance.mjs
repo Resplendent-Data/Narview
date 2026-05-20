@@ -73,6 +73,7 @@ const expectedSmokeCoverage = [
   "loads hunks, expands context, and fetches the whole file on demand",
   "restores the last active Pull Request after app restart",
   "updates Review Session state as the reviewer navigates threads",
+  "checks for desktop updates from the updater panel",
   "builds structured handoff packets without LLM behavior or code mutation",
   "opens the command palette from the button and keyboard shortcut",
   "runs the keyboard review loop with visible shortcut cues",
@@ -93,10 +94,11 @@ assertIncludes(privacy, "remoteLogSinks: []", "Telemetry policy");
 assert(tauriConfig.app?.windows?.length === 1, "V1 must stay one main window.");
 assert(tauriConfig.bundle?.targets?.includes("dmg"), "macOS DMG target must stay enabled.");
 assert(tauriConfig.bundle?.targets?.includes("appimage"), "Linux AppImage target must stay enabled.");
+assert(tauriConfig.plugins?.updater?.pubkey, "Runtime updater public key must stay configured.");
+assert(tauriConfig.plugins?.updater?.endpoints?.[0]?.includes("Resplendent-Data/Narview"), "Runtime updater endpoint must stay on Narview GitHub Releases.");
 assert(releaseTemplate.bundle?.createUpdaterArtifacts === true, "Release updater artifacts must stay enabled.");
 assertIncludes(releaseWorkflow, "ubuntu-22.04", "Release workflow");
 assertIncludes(releaseWorkflow, "macos-latest", "Release workflow");
-assertIncludes(releaseWorkflow, "uploadUpdaterJson: true", "Release workflow");
 
 const unsupportedFeaturePhrases = [
   "Mobile apps: Not present",

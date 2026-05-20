@@ -134,7 +134,15 @@ pub async fn unresolve_review_thread(
 fn github_token(auth_state: &AuthState) -> Result<String, ThreadActionError> {
     auth_state
         .github_token()
-        .map_err(|error| ThreadActionError::new("github-thread-session-error", format!("{error:?}")))?
+        .map_err(|error| {
+            ThreadActionError::new(
+                "github-thread-session-error",
+                format!(
+                    "Narview could not read your GitHub token from OS secure storage. Sign out and sign in again if this keeps happening. {}",
+                    error.message()
+                ),
+            )
+        })?
         .ok_or_else(|| ThreadActionError::new("github-thread-unauthorized", "Sign in to write to GitHub Review Threads."))
 }
 
@@ -204,8 +212,10 @@ async fn send_graphql(
         ));
     }
 
-    payload
-        .get("data")
-        .cloned()
-        .ok_or_else(|| ThreadActionError::new("github-thread-response-error", "GitHub returned no Review Thread data."))
+    payload.get("data").cloned().ok_or_else(|| {
+        ThreadActionError::new(
+            "github-thread-response-error",
+            "GitHub returned no Review Thread data.",
+        )
+    })
 }

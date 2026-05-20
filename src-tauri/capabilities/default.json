@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capability for the main Narview window.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "opener:default", "updater:default", "process:default"]
 }

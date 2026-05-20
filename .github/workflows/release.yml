@@ -29,32 +29,19 @@ jobs:
         include:
           - label: macOS Apple Silicon
             platform: macos-latest
-            args: "--target aarch64-apple-darwin --config src-tauri/tauri.release.generated.conf.json"
+            args: "--target aarch64-apple-darwin"
             artifactPlatform: macos
           - label: macOS Intel
             platform: macos-latest
-            args: "--target x86_64-apple-darwin --config src-tauri/tauri.release.generated.conf.json"
+            args: "--target x86_64-apple-darwin"
             artifactPlatform: macos
           - label: Linux x64 AppImage
             platform: ubuntu-22.04
-            args: "--config src-tauri/tauri.release.generated.conf.json"
+            args: ""
             artifactPlatform: linux
 
     env:
       TAG_NAME: ${{ inputs.tag || github.ref_name }}
-      NARVIEW_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
-      NARVIEW_UPDATER_PUBLIC_KEY: ${{ vars.NARVIEW_UPDATER_PUBLIC_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
     steps:
       - name: Checkout release tag
@@ -75,13 +62,6 @@ jobs:
 
           APP_VERSION="${TAG_NAME#v}"
           node -e "const fs=require('node:fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const tauri=JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json','utf8')); if (pkg.version !== '$APP_VERSION' || tauri.version !== '$APP_VERSION') { throw new Error('Tag $TAG_NAME must match package.json and tauri.conf.json version ' + pkg.version); }"
-
-          for name in NARVIEW_UPDATER_PUBLIC_KEY TAURI_SIGNING_PRIVATE_KEY; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "$name must be configured before publishing signed updater artifacts."
-              exit 1
-            fi
-          done
 
       - name: Install Linux Tauri dependencies
         if: matrix.artifactPlatform == 'linux'
@@ -117,67 +97,15 @@ jobs:
       - name: Build web assets
         run: npm run build
 
-      - name: Prepare Tauri release config
-        run: node scripts/prepare-tauri-release-config.mjs --output src-tauri/tauri.release.generated.conf.json
-
-      - name: Import Apple Developer certificate
-        if: matrix.artifactPlatform == 'macos' && env.APPLE_CERTIFICATE != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${APPLE_CERTIFICATE_PASSWORD:?APPLE_CERTIFICATE_PASSWORD is required when APPLE_CERTIFICATE is set}"
-          : "${KEYCHAIN_PASSWORD:?KEYCHAIN_PASSWORD is required when APPLE_CERTIFICATE is set}"
-
-          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security set-keychain-settings -t 3600 -u build.keychain
-          security import "$RUNNER_TEMP/certificate.p12" -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
-          CERT_ID="$(security find-identity -v -p codesigning build.keychain | awk -F'"' '/Developer ID Application|Apple Distribution/ { print $2; exit }')"
-
-          if [[ -z "$CERT_ID" ]]; then
-            echo "No Developer ID Application or Apple Distribution signing identity found."
-            exit 1
-          fi
-
-          echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
-
-      - name: Prepare Apple notarization key
-        if: matrix.artifactPlatform == 'macos' && env.APPLE_API_KEY_BASE64 != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${APPLE_API_KEY:?APPLE_API_KEY is required when APPLE_API_KEY_BASE64 is set}"
-          : "${APPLE_API_ISSUER:?APPLE_API_ISSUER is required when APPLE_API_KEY_BASE64 is set}"
-
-          KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
-          echo "$APPLE_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
-          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
-
-      - name: Build, sign, and publish Tauri artifacts
+      - name: Build and publish Tauri artifacts
         id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_ISSUER: ${{ env.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ env.APPLE_API_KEY }}
-          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
-          APPLE_ID: ${{ env.APPLE_ID }}
-          APPLE_PASSWORD: ${{ env.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ env.APPLE_TEAM_ID }}
         with:
           tagName: ${{ env.TAG_NAME }}
           releaseName: Narview ${{ env.TAG_NAME }}
-          releaseBody: Installers, signed updater artifacts, and latest.json metadata for Narview ${{ env.TAG_NAME }}.
+          releaseBody: Installers for Narview ${{ env.TAG_NAME }}. Updater signing metadata can be enabled when release signing is configured.
           releaseDraft: false
           prerelease: ${{ contains(env.TAG_NAME, '-') }}
-          uploadUpdaterJson: true
           args: ${{ matrix.args }}
-
-      - name: Verify release artifact paths
-        run: node scripts/verify-release-artifacts.mjs --platform "${{ matrix.artifactPlatform }}" --artifact-paths '${{ steps.tauri.outputs.artifactPaths }}'

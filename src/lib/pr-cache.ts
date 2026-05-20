@@ -19,6 +19,7 @@ export interface CachedFileSummary {
   additions: number;
   deletions: number;
   status: "added" | "modified" | "removed" | "renamed" | "binary";
+  patch?: string | null;
 }
 
 export interface CachedCheckRun {
@@ -234,6 +235,21 @@ export function upsertCachedPullRequest(
     fetchedAtEpochMs: patch.fetchedAtEpochMs ?? now,
     lastAccessedEpochMs: now,
     pinned: patch.pinned ?? existing.pinned,
+  };
+
+  writeCacheStore(evictCache(store, bounds));
+}
+
+export function writeCachedPullRequestData(data: CachedPullRequestData, bounds = defaultCacheBounds) {
+  const store = readCacheStore();
+  const key = getPullRequestKey(data.pullRequest);
+  const existing = store.entries[key];
+  const now = Date.now();
+
+  store.entries[key] = {
+    ...data,
+    pinned: existing?.pinned ?? data.pinned,
+    lastAccessedEpochMs: now,
   };
 
   writeCacheStore(evictCache(store, bounds));

@@ -9,7 +9,16 @@ fn app_ready() -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init());
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
         .manage(auth::AuthState::new())
         .manage(workspace::WorkspaceState::new())
         .invoke_handler(tauri::generate_handler![
@@ -22,6 +31,8 @@ pub fn run() {
             workspace::save_workspace_repository,
             workspace::remove_workspace_repository,
             workspace::refresh_pull_requests,
+            workspace::fetch_pull_request_data,
+            workspace::fetch_pull_request_checks,
             thread_actions::reply_review_thread,
             thread_actions::resolve_review_thread,
             thread_actions::unresolve_review_thread,

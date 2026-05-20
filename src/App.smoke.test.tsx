@@ -1,6 +1,8 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
+import { lastUpdateCheckStorageKey, type AppUpdateClient } from "./lib/app-updater";
 import type { AuthClient, AuthSession } from "./lib/auth";
 import {
   buildLazyDiffState,
@@ -46,6 +48,7 @@ import {
   setCachedPullRequestPinned,
   type CachedPullRequestData,
   upsertCachedPullRequest,
+  writeCachedPullRequestData,
 } from "./lib/pr-cache";
 import { buildReviewOverview, getMergeReadiness, scoreHotspots, summarizeChecks } from "./lib/review-overview";
 import {
@@ -56,6 +59,7 @@ import {
   syncReviewThreads,
 } from "./lib/review-queue";
 import {
+  getPullRequestKey,
   parsePullRequestUrl,
   reviewSessionStorageKey,
   type ReviewSessionClient,
@@ -68,6 +72,10 @@ import {
   type ThreadActionClient,
 } from "./lib/thread-actions";
 import type { PullRequestSummary, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: vi.fn().mockResolvedValue(undefined),
+}));
 
 const signedOutSession: AuthSession = {
   state: "signed-out",
@@ -179,6 +187,15 @@ function createWorkspaceClient(overrides: Partial<WorkspaceClient> = {}): Worksp
         refreshedAtEpochSeconds: 1_800_000_000,
       },
     }),
+    fetchPullRequestData: vi.fn().mockResolvedValue(createOverviewFixture()),
+    fetchPullRequestChecks: vi.fn().mockResolvedValue({
+      checks: createOverviewFixture().checks,
+      rateLimit: {
+        remaining: 4_990,
+        resetEpochSeconds: 1_800_003_600,
+      },
+      fetchedAtEpochMs: 1_800_000_500_000,
+    }),
     ...overrides,
   };
 }
@@ -215,6 +232,16 @@ function createThreadActionClient(overrides: Partial<ThreadActionClient> = {}): 
       message: "Review Thread unresolved on GitHub.",
       replyUrl: null,
     })),
+    ...overrides,
+  };
+}
+
+function createUpdaterClient(overrides: Partial<AppUpdateClient> = {}): AppUpdateClient {
+  return {
+    isDesktopRuntime: vi.fn(() => true),
+    getCurrentVersion: vi.fn().mockResolvedValue("0.1.0"),
+    checkForUpdate: vi.fn().mockResolvedValue(null),
+    relaunch: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -309,14 +336,181 @@ beforeEach(() => {
   localStorageMock.clear();
 });
 
+async function openPullRequestsDialog(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: /^pull requests/i }));
+  return screen.findByRole("dialog", { name: /open pull requests/i });
+}
+
+async function openSettingsDialog(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: /^settings/i }));
+  return screen.findByRole("dialog", { name: /settings/i });
+}
+
 describe("App shell", () => {
   it("renders the Guided Review Workspace zones", () => {
     render(<App />);
 
-    expect(screen.getByLabelText("Review map")).toBeInTheDocument();
+    expect(screen.getByLabelText("File explorer")).toBeInTheDocument();
     expect(screen.getByLabelText("Review canvas")).toBeInTheDocument();
+    expect(screen.getByLabelText("Review queue summary")).toBeInTheDocument();
     expect(screen.getByLabelText("Inspector")).toBeInTheDocument();
-    expect(screen.getAllByText("Needs attention")).toHaveLength(2);
+    expect(screen.getByAltText("Narview logo")).toHaveAttribute("src", "/app-logo.png");
+    expect(screen.getAllByText("Needs attention").length).toBeGreaterThan(0);
+  });
+
+  it("keeps the main review panes as independent scroll containers", () => {
+    render(<App />);
+
+    expect(screen.getByRole("main")).toHaveClass("overflow-hidden");
+    expect(screen.getByLabelText("File explorer")).toHaveClass("pane-scroll-y");
+    expect(screen.getByLabelText("Review canvas scroll area")).toHaveClass("pane-scroll");
+    expect(screen.getByLabelText("Inspector")).toHaveClass("pane-scroll-y");
+  });
+
+  it("uses the sidebar as a file explorer while moving review controls into dialogs and the queue strip", () => {
+    render(<App />);
+
+    const fileExplorer = screen.getByLabelText("File explorer");
+    const queueSummary = screen.getByLabelText("Review queue summary");
+
+    expect(within(fileExplorer).getByRole("heading", { name: "Files" })).toBeInTheDocument();
+    expect(within(fileExplorer).getByLabelText("File tree")).toBeInTheDocument();
+    expect(within(fileExplorer).queryByText("Open Pull Requests")).not.toBeInTheDocument();
+    expect(within(fileExplorer).queryByText("Workspace")).not.toBeInTheDocument();
+    expect(within(queueSummary).getByText("Queues")).toBeInTheDocument();
+    expect(within(queueSummary).getByRole("button", { name: /browse threads/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^pull requests/i })).toBeInTheDocument();
+  });
+
+  it("keeps account, cache, update, and diagnostics controls in Settings instead of the Inspector", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const inspector = screen.getByLabelText("Inspector");
+    expect(within(inspector).getByLabelText("Live checks")).toBeInTheDocument();
+    expect(within(inspector).getByLabelText("Merge readiness context")).toBeInTheDocument();
+    expect(within(inspector).queryByLabelText("GitHub session details")).not.toBeInTheDocument();
+    expect(within(inspector).queryByLabelText("App updates")).not.toBeInTheDocument();
+    expect(within(inspector).queryByLabelText("Pull Request cache")).not.toBeInTheDocument();
+    expect(within(inspector).queryByLabelText("Privacy and diagnostics")).not.toBeInTheDocument();
+
+    const settings = await openSettingsDialog(user);
+    expect(within(settings).getByLabelText("GitHub session details")).toBeInTheDocument();
+    expect(within(settings).getByLabelText("App updates")).toBeInTheDocument();
+    expect(within(settings).getByLabelText("Pull Request cache")).toBeInTheDocument();
+    expect(within(settings).getByLabelText("Privacy and diagnostics")).toBeInTheDocument();
+  });
+
+  it("keeps the full Pull Request summary in a compact markdown accordion without the old clamp", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const overview = screen.getByLabelText("Review overview");
+    const summaryDisclosure = screen.getByLabelText("Pull Request summary");
+
+    expect(within(overview).getByRole("heading", { name: "PR Summary" })).toBeInTheDocument();
+    expect(summaryDisclosure).not.toHaveAttribute("open");
+    expect(within(overview).getByText("Remote-first PR review workspace shell with deterministic overview signals.")).toBeInTheDocument();
+
+    await user.click(within(summaryDisclosure).getByText("PR Summary"));
+
+    expect(summaryDisclosure).toHaveAttribute("open");
+    expect(within(summaryDisclosure).getByRole("heading", { name: "Summary" })).toBeInTheDocument();
+    expect(within(overview).getByText("high-level review state").tagName).toBe("STRONG");
+    expect(overview).toHaveTextContent("The reviewer should be able to read the whole Pull Request summary");
+    expect(overview.querySelector(".line-clamp-2")).toBeNull();
+  });
+
+  it("renders CodeRabbit-style Review Thread markdown with copyable code blocks", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(<App />);
+
+    const thread = screen.getByLabelText("Active review thread");
+    const summary = within(thread).getByText("Suggested migration hardening");
+
+    expect(within(thread).queryByRole("heading", { level: 3, name: /rotated token path/i })).not.toBeInTheDocument();
+    expect(within(thread).getAllByText(/Potential issue/).some((element) => element.tagName === "EM")).toBe(true);
+    expect(summary.tagName).toBe("SUMMARY");
+    expect(within(thread).getByText(/sessionCache\.invalidate/)).toBeInTheDocument();
+    expect(thread).not.toHaveTextContent("<summary>");
+    expect(thread).not.toHaveTextContent("```ts");
+
+    await user.click(summary);
+    await user.click(within(thread).getByRole("button", { name: /copy code/i }));
+
+    expect(writeText).toHaveBeenCalledWith("sessionCache.invalidate(previousSession.id);\nreturn nextCredential;");
+    expect(within(thread).getByRole("button", { name: /code copied/i })).toBeInTheDocument();
+  });
+
+  it("places the active Review Thread inline at the commented diff line", async () => {
+    const fetchedPullRequestData = createOverviewFixture();
+    fetchedPullRequestData.fileSummaries = [
+      {
+        path: "src/auth/session.ts",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        patch: [
+          "@@ -22,4 +22,4 @@",
+          " export function updateSession() {",
+          "   const previous = sessionCache.read();",
+          "-  const cached = previous;",
+          "+  const cached = nextSession;",
+          " }",
+        ].join("\n"),
+      },
+    ];
+    fetchedPullRequestData.reviewThreads = [
+      {
+        id: "thread-inline",
+        authorLogin: "coderabbitai",
+        filePath: "src/auth/session.ts",
+        line: 24,
+        state: "unresolved",
+        body: "The active review comment should sit next to this replacement.\n\n```ts\nconst cached = nextSession;\n```",
+        updatedAt: "2026-05-18T12:04:00Z",
+      },
+    ];
+    const workspaceClient = createWorkspaceClient({
+      listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+      refreshPullRequests: vi.fn().mockResolvedValue({
+        repositories: [narviewRepository],
+        pullRequests: [readyPullRequest],
+        status: {
+          state: "fresh",
+          message: "Fetched 1 open pull request.",
+          rateLimitResetEpochSeconds: null,
+          refreshedAtEpochSeconds: 1_800_000_000,
+        },
+      }),
+      fetchPullRequestData: vi.fn().mockResolvedValue(fetchedPullRequestData),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(1));
+
+    const diffViewer = screen.getByLabelText("Diff viewer");
+    const inlineThread = within(diffViewer).getByLabelText("Inline review thread");
+    const diffCodeLine = Array.from(diffViewer.querySelectorAll<HTMLElement>(".diff-code-line")).find(
+      (line) => line.textContent === "  const cached = nextSession;",
+    );
+
+    expect(screen.queryByLabelText("Active review thread")).not.toBeInTheDocument();
+    expect(inlineThread).toHaveTextContent("Review Path 1 of 1");
+    expect(inlineThread).toHaveTextContent("line 24");
+    expect(inlineThread).toHaveTextContent("The active review comment should sit next to this replacement.");
+    expect(diffCodeLine?.closest(".diff-row")).toHaveClass("diff-row-comment-anchor");
   });
 
   it("toggles focus mode from the visible control", async () => {
@@ -325,7 +519,7 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: /focus/i }));
 
-    expect(screen.queryByLabelText("Review map")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("File explorer")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Inspector")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /exit focus/i })).toBeInTheDocument();
   });
@@ -384,7 +578,7 @@ describe("App shell", () => {
     await user.type(screen.getByLabelText("Search commands"), "mark active reviewed");
     await user.click(screen.getByRole("button", { name: /mark active review thread reviewed/i }));
 
-    expect(await screen.findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+    expect(await within(screen.getByLabelText("Inspector")).findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /command/i }));
     await user.type(screen.getByLabelText("Search commands"), "resolve active");
@@ -404,6 +598,7 @@ describe("App shell", () => {
   });
 
   it("restores a signed-in session without rendering the token", async () => {
+    const user = userEvent.setup();
     const token = "gho_secretabcdefghijklmnopqrstuvwxyz123456";
     const authClient = createAuthClient({
       getStatus: vi.fn().mockResolvedValue(signedInSession),
@@ -411,8 +606,9 @@ describe("App shell", () => {
 
     render(<App authClient={authClient} />);
 
-    expect(await screen.findAllByText("@octocat")).toHaveLength(2);
-    expect(screen.getByText("OS secure storage")).toBeInTheDocument();
+    expect(await screen.findByText("@octocat")).toBeInTheDocument();
+    const settings = await openSettingsDialog(user);
+    expect(within(settings).getByText("OS secure storage")).toBeInTheDocument();
     expect(screen.queryByText(token)).not.toBeInTheDocument();
   });
 
@@ -424,8 +620,11 @@ describe("App shell", () => {
     await user.click(await screen.findByRole("button", { name: /sign in/i }));
 
     expect(authClient.startSignIn).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("ABCD-1234")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /check sign-in/i })).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: /enter this code in github/i });
+    expect(within(dialog).getByLabelText("GitHub device code")).toHaveTextContent("ABCD-1234");
+    await user.click(within(dialog).getByRole("button", { name: /open github/i }));
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/login/device?user_code=ABCD-1234");
+    expect(within(dialog).getByRole("button", { name: /i entered it/i })).toBeInTheDocument();
   });
 
   it("signs out through the backend session command", async () => {
@@ -439,7 +638,7 @@ describe("App shell", () => {
     await user.click(await screen.findByRole("button", { name: /sign out/i }));
 
     expect(authClient.signOut).toHaveBeenCalledTimes(1);
-    expect(await screen.findAllByText("Signed out")).toHaveLength(2);
+    expect(await screen.findByText("Signed out")).toBeInTheDocument();
   });
 
   it("saves and removes GitHub repositories in the Workspace", async () => {
@@ -448,16 +647,17 @@ describe("App shell", () => {
 
     render(<App authClient={createAuthClient()} workspaceClient={workspaceClient} />);
 
-    await user.type(screen.getByLabelText("Repository slug"), "Resplendent-Data/Narview");
-    await user.click(screen.getByRole("button", { name: /save/i }));
+    const dialog = await openPullRequestsDialog(user);
+    await user.type(within(dialog).getByLabelText("Repository slug"), "Resplendent-Data/Narview");
+    await user.click(within(dialog).getByRole("button", { name: /save/i }));
 
     expect(workspaceClient.saveRepository).toHaveBeenCalledWith("Resplendent-Data/Narview");
-    expect(await screen.findByText("Resplendent-Data/Narview")).toBeInTheDocument();
+    expect(await within(dialog).findByText("Resplendent-Data/Narview")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /remove resplendent-data\/narview/i }));
+    await user.click(within(dialog).getByRole("button", { name: /remove resplendent-data\/narview/i }));
 
     expect(workspaceClient.removeRepository).toHaveBeenCalledWith("Resplendent-Data", "Narview");
-    expect(await screen.findByText("No saved repositories.")).toBeInTheDocument();
+    expect(await within(dialog).findByText("No saved repositories.")).toBeInTheDocument();
   });
 
   it("loads non-draft Pull Requests by default and includes drafts when filtered", async () => {
@@ -486,11 +686,148 @@ describe("App shell", () => {
     expect((await screen.findAllByText("Add checkout guard")).length).toBeGreaterThan(0);
     expect(screen.queryByText("Draft billing sync")).not.toBeInTheDocument();
 
-    await user.click(screen.getByLabelText("Include draft Pull Requests"));
+    const dialog = await openPullRequestsDialog(user);
+    await user.click(within(dialog).getByLabelText("Include draft Pull Requests"));
 
-    expect(await screen.findByText("Draft billing sync")).toBeInTheDocument();
+    expect(await within(dialog).findByText("Draft billing sync")).toBeInTheDocument();
     expect(workspaceClient.refreshPullRequests).toHaveBeenCalledWith(false);
     expect(workspaceClient.refreshPullRequests).toHaveBeenCalledWith(true);
+  });
+
+  it("manual refresh reloads selected Pull Request review thread states", async () => {
+    const user = userEvent.setup();
+    const initialData = createOverviewFixture();
+    const refreshedData = createOverviewFixture();
+    refreshedData.reviewThreads = refreshedData.reviewThreads.map((thread) => ({
+      ...thread,
+      state: "resolved",
+      updatedAt: "2026-05-18T12:05:00Z",
+    }));
+    const workspaceClient = createWorkspaceClient({
+      listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+      refreshPullRequests: vi.fn().mockResolvedValue({
+        repositories: [narviewRepository],
+        pullRequests: [readyPullRequest],
+        status: {
+          state: "fresh",
+          message: "Fetched 1 open pull request.",
+          rateLimitResetEpochSeconds: null,
+          refreshedAtEpochSeconds: 1_800_000_000,
+        },
+      }),
+      fetchPullRequestData: vi.fn().mockResolvedValueOnce(initialData).mockResolvedValueOnce(refreshedData),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(1));
+    expect(within(screen.getByLabelText("Inspector")).getByText("Unresolved")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /refresh current pull request/i }));
+
+    await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(2));
+    expect(within(screen.getByLabelText("Inspector")).getByText("Resolved")).toBeInTheDocument();
+    expect(screen.getAllByText(/Refreshed GitHub Pull Request review data/).length).toBeGreaterThan(0);
+  });
+
+  it("refreshes the whole Pull Request after pending checks finish", async () => {
+    const user = userEvent.setup();
+    const initialData = createOverviewFixture();
+    initialData.checks = [
+      {
+        name: "build",
+        status: "completed",
+        conclusion: "success",
+        url: "https://github.com/Resplendent-Data/Narview/actions/runs/1",
+        startedAt: "2026-05-18T12:00:00Z",
+        completedAt: "2026-05-18T12:02:05Z",
+      },
+      {
+        name: "preview",
+        status: "in-progress",
+        conclusion: null,
+        url: "https://github.com/Resplendent-Data/Narview/actions/runs/2",
+        startedAt: "2026-05-18T12:03:00Z",
+        completedAt: null,
+      },
+      {
+        name: "lint",
+        status: "completed",
+        conclusion: "failure",
+        url: null,
+        startedAt: "2026-05-18T12:00:00Z",
+        completedAt: "2026-05-18T12:00:20Z",
+      },
+    ];
+    const completedChecks = [
+      { ...initialData.checks[0] },
+      {
+        ...initialData.checks[1],
+        status: "completed" as const,
+        conclusion: "success" as const,
+        completedAt: "2026-05-18T12:04:20Z",
+      },
+      {
+        ...initialData.checks[2],
+        conclusion: "success" as const,
+      },
+    ];
+    const refreshedData = createOverviewFixture();
+    refreshedData.checks = completedChecks;
+    refreshedData.reviewThreads = refreshedData.reviewThreads.map((thread) => ({
+      ...thread,
+      state: "resolved",
+      updatedAt: "2026-05-18T12:06:00Z",
+    }));
+    const workspaceClient = createWorkspaceClient({
+      listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+      refreshPullRequests: vi.fn().mockResolvedValue({
+        repositories: [narviewRepository],
+        pullRequests: [readyPullRequest],
+        status: {
+          state: "fresh",
+          message: "Fetched 1 open pull request.",
+          rateLimitResetEpochSeconds: null,
+          refreshedAtEpochSeconds: 1_800_000_000,
+        },
+      }),
+      fetchPullRequestData: vi.fn().mockResolvedValueOnce(initialData).mockResolvedValueOnce(refreshedData),
+      fetchPullRequestChecks: vi.fn().mockResolvedValue({
+        checks: completedChecks,
+        rateLimit: {
+          remaining: 4_989,
+          resetEpochSeconds: 1_800_003_600,
+        },
+        fetchedAtEpochMs: 1_800_000_500_000,
+      }),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(1));
+
+    const liveChecks = screen.getByLabelText("Live checks");
+    expect(liveChecks).toHaveTextContent("Live Checks");
+    expect(liveChecks).toHaveTextContent("1 failing");
+    expect(liveChecks).toHaveTextContent("preview");
+    expect(liveChecks).toHaveTextContent("Running");
+
+    await user.click(within(liveChecks).getByRole("button", { name: /refresh live checks/i }));
+
+    await waitFor(() => expect(workspaceClient.fetchPullRequestChecks).toHaveBeenCalledWith(readyPullRequest));
+    await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(liveChecks).toHaveTextContent("3/3 passing"));
+    expect(within(screen.getByLabelText("Inspector")).getByText("Resolved")).toBeInTheDocument();
   });
 
   it("switches between Pull Requests without clone assumptions", async () => {
@@ -516,10 +853,78 @@ describe("App shell", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: /draft billing sync/i }));
+    const dialog = await openPullRequestsDialog(user);
+    const results = within(dialog).getByLabelText("Open Pull Request results");
+    expect(results.parentElement).toHaveClass("pane-scroll-y");
+    expect(await within(dialog).findByRole("button", { name: /draft billing sync/i })).toHaveTextContent("2");
+
+    await user.keyboard("2");
 
     expect(screen.getAllByText("Resplendent-Data/Narview #13").length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: /draft billing sync/i })).toHaveAttribute("aria-pressed", "true");
+    expect(within(dialog).getByRole("button", { name: /draft billing sync/i })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("background refreshes Pull Request data when switching to cached PRs", async () => {
+    const user = userEvent.setup();
+    const cachedReady = createOverviewFixture();
+    const cachedDraft = createOverviewFixture();
+    cachedDraft.pullRequest = draftPullRequest;
+    cachedDraft.metadata = {
+      ...cachedDraft.metadata,
+      title: draftPullRequest.title,
+      repository: draftPullRequest.repository,
+      number: draftPullRequest.number,
+      authorLogin: draftPullRequest.authorLogin,
+      url: draftPullRequest.url,
+      isDraft: draftPullRequest.isDraft,
+      updatedAt: draftPullRequest.updatedAt,
+    };
+    writeCachedPullRequestData(cachedReady);
+    writeCachedPullRequestData(cachedDraft);
+
+    const fetchPullRequestData = vi.fn().mockImplementation(async (pullRequest: PullRequestSummary) => {
+      const data = createOverviewFixture();
+      data.pullRequest = pullRequest;
+      data.metadata = {
+        ...data.metadata,
+        title: `${pullRequest.title} refreshed`,
+        repository: pullRequest.repository,
+        number: pullRequest.number,
+        authorLogin: pullRequest.authorLogin,
+        url: pullRequest.url,
+        isDraft: pullRequest.isDraft,
+        updatedAt: pullRequest.updatedAt,
+      };
+      return data;
+    });
+    const workspaceClient = createWorkspaceClient({
+      listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+      refreshPullRequests: vi.fn().mockResolvedValue({
+        repositories: [narviewRepository],
+        pullRequests: [readyPullRequest, draftPullRequest],
+        status: {
+          state: "fresh",
+          message: "Fetched 2 open pull requests.",
+          rateLimitResetEpochSeconds: null,
+          refreshedAtEpochSeconds: 1_800_000_000,
+        },
+      }),
+      fetchPullRequestData,
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    await waitFor(() => expect(fetchPullRequestData).toHaveBeenCalledWith(readyPullRequest));
+
+    const dialog = await openPullRequestsDialog(user);
+    await user.click(await within(dialog).findByRole("button", { name: /draft billing sync/i }));
+
+    await waitFor(() => expect(fetchPullRequestData).toHaveBeenCalledWith(draftPullRequest));
   });
 
   it("surfaces rate-limit refresh status", async () => {
@@ -544,8 +949,10 @@ describe("App shell", () => {
       />,
     );
 
-    expect(await screen.findByText("Rate limited")).toBeInTheDocument();
-    expect(screen.getByText(/GitHub rate limit reached/)).toBeInTheDocument();
+    const dialog = await openPullRequestsDialog(userEvent.setup());
+
+    expect((await within(dialog).findAllByText("Rate limited")).length).toBeGreaterThan(0);
+    expect(within(dialog).getByText(/GitHub rate limit reached/)).toBeInTheDocument();
   });
 
   it("parses github.com Pull Request URLs", () => {
@@ -564,10 +971,12 @@ describe("App shell", () => {
       />,
     );
 
-    await user.type(screen.getByLabelText("Pull Request URL"), "https://github.com/Resplendent-Data/Narview/pull/91");
-    await user.click(screen.getByRole("button", { name: /open/i }));
+    const dialog = await openPullRequestsDialog(user);
+    await user.type(within(dialog).getByLabelText("Pull Request URL"), "https://github.com/Resplendent-Data/Narview/pull/91");
+    await user.click(within(dialog).getByRole("button", { name: /^open$/i }));
 
-    expect(await screen.findAllByText("Resplendent-Data/Narview #91")).toHaveLength(2);
+    expect((await screen.findAllByText("Resplendent-Data/Narview #91")).length).toBeGreaterThan(0);
+    await openPullRequestsDialog(user);
     expect(screen.getByText("No saved repositories.")).toBeInTheDocument();
   });
 
@@ -576,8 +985,9 @@ describe("App shell", () => {
 
     render(<App authClient={createAuthClient()} workspaceClient={createWorkspaceClient()} reviewSessionClient={createReviewSessionClient()} />);
 
-    await user.type(screen.getByLabelText("Pull Request URL"), "https://example.com/acme/api/pull/4");
-    await user.click(screen.getByRole("button", { name: /open/i }));
+    const dialog = await openPullRequestsDialog(user);
+    await user.type(within(dialog).getByLabelText("Pull Request URL"), "https://example.com/acme/api/pull/4");
+    await user.click(within(dialog).getByRole("button", { name: /^open$/i }));
 
     expect(await screen.findByText("Narview v1 supports github.com Pull Request URLs.")).toBeInTheDocument();
   });
@@ -599,11 +1009,13 @@ describe("App shell", () => {
       />,
     );
 
-    await user.type(screen.getByLabelText("Pull Request URL"), readyPullRequest.url);
-    await user.click(screen.getByRole("button", { name: /open/i }));
+    const dialog = await openPullRequestsDialog(user);
+    await user.type(within(dialog).getByLabelText("Pull Request URL"), readyPullRequest.url);
+    await user.click(within(dialog).getByRole("button", { name: /^open$/i }));
 
     await user.click(await screen.findByRole("button", { name: /exit focus/i }));
-    expect(screen.getByLabelText("Include draft Pull Requests")).toBeChecked();
+    const reopenedDialog = await openPullRequestsDialog(user);
+    expect(within(reopenedDialog).getByLabelText("Include draft Pull Requests")).toBeChecked();
     await waitFor(() => expect(reviewSessionClient.saveSession).toHaveBeenCalled());
     const savedSnapshot = vi.mocked(reviewSessionClient.saveSession).mock.calls.at(-1)?.[2];
     expect(JSON.stringify(savedSnapshot)).not.toMatch(/reviewed|viewed/i);
@@ -696,16 +1108,17 @@ describe("App shell", () => {
     window.localStorage.setItem(reviewSessionStorageKey, JSON.stringify({ sessions: { saved: true }, lastByUser: { "local-user": "saved" } }));
     render(<App reviewSessionClient={createReviewSessionClient()} />);
 
-    await user.click(screen.getByRole("button", { name: /^mark reviewed/i }));
-    await user.click(within(screen.getByLabelText("File changes")).getByRole("button", { name: /mark src\/auth\/session\.ts viewed/i }));
+    await user.click(within(screen.getByLabelText("Inspector")).getByRole("button", { name: /^mark reviewed/i }));
+    await user.click(within(screen.getByLabelText("Diff viewer")).getByRole("button", { name: /mark src\/auth\/session\.ts viewed/i }));
 
     expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
     expect(window.localStorage.getItem(fileChangeStorageKey)).toContain('"viewed":true');
     expect(window.localStorage.getItem(reviewSessionStorageKey)).toContain("saved");
 
-    const privacy = screen.getByLabelText("Privacy and diagnostics");
+    const settings = await openSettingsDialog(user);
+    const privacy = within(settings).getByLabelText("Privacy and diagnostics");
     await user.click(within(privacy).getByRole("button", { name: /reset local review history/i }));
-    expect(screen.getByRole("dialog")).toHaveTextContent("Reset local review history");
+    expect(screen.getByRole("dialog", { name: /reset local review history/i })).toHaveTextContent("Reset local review history");
 
     await user.click(screen.getByRole("button", { name: /^reset$/i }));
 
@@ -726,7 +1139,8 @@ describe("App shell", () => {
     });
     render(<App />);
 
-    const privacy = screen.getByLabelText("Privacy and diagnostics");
+    const settings = await openSettingsDialog(user);
+    const privacy = within(settings).getByLabelText("Privacy and diagnostics");
     expect(within(privacy).getByText("Telemetry off")).toBeInTheDocument();
     expect(within(privacy).getByRole("button", { name: /copy export/i })).toBeDisabled();
 
@@ -781,6 +1195,23 @@ describe("App shell", () => {
     expect(exportText).toContain('"rawCode": "redacted"');
     expect(hasTelemetryEmissionPaths()).toBe(false);
     expect(telemetryPolicy.analyticsSinks).toEqual([]);
+  });
+
+  it("checks for desktop updates from the updater panel", async () => {
+    const user = userEvent.setup();
+    const updaterClient = createUpdaterClient();
+    render(<App updaterClient={updaterClient} />);
+
+    const settings = await openSettingsDialog(user);
+    const updates = within(settings).getByLabelText("App updates");
+    expect(within(updates).getByText("Ready")).toBeInTheDocument();
+    expect(within(updates).getByText("Never")).toBeInTheDocument();
+
+    await user.click(within(updates).getByRole("button", { name: /check updates/i }));
+
+    await waitFor(() => expect(updaterClient.checkForUpdate).toHaveBeenCalledTimes(1));
+    expect(within(updates).getByText("You're up to date")).toBeInTheDocument();
+    expect(window.localStorage.getItem(lastUpdateCheckStorageKey)).toMatch(/^\d+$/);
   });
 
   it("does not queue GitHub writes while offline", () => {
@@ -855,6 +1286,37 @@ describe("App shell", () => {
     });
     expect(summary.details[0]).toMatchObject({ name: "build", timingLabel: "2m 5s" });
     expect(summary.details[2]).toMatchObject({ name: "preview", timingLabel: "Running" });
+  });
+
+  it("excludes skipped checks from failing checks count", () => {
+    const summary = summarizeChecks([
+      { name: "build", status: "completed", conclusion: "success", url: null },
+      { name: "lint", status: "completed", conclusion: "skipped", url: null },
+      { name: "test", status: "completed", conclusion: "failure", url: null },
+    ]);
+
+    expect(summary).toMatchObject({
+      total: 3,
+      passing: 1,
+      failing: 1,
+      failingNames: ["test"],
+    });
+  });
+
+  it("deduplicates check runs by name, keeping only the latest run", () => {
+    const summary = summarizeChecks([
+      { name: "build", status: "completed", conclusion: "failure", url: null, startedAt: "2026-05-18T12:00:00Z" },
+      { name: "build", status: "completed", conclusion: "success", url: null, startedAt: "2026-05-18T12:10:00Z" },
+      { name: "lint", status: "completed", conclusion: "failure", url: null, startedAt: "2026-05-18T12:05:00Z" },
+      { name: "lint", status: "completed", conclusion: "failure", url: null, startedAt: "2026-05-18T12:02:00Z" },
+    ]);
+
+    expect(summary).toMatchObject({
+      total: 2,
+      passing: 1,
+      failing: 1,
+      failingNames: ["lint"],
+    });
   });
 
   it("surfaces merge readiness states from GitHub-visible blockers", () => {
@@ -975,21 +1437,20 @@ describe("App shell", () => {
   it("marks File Changes viewed locally without marking Review Threads reviewed", async () => {
     const user = userEvent.setup();
     render(<App />);
-    const fileList = screen.getByLabelText("File changes");
+    const fileExplorer = screen.getByLabelText("File explorer");
+    const diffViewer = screen.getByLabelText("Diff viewer");
 
-    expect(within(fileList).getByText("assets/review-map.png")).toBeInTheDocument();
-    expect(within(fileList).getByText("Image fallback")).toBeInTheDocument();
-    expect(within(fileList).getByText("notebooks/review-findings.ipynb")).toBeInTheDocument();
-    expect(within(fileList).getByText("Non-text fallback")).toBeInTheDocument();
+    expect(within(fileExplorer).getByText("review-map.png")).toBeInTheDocument();
+    expect(within(fileExplorer).getByText("review-findings.ipynb")).toBeInTheDocument();
 
-    await user.click(within(fileList).getByRole("button", { name: /mark src\/auth\/session\.ts viewed/i }));
+    await user.click(within(diffViewer).getByRole("button", { name: /mark src\/auth\/session\.ts viewed/i }));
 
     expect(window.localStorage.getItem(fileChangeStorageKey)).toContain('"viewed":true');
     expect(JSON.parse(window.localStorage.getItem(reviewQueueStorageKey) ?? "{}").users["local-user"]["thread-1"].reviewed).toBe(false);
 
-    await user.selectOptions(within(fileList).getByLabelText("File viewed"), "viewed");
-    expect(within(fileList).getByText("src/auth/session.ts")).toBeInTheDocument();
-    expect(within(fileList).queryByText("src/review/queue.ts")).not.toBeInTheDocument();
+    await user.selectOptions(within(fileExplorer).getByLabelText("File viewed"), "viewed");
+    expect(within(fileExplorer).getByText("session.ts")).toBeInTheDocument();
+    expect(within(fileExplorer).queryByText("review-map.png")).not.toBeInTheDocument();
   });
 
   it("persists the diff mode preference across app mounts", async () => {
@@ -1006,7 +1467,7 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: /side-by-side/i })).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("models lazy hunk loading before the whole diff is available", () => {
+  it("loads every cached hunk before the whole file is opened", () => {
     const [file] = createFileSummaries();
     const state = buildLazyDiffState(file, {
       mode: "unified",
@@ -1015,8 +1476,39 @@ describe("App shell", () => {
       loadedHunkIds: getDefaultLoadedDiffHunkIds(file),
     });
 
-    expect(state.hunks[0].loaded).toBe(true);
-    expect(state.hunks[1].loaded).toBe(false);
+    expect(state.hunks).toHaveLength(2);
+    expect(state.hunks.every((hunk) => hunk.loaded)).toBe(true);
+    expect(state.fullFileLines).toBeNull();
+  });
+
+  it("keeps syntax metadata on deep rows in long cached hunks", () => {
+    const patchLines = [
+      "@@ -104,0 +128,45 @@ async def _load_run_user_message(",
+      ...Array.from({ length: 45 }, (_, index) =>
+        index === 35 ? "+        return str(finish_reason)" : `+        value_${index} = ${index}`,
+      ),
+    ];
+    const state = buildLazyDiffState(
+      {
+        path: "apps/backend/src/ai_worker.py",
+        additions: 45,
+        deletions: 0,
+        status: "modified",
+        patch: patchLines.join("\n"),
+      },
+      {
+        mode: "unified",
+        repository: "Resplendent-Data/front-end",
+        pullRequestNumber: 2074,
+      },
+    );
+    const deepLine = state.hunks[0].lines.find((line) => line.content.includes("finish_reason"));
+
+    expect(deepLine).toMatchObject({
+      highlighted: true,
+      language: "python",
+    });
+    expect(state.hunks[0].lines.at(-1)?.highlighted).toBe(true);
   });
 
   it("bounds syntax highlighting to visible and near-visible diff lines across languages", () => {
@@ -1039,6 +1531,25 @@ describe("App shell", () => {
     expect(getLanguageForPath("tools/analyze.py")).toBe("python");
     expect(getLanguageForPath("src-tauri/src/lib.rs")).toBe("rust");
     expect(getLanguageForPath("lib/main.dart")).toBe("dart");
+  });
+
+  it("preserves indentation and renders syntax tokens inside diff code lines", () => {
+    render(<App />);
+
+    const diffViewer = screen.getByLabelText("Diff viewer");
+    const codeLines = Array.from(diffViewer.querySelectorAll<HTMLElement>(".diff-code-line"));
+    const indentedLine = codeLines.find((line) => line.textContent?.startsWith("  const value"));
+    const row = indentedLine?.closest(".diff-row");
+
+    expect(diffViewer).toHaveClass("diff-shell");
+    expect(diffViewer.querySelector(".diff-file-header")).toBeInTheDocument();
+    expect(diffViewer.querySelector(".diff-hunk-header")).toBeInTheDocument();
+    expect(diffViewer.querySelector(".diff-gutter")).toBeInTheDocument();
+    expect(diffViewer.querySelector(".diff-marker")).toBeInTheDocument();
+    expect(indentedLine).toBeDefined();
+    expect(indentedLine?.textContent?.startsWith("  ")).toBe(true);
+    expect(indentedLine?.querySelector(".diff-token-keyword")).toHaveTextContent("const");
+    expect(row).toHaveClass("grid-cols-[52px_52px_24px_max-content]");
   });
 
   it("creates synthetic large Pull Request fixtures with files, threads, generated files, and huge totals", () => {
@@ -1117,22 +1628,21 @@ describe("App shell", () => {
       />,
     );
 
-    expect(await screen.findAllByText("acme/large-pr #9001")).toHaveLength(2);
-    expect(screen.getByText("Showing 80 of 140 matching Review Threads.")).toBeInTheDocument();
-    expect(screen.getByText("Showing 120 of 240 matching File Changes.")).toBeInTheDocument();
-    expect(screen.getAllByText(/GitHub rate limit reached/).length).toBeGreaterThanOrEqual(2);
+    expect((await screen.findAllByText("acme/large-pr #9001")).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Review queue summary")).toHaveTextContent("140 matching filters");
+    expect(screen.getByLabelText("File explorer")).toHaveTextContent("0/240 viewed");
+    const dialog = await openPullRequestsDialog(userEvent.setup());
+    expect(within(dialog).getByText(/GitHub rate limit reached/)).toBeInTheDocument();
   });
 
-  it("loads hunks, expands context, and fetches the whole file on demand", async () => {
+  it("loads cached hunks, expands context, and fetches the whole file on demand", async () => {
     const user = userEvent.setup();
     render(<App />);
     const diffViewer = screen.getByLabelText("Diff viewer");
 
-    expect(within(diffViewer).getByText("Hunk not loaded yet.")).toBeInTheDocument();
-
-    await user.click(within(diffViewer).getByRole("button", { name: /load hunk/i }));
-
-    expect(await within(diffViewer).findByText(/logger.info/)).toBeInTheDocument();
+    expect(within(diffViewer).queryByText("Hunk not loaded yet.")).not.toBeInTheDocument();
+    expect(within(diffViewer).queryByRole("button", { name: /load hunk/i })).not.toBeInTheDocument();
+    expect(Array.from(diffViewer.querySelectorAll(".diff-code-line")).some((line) => line.textContent?.includes("logger.info"))).toBe(true);
 
     await user.click(within(diffViewer).getAllByRole("button", { name: /expand context/i })[0]);
 
@@ -1147,7 +1657,8 @@ describe("App shell", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: /view diff for notebooks\/review-findings\.ipynb/i }));
+    const fileExplorer = screen.getByLabelText("File explorer");
+    await user.click(within(fileExplorer).getByText("review-findings.ipynb").closest("button") as HTMLElement);
 
     const diffViewer = screen.getByLabelText("Diff viewer");
     expect(within(diffViewer).getByText("Non-text fallback")).toBeInTheDocument();
@@ -1160,9 +1671,13 @@ describe("App shell", () => {
   it("selects Review Queue items into matching thread detail and diff context", async () => {
     const user = userEvent.setup();
     render(<App />);
-    const queue = screen.getByLabelText("Review thread queue");
+    const queueSummary = screen.getByLabelText("Review queue summary");
 
-    await user.click(within(queue).getByRole("button", { name: /src\/review\/queue\.ts/i }));
+    expect(screen.queryByLabelText("Review thread queue")).not.toBeInTheDocument();
+    await user.click(within(queueSummary).getByRole("button", { name: /browse threads/i }));
+    const dialog = await screen.findByRole("dialog", { name: /review threads/i });
+    await user.type(within(dialog).getByLabelText("Search review threads"), "queue");
+    await user.click(within(dialog).getByRole("button", { name: /src\/review\/queue\.ts/i }));
 
     const diffViewer = screen.getByLabelText("Diff viewer");
     expect(within(diffViewer).getByText("src/review/queue.ts")).toBeInTheDocument();
@@ -1170,12 +1685,35 @@ describe("App shell", () => {
     expect(screen.getByText("Review Path 2 of 3")).toBeInTheDocument();
   });
 
+  it("opens a searchable Review Threads dialog with the T shortcut", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.keyboard("t");
+
+    const dialog = await screen.findByRole("dialog", { name: /review threads/i });
+    expect(dialog).toHaveClass("z-50");
+    expect(within(dialog).getByText(/acme\/payments-web #482 · 3 matching threads/i)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: /src\/auth\/session\.ts/i })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Review thread search results")).toBeInTheDocument();
+
+    await user.type(within(dialog).getByLabelText("Search review threads"), "queue");
+
+    expect(within(dialog).queryByRole("button", { name: /src\/auth\/session\.ts/i })).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: /src\/review\/queue\.ts/i }));
+
+    expect(screen.queryByRole("dialog", { name: /review threads/i })).not.toBeInTheDocument();
+    expect(within(screen.getByLabelText("Diff viewer")).getByText("src/review/queue.ts")).toBeInTheDocument();
+  });
+
   it("presents outdated threads as older diff context in the guided flow", async () => {
     const user = userEvent.setup();
     render(<App />);
-    const queue = screen.getByLabelText("Review thread queue");
 
-    await user.click(within(queue).getByRole("button", { name: /src-tauri\/src\/github\.rs/i }));
+    await user.keyboard("t");
+    const dialog = await screen.findByRole("dialog", { name: /review threads/i });
+    await user.type(within(dialog).getByLabelText("Search review threads"), "github.rs");
+    await user.click(within(dialog).getByRole("button", { name: /src-tauri\/src\/github\.rs/i }));
 
     expect(screen.getAllByText("Outdated").length).toBeGreaterThan(0);
     expect(screen.getByText("Older diff context from a previous hunk.")).toBeInTheDocument();
@@ -1188,23 +1726,24 @@ describe("App shell", () => {
     render(<App threadActionClient={threadActionClient} />);
 
     expect(screen.getByText("Previous")).toBeInTheDocument();
+    expect(screen.getAllByText("Threads").length).toBeGreaterThan(0);
     expect(screen.getByText("Open file")).toBeInTheDocument();
     expect(screen.getAllByText("Focus").length).toBeGreaterThan(0);
 
-    await user.keyboard("j");
+    await user.keyboard("k");
     expect(within(screen.getByLabelText("Diff viewer")).getByText("src/review/queue.ts")).toBeInTheDocument();
 
-    await user.keyboard("k");
+    await user.keyboard("j");
     expect(within(screen.getByLabelText("Diff viewer")).getByText("src/auth/session.ts")).toBeInTheDocument();
 
     await user.keyboard("r");
-    expect(await screen.findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+    expect(await within(screen.getByLabelText("Inspector")).findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
 
     await user.keyboard("e");
     expect(threadActionClient.resolve).toHaveBeenCalledWith("thread-1");
 
     await user.keyboard("a");
-    expect(screen.getByText("3 selected")).toBeInTheDocument();
+    expect(screen.getByLabelText("Review queue summary")).toHaveTextContent("3 selected");
 
     await user.keyboard("{Shift>}R{/Shift}");
     expect(screen.getByLabelText("Reply body")).toHaveFocus();
@@ -1213,13 +1752,50 @@ describe("App shell", () => {
   it("updates Review Session state as the reviewer navigates threads", async () => {
     const user = userEvent.setup();
     const reviewSessionClient = createReviewSessionClient();
-    render(<App reviewSessionClient={reviewSessionClient} />);
+    const fetchedPullRequestData = createOverviewFixture();
+    fetchedPullRequestData.reviewThreads = [
+      ...fetchedPullRequestData.reviewThreads,
+      {
+        id: "thread-2",
+        authorLogin: "monalisa",
+        filePath: "src/review/queue.ts",
+        line: 88,
+        state: "resolved",
+        body: "The queue filter path should remain available after GitHub resolves a thread.",
+        updatedAt: "2026-05-18T12:01:00Z",
+      },
+    ];
+    fetchedPullRequestData.fileSummaries = [
+      ...fetchedPullRequestData.fileSummaries,
+      { path: "src/review/queue.ts", additions: 94, deletions: 21, status: "modified" },
+    ];
+    const workspaceClient = createWorkspaceClient({
+      fetchPullRequestData: vi.fn().mockResolvedValue(fetchedPullRequestData),
+    });
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        reviewSessionClient={reviewSessionClient}
+        workspaceClient={workspaceClient}
+      />,
+    );
 
-    await user.type(screen.getByLabelText("Pull Request URL"), readyPullRequest.url);
-    await user.click(screen.getByRole("button", { name: /open/i }));
+    const dialog = await openPullRequestsDialog(user);
+    await user.type(within(dialog).getByLabelText("Pull Request URL"), readyPullRequest.url);
+    await user.click(within(dialog).getByRole("button", { name: /^open$/i }));
     await screen.findAllByText("Resplendent-Data/Narview #12");
+    await waitFor(() => {
+      expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repository: readyPullRequest.repository,
+          number: readyPullRequest.number,
+        }),
+      );
+      expect(readCacheStore().entries[getPullRequestKey(readyPullRequest)]?.reviewThreads).toHaveLength(2);
+    });
+    await waitFor(() => expect(screen.getByLabelText("Review queue summary")).toHaveTextContent("2 matching filters"));
 
-    await user.keyboard("j");
+    await user.keyboard("k");
 
     await waitFor(() => {
       const savedSnapshot = vi.mocked(reviewSessionClient.saveSession).mock.calls.at(-1)?.[2];
@@ -1235,10 +1811,12 @@ describe("App shell", () => {
     const user = userEvent.setup();
     const threadActionClient = createThreadActionClient();
     render(<App threadActionClient={threadActionClient} />);
-    const queue = screen.getByLabelText("Review thread queue");
 
-    await user.click(within(queue).getByRole("button", { name: /src\/review\/queue\.ts/i }));
-    await user.click(screen.getByRole("button", { name: /^unresolve/i }));
+    await user.keyboard("t");
+    const dialog = await screen.findByRole("dialog", { name: /review threads/i });
+    await user.type(within(dialog).getByLabelText("Search review threads"), "queue");
+    await user.click(within(dialog).getByRole("button", { name: /src\/review\/queue\.ts/i }));
+    await user.click(within(screen.getByLabelText("Inspector")).getByRole("button", { name: /^unresolve/i }));
 
     expect(threadActionClient.unresolve).toHaveBeenCalledWith("thread-2");
   });
@@ -1319,7 +1897,6 @@ describe("App shell", () => {
     });
     render(<App />);
 
-    await user.click(screen.getByLabelText("Select src/auth/session.ts"));
     await user.type(screen.getByLabelText("Custom handoff intent"), "Fix only the stale session cache issue");
     await user.click(screen.getByRole("button", { name: /copy markdown/i }));
 
@@ -1337,19 +1914,25 @@ describe("App shell", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const queue = screen.getByLabelText("Review thread queue");
-    expect(within(queue).getAllByText("Outdated").length).toBeGreaterThan(0);
+    await user.keyboard("t");
+    const dialog = await screen.findByRole("dialog", { name: /review threads/i });
+    expect(within(dialog).getAllByText("Outdated").length).toBeGreaterThan(0);
+    await user.keyboard("{Escape}");
 
-    await user.click(screen.getByRole("button", { name: /mark reviewed/i }));
+    await user.click(within(screen.getByLabelText("Inspector")).getByRole("button", { name: /mark reviewed/i }));
 
-    expect(await screen.findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+    expect(await within(screen.getByLabelText("Inspector")).findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
     expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
 
     await user.selectOptions(screen.getByLabelText("Source"), "human");
     await user.selectOptions(screen.getByLabelText("State"), "outdated");
 
-    expect(within(queue).getByText("src-tauri/src/github.rs")).toBeInTheDocument();
-    expect(within(queue).queryByText("src/auth/session.ts")).not.toBeInTheDocument();
+    const queueSummary = screen.getByLabelText("Review queue summary");
+    expect(queueSummary).toHaveTextContent("1 matching filters");
+    await user.click(within(queueSummary).getByRole("button", { name: /browse threads/i }));
+    const filteredDialog = await screen.findByRole("dialog", { name: /review threads/i });
+    expect(within(filteredDialog).getByRole("button", { name: /src-tauri\/src\/github\.rs/i })).toBeInTheDocument();
+    expect(within(filteredDialog).queryByRole("button", { name: /src\/auth\/session\.ts/i })).not.toBeInTheDocument();
   });
 
   it("adds a Reply to the selected GitHub Review Thread", async () => {
@@ -1376,7 +1959,7 @@ describe("App shell", () => {
     await user.click(within(inspector).getByRole("button", { name: /^resolve/i }));
 
     expect(threadActionClient.resolve).toHaveBeenCalledWith("thread-1");
-    expect(await screen.findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+    expect(await within(inspector).findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: /^unresolve/i })).toBeInTheDocument();
     expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
 
@@ -1384,8 +1967,22 @@ describe("App shell", () => {
 
     expect(threadActionClient.unresolve).toHaveBeenCalledWith("thread-1");
     expect(await screen.findByText("Review Thread unresolved on GitHub.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
     expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
+  });
+
+  it("marks a Review Thread reviewed when resolving it from the keyboard", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+
+    render(<App threadActionClient={threadActionClient} />);
+
+    await user.keyboard("e");
+
+    expect(threadActionClient.resolve).toHaveBeenCalledWith("thread-1");
+    expect(await screen.findByText("Review Thread resolved on GitHub.")).toBeInTheDocument();
+    expect(JSON.parse(window.localStorage.getItem(reviewQueueStorageKey) ?? "{}").users["local-user"]["thread-1"].reviewed).toBe(true);
+    expect(within(screen.getByLabelText("Inspector")).getByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
   });
 
   it("surfaces retryable and terminal GitHub write failures clearly", async () => {
@@ -1420,30 +2017,31 @@ describe("App shell", () => {
   it("bulk marks selected Review Threads reviewed with undoable feedback", async () => {
     const user = userEvent.setup();
     render(<App threadActionClient={createThreadActionClient()} />);
-    const queue = screen.getByLabelText("Review thread queue");
+    const queueSummary = screen.getByLabelText("Review queue summary");
 
-    await user.click(screen.getByLabelText("Select src/auth/session.ts"));
-    await user.click(screen.getByLabelText("Select src/review/queue.ts"));
-    await user.click(within(queue).getByRole("button", { name: /^mark reviewed/i }));
+    await user.keyboard("a");
+    expect(queueSummary).toHaveTextContent("3 selected");
+    await user.click(within(queueSummary).getByRole("button", { name: /^bulk mark reviewed/i }));
 
-    expect(await within(queue).findByText("Marked 2 threads reviewed.")).toBeInTheDocument();
+    expect(await within(queueSummary).findByText("Marked 3 threads reviewed.")).toBeInTheDocument();
     expect(window.localStorage.getItem(reviewQueueStorageKey)).toContain('"reviewed":true');
 
-    await user.click(within(queue).getByRole("button", { name: /^undo/i }));
+    await user.click(within(queueSummary).getByRole("button", { name: /^undo/i }));
 
     const store = JSON.parse(window.localStorage.getItem(reviewQueueStorageKey) ?? "{}");
     expect(store.users["local-user"]["thread-1"].reviewed).toBe(false);
     expect(store.users["local-user"]["thread-2"].reviewed).toBe(false);
+    expect(store.users["local-user"]["thread-3"].reviewed).toBe(false);
   });
 
   it("cancels confirmed bulk GitHub actions before they execute", async () => {
     const user = userEvent.setup();
     const threadActionClient = createThreadActionClient();
     render(<App threadActionClient={threadActionClient} />);
-    const queue = screen.getByLabelText("Review thread queue");
+    const queueSummary = screen.getByLabelText("Review queue summary");
 
-    await user.click(screen.getByLabelText("Select src/auth/session.ts"));
-    await user.click(within(queue).getByRole("button", { name: /^resolve selected/i }));
+    await user.keyboard("a");
+    await user.click(within(queueSummary).getByRole("button", { name: /^resolve selected/i }));
     expect(screen.getByRole("dialog")).toHaveTextContent("Confirm bulk resolve");
 
     await user.click(screen.getByRole("button", { name: /^cancel/i }));
@@ -1467,20 +2065,21 @@ describe("App shell", () => {
       ),
     });
     render(<App threadActionClient={threadActionClient} />);
-    const queue = screen.getByLabelText("Review thread queue");
+    const queueSummary = screen.getByLabelText("Review queue summary");
 
-    await user.click(screen.getByLabelText("Select src/auth/session.ts"));
-    await user.click(screen.getByLabelText("Select src/review/queue.ts"));
-    await user.click(within(queue).getByRole("button", { name: /^resolve selected/i }));
+    await user.keyboard("a");
+    await user.click(within(queueSummary).getByRole("button", { name: /^resolve selected/i }));
     await user.click(screen.getByRole("button", { name: /^confirm/i }));
 
-    expect(await within(queue).findByText("1 succeeded, 1 failed.")).toBeInTheDocument();
-    expect(within(queue).getByText(/thread-2: GitHub could not resolve this thread right now/)).toBeInTheDocument();
-    await user.click(within(queue).getByRole("button", { name: /^retry failed/i }));
-    expect(screen.getByRole("dialog")).toHaveTextContent("1 selected Review Thread");
+    expect(await within(queueSummary).findByText("1 succeeded, 2 failed.")).toBeInTheDocument();
+    expect(within(queueSummary).getByText(/thread-2: GitHub could not resolve this thread right now/)).toBeInTheDocument();
+    expect(within(queueSummary).getByText(/thread-3: GitHub could not resolve this thread right now/)).toBeInTheDocument();
+    await user.click(within(queueSummary).getByRole("button", { name: /^retry failed/i }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("2 selected Review Threads");
 
     const store = JSON.parse(window.localStorage.getItem(reviewQueueStorageKey) ?? "{}");
     expect(store.users["local-user"]["thread-1"].reviewed).toBe(true);
     expect(store.users["local-user"]["thread-2"].reviewed).toBe(false);
+    expect(store.users["local-user"]["thread-3"].reviewed).toBe(false);
   });
 });

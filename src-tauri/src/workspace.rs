@@ -5,12 +5,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::{header::HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tauri::{AppHandle, Manager, State};
 
-use crate::auth::AuthState;
+use crate::auth::{AuthCommandError, AuthState};
 
 const WORKSPACE_FILE_NAME: &str = "workspace.json";
 const GITHUB_API_ROOT: &str = "https://api.github.com";
+const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
+const MAX_PATCH_CACHE_BYTES: usize = 3 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +70,86 @@ pub struct PullRequestSummary {
     is_draft: bool,
     updated_at: String,
     url: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestMetadata {
+    title: String,
+    description: Option<String>,
+    repository: String,
+    number: u64,
+    author_login: Option<String>,
+    base_branch: Option<String>,
+    head_branch: Option<String>,
+    mergeable: Option<String>,
+    merge_state_status: Option<String>,
+    review_decision: Option<String>,
+    url: String,
+    is_draft: bool,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedReviewThread {
+    id: String,
+    author_login: Option<String>,
+    file_path: String,
+    line: Option<u64>,
+    state: String,
+    body: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedFileSummary {
+    path: String,
+    additions: u64,
+    deletions: u64,
+    status: String,
+    patch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedCheckRun {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    url: Option<String>,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedRateLimit {
+    remaining: Option<u32>,
+    reset_epoch_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestDataResponse {
+    pull_request: PullRequestSummary,
+    metadata: PullRequestMetadata,
+    review_threads: Vec<CachedReviewThread>,
+    file_summaries: Vec<CachedFileSummary>,
+    checks: Vec<CachedCheckRun>,
+    rate_limit: CachedRateLimit,
+    fetched_at_epoch_ms: u64,
+    last_accessed_epoch_ms: u64,
+    pinned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestChecksResponse {
+    checks: Vec<CachedCheckRun>,
+    rate_limit: CachedRateLimit,
+    fetched_at_epoch_ms: u64,
 }
 
 impl PullRequestSummary {
@@ -197,29 +280,167 @@ pub async fn refresh_pull_requests(
         });
     }
 
-    let Some(token) = auth_state
-        .github_token()
-        .map_err(|error| WorkspaceCommandError::new("github-session-error", format!("{error:?}")))?
-    else {
-        return Ok(PullRequestRefreshResponse {
-            repositories,
-            pull_requests: Vec::new(),
-            status: RefreshStatus {
-                state: RefreshState::Failed,
-                message: Some("Sign in to refresh GitHub pull requests.".to_string()),
-                rate_limit_reset_epoch_seconds: None,
-                refreshed_at_epoch_seconds: None,
-            },
-        });
+    let token = match auth_state.github_token() {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            return Ok(failed_refresh_response(
+                repositories,
+                "Sign in to refresh GitHub pull requests.".to_string(),
+            ))
+        }
+        Err(error) => {
+            return Ok(failed_refresh_response(
+                repositories,
+                github_session_failure_message(&error),
+            ))
+        }
     };
 
-    fetch_open_pull_requests(
+    fetch_open_pull_requests(&workspace_state.http, &token, repositories, include_drafts).await
+}
+
+#[tauri::command]
+pub async fn fetch_pull_request_data(
+    auth_state: State<'_, AuthState>,
+    workspace_state: State<'_, WorkspaceState>,
+    repository: String,
+    number: u64,
+) -> Result<PullRequestDataResponse, WorkspaceCommandError> {
+    let repository = parse_repository_slug(&repository)?;
+    let token = match auth_state.github_token() {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            return Err(WorkspaceCommandError::new(
+                "github-session-required",
+                "Sign in to load Pull Request review data.",
+            ))
+        }
+        Err(error) => {
+            return Err(WorkspaceCommandError::new(
+                "github-session-error",
+                github_session_failure_message(&error),
+            ))
+        }
+    };
+
+    let detail =
+        fetch_pull_request_detail(&workspace_state.http, &token, &repository, number).await?;
+    let mut file_summaries =
+        fetch_pull_request_files(&workspace_state.http, &token, &repository, number).await?;
+    trim_cached_patches(&mut file_summaries);
+    let review_threads = fetch_review_threads(
         &workspace_state.http,
         &token,
-        repositories,
-        include_drafts,
+        &repository,
+        number,
+        &detail.updated_at,
     )
-    .await
+    .await?;
+    let checks = fetch_check_runs(&workspace_state.http, &token, &repository, &detail.head_sha)
+        .await
+        .unwrap_or_default();
+    let pull_request = PullRequestSummary {
+        repository: repository.slug.clone(),
+        number,
+        title: detail.title.clone(),
+        author_login: detail.author_login.clone(),
+        is_draft: detail.is_draft,
+        updated_at: detail.updated_at.clone(),
+        url: detail.url.clone(),
+    };
+    let metadata = PullRequestMetadata {
+        title: detail.title,
+        description: detail.description,
+        repository: repository.slug,
+        number,
+        author_login: detail.author_login,
+        base_branch: detail.base_branch,
+        head_branch: detail.head_branch,
+        mergeable: detail.mergeable,
+        merge_state_status: detail.merge_state_status,
+        review_decision: detail.review_decision,
+        url: detail.url,
+        is_draft: detail.is_draft,
+        updated_at: detail.updated_at,
+    };
+    let now = now_epoch_millis();
+
+    Ok(PullRequestDataResponse {
+        pull_request,
+        metadata,
+        review_threads,
+        file_summaries,
+        checks,
+        rate_limit: CachedRateLimit {
+            remaining: detail.rate_limit_remaining,
+            reset_epoch_seconds: detail.rate_limit_reset_epoch_seconds,
+        },
+        fetched_at_epoch_ms: now,
+        last_accessed_epoch_ms: now,
+        pinned: false,
+    })
+}
+
+#[tauri::command]
+pub async fn fetch_pull_request_checks(
+    auth_state: State<'_, AuthState>,
+    workspace_state: State<'_, WorkspaceState>,
+    repository: String,
+    number: u64,
+) -> Result<PullRequestChecksResponse, WorkspaceCommandError> {
+    let repository = parse_repository_slug(&repository)?;
+    let token = match auth_state.github_token() {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            return Err(WorkspaceCommandError::new(
+                "github-session-required",
+                "Sign in to refresh Pull Request checks.",
+            ))
+        }
+        Err(error) => {
+            return Err(WorkspaceCommandError::new(
+                "github-session-error",
+                github_session_failure_message(&error),
+            ))
+        }
+    };
+
+    let detail =
+        fetch_pull_request_detail(&workspace_state.http, &token, &repository, number).await?;
+    let checks =
+        fetch_check_runs(&workspace_state.http, &token, &repository, &detail.head_sha).await?;
+
+    Ok(PullRequestChecksResponse {
+        checks,
+        rate_limit: CachedRateLimit {
+            remaining: detail.rate_limit_remaining,
+            reset_epoch_seconds: detail.rate_limit_reset_epoch_seconds,
+        },
+        fetched_at_epoch_ms: now_epoch_millis(),
+    })
+}
+
+fn failed_refresh_response(
+    repositories: Vec<WorkspaceRepository>,
+    message: String,
+) -> PullRequestRefreshResponse {
+    PullRequestRefreshResponse {
+        repositories,
+        pull_requests: Vec::new(),
+        status: RefreshStatus {
+            state: RefreshState::Failed,
+            message: Some(message),
+            rate_limit_reset_epoch_seconds: None,
+            refreshed_at_epoch_seconds: None,
+        },
+    }
+}
+
+fn github_session_failure_message(error: &AuthCommandError) -> String {
+    format!(
+        "Narview could not read your GitHub token from OS secure storage. Sign out and sign in again if this keeps happening. {}",
+        error.message()
+    )
 }
 
 async fn fetch_open_pull_requests(
@@ -250,7 +471,9 @@ async fn fetch_open_pull_requests(
                 )
             })?;
 
-        if response.status() == StatusCode::FORBIDDEN && rate_limit_remaining(response.headers()) == Some(0) {
+        if response.status() == StatusCode::FORBIDDEN
+            && rate_limit_remaining(response.headers()) == Some(0)
+        {
             return Ok(PullRequestRefreshResponse {
                 repositories: repositories.clone(),
                 pull_requests: Vec::new(),
@@ -280,17 +503,22 @@ async fn fetch_open_pull_requests(
             });
         }
 
-        let github_pull_requests = response
-            .json::<Vec<GithubPullRequest>>()
-            .await
-            .map_err(|error| {
-                WorkspaceCommandError::new(
-                    "github-refresh-response-error",
-                    format!("Could not read GitHub pull requests: {error}"),
-                )
-            })?;
+        let github_pull_requests =
+            response
+                .json::<Vec<GithubPullRequest>>()
+                .await
+                .map_err(|error| {
+                    WorkspaceCommandError::new(
+                        "github-refresh-response-error",
+                        format!("Could not read GitHub pull requests: {error}"),
+                    )
+                })?;
 
-        pull_requests.extend(summarize_pull_requests(repository, github_pull_requests, include_drafts));
+        pull_requests.extend(summarize_pull_requests(
+            repository,
+            github_pull_requests,
+            include_drafts,
+        ));
     }
 
     pull_requests.sort_by(|left, right| {
@@ -312,6 +540,307 @@ async fn fetch_open_pull_requests(
             refreshed_at_epoch_seconds: Some(now_epoch_seconds()),
         },
     })
+}
+
+struct PullRequestDetail {
+    title: String,
+    description: Option<String>,
+    author_login: Option<String>,
+    base_branch: Option<String>,
+    head_branch: Option<String>,
+    head_sha: String,
+    mergeable: Option<String>,
+    merge_state_status: Option<String>,
+    review_decision: Option<String>,
+    url: String,
+    is_draft: bool,
+    updated_at: String,
+    rate_limit_remaining: Option<u32>,
+    rate_limit_reset_epoch_seconds: Option<u64>,
+}
+
+async fn fetch_pull_request_detail(
+    http: &reqwest::Client,
+    token: &str,
+    repository: &WorkspaceRepository,
+    number: u64,
+) -> Result<PullRequestDetail, WorkspaceCommandError> {
+    let url = format!(
+        "{GITHUB_API_ROOT}/repos/{}/{}/pulls/{number}",
+        repository.owner, repository.name
+    );
+    let response = github_get(http, token, url, "load Pull Request metadata").await?;
+    let rate_limit_remaining = rate_limit_remaining(response.headers());
+    let rate_limit_reset_epoch_seconds = rate_limit_reset(response.headers());
+    let detail = response
+        .json::<GithubPullRequestDetail>()
+        .await
+        .map_err(|error| {
+            WorkspaceCommandError::new(
+                "github-pr-detail-response-error",
+                format!("Could not read Pull Request metadata: {error}"),
+            )
+        })?;
+
+    Ok(PullRequestDetail {
+        title: detail.title,
+        description: detail.body,
+        author_login: detail.user.map(|user| user.login),
+        base_branch: Some(detail.base.git_ref),
+        head_branch: Some(detail.head.git_ref),
+        head_sha: detail.head.sha,
+        mergeable: detail.mergeable.map(|mergeable| {
+            if mergeable {
+                "MERGEABLE".to_string()
+            } else {
+                "CONFLICTING".to_string()
+            }
+        }),
+        merge_state_status: detail.mergeable_state.map(normalize_merge_state_status),
+        review_decision: None,
+        url: detail.html_url,
+        is_draft: detail.draft.unwrap_or(false),
+        updated_at: detail.updated_at,
+        rate_limit_remaining,
+        rate_limit_reset_epoch_seconds,
+    })
+}
+
+async fn fetch_pull_request_files(
+    http: &reqwest::Client,
+    token: &str,
+    repository: &WorkspaceRepository,
+    number: u64,
+) -> Result<Vec<CachedFileSummary>, WorkspaceCommandError> {
+    let mut files = Vec::new();
+
+    for page in 1..=20 {
+        let url = format!(
+            "{GITHUB_API_ROOT}/repos/{}/{}/pulls/{number}/files?per_page=100&page={page}",
+            repository.owner, repository.name
+        );
+        let response = github_get(http, token, url, "load Pull Request files").await?;
+        let page_files = response
+            .json::<Vec<GithubPullRequestFile>>()
+            .await
+            .map_err(|error| {
+                WorkspaceCommandError::new(
+                    "github-pr-files-response-error",
+                    format!("Could not read Pull Request files: {error}"),
+                )
+            })?;
+        let page_len = page_files.len();
+
+        files.extend(page_files.into_iter().map(|file| CachedFileSummary {
+            path: file.filename,
+            additions: file.additions,
+            deletions: file.deletions,
+            status: normalize_file_status(&file.status, file.patch.is_none()),
+            patch: file.patch,
+        }));
+
+        if page_len < 100 {
+            break;
+        }
+    }
+
+    Ok(files)
+}
+
+fn trim_cached_patches(files: &mut [CachedFileSummary]) {
+    let mut used = 0;
+
+    for file in files {
+        if let Some(patch) = file.patch.as_ref() {
+            used += patch.len();
+            if used > MAX_PATCH_CACHE_BYTES {
+                file.patch = None;
+            }
+        }
+    }
+}
+
+async fn fetch_review_threads(
+    http: &reqwest::Client,
+    token: &str,
+    repository: &WorkspaceRepository,
+    number: u64,
+    fallback_updated_at: &str,
+) -> Result<Vec<CachedReviewThread>, WorkspaceCommandError> {
+    let mut threads = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let body = json!({
+            "query": "query NarviewReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewDecision reviewThreads(first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line originalLine comments(first: 1) { nodes { author { login } body updatedAt } } } } } } }",
+            "variables": {
+                "owner": repository.owner,
+                "name": repository.name,
+                "number": number as i64,
+                "cursor": cursor.clone(),
+            }
+        });
+        let response = http
+            .post(GITHUB_GRAPHQL_URL)
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "Narview")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| {
+                WorkspaceCommandError::new(
+                    "github-review-threads-network-error",
+                    format!("Could not load Pull Request review threads: {error}"),
+                )
+            })?;
+
+        if !response.status().is_success() {
+            return Err(WorkspaceCommandError::new(
+                "github-review-threads-error",
+                format!(
+                    "GitHub rejected Pull Request review thread loading with HTTP {}.",
+                    response.status()
+                ),
+            ));
+        }
+
+        let payload = response.json::<GraphQlResponse>().await.map_err(|error| {
+            WorkspaceCommandError::new(
+                "github-review-threads-response-error",
+                format!("Could not read Pull Request review threads: {error}"),
+            )
+        })?;
+
+        if let Some(errors) = payload.errors {
+            if !errors.is_empty() {
+                return Err(WorkspaceCommandError::new(
+                    "github-review-threads-graphql-error",
+                    errors
+                        .into_iter()
+                        .map(|error| error.message)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ));
+            }
+        }
+
+        let Some(connection) = payload
+            .data
+            .and_then(|data| data.repository)
+            .and_then(|repository| repository.pull_request)
+            .map(|pull_request| pull_request.review_threads)
+        else {
+            return Ok(threads);
+        };
+
+        threads.extend(connection.nodes.into_iter().map(|thread| {
+            let first_comment = thread.comments.nodes.into_iter().next();
+            CachedReviewThread {
+                id: thread.id,
+                author_login: first_comment
+                    .as_ref()
+                    .and_then(|comment| comment.author.as_ref())
+                    .map(|author| author.login.clone()),
+                file_path: thread.path,
+                line: thread.line.or(thread.original_line),
+                state: if thread.is_resolved {
+                    "resolved".to_string()
+                } else if thread.is_outdated {
+                    "outdated".to_string()
+                } else {
+                    "unresolved".to_string()
+                },
+                body: first_comment
+                    .as_ref()
+                    .map(|comment| comment.body.clone())
+                    .unwrap_or_else(|| "Review thread has no visible comment body.".to_string()),
+                updated_at: first_comment
+                    .and_then(|comment| comment.updated_at)
+                    .unwrap_or_else(|| fallback_updated_at.to_string()),
+            }
+        }));
+
+        if !connection.page_info.has_next_page {
+            break;
+        }
+
+        cursor = connection.page_info.end_cursor;
+    }
+
+    Ok(threads)
+}
+
+async fn fetch_check_runs(
+    http: &reqwest::Client,
+    token: &str,
+    repository: &WorkspaceRepository,
+    head_sha: &str,
+) -> Result<Vec<CachedCheckRun>, WorkspaceCommandError> {
+    let url = format!(
+        "{GITHUB_API_ROOT}/repos/{}/{}/commits/{head_sha}/check-runs?per_page=100",
+        repository.owner, repository.name
+    );
+    let response = github_get(http, token, url, "load Pull Request checks").await?;
+    let payload = response
+        .json::<GithubCheckRunsResponse>()
+        .await
+        .map_err(|error| {
+            WorkspaceCommandError::new(
+                "github-checks-response-error",
+                format!("Could not read Pull Request checks: {error}"),
+            )
+        })?;
+
+    Ok(payload
+        .check_runs
+        .into_iter()
+        .map(|check| CachedCheckRun {
+            name: check.name,
+            status: normalize_check_status(&check.status),
+            conclusion: check
+                .conclusion
+                .map(|conclusion| conclusion.replace('_', "-")),
+            url: check.html_url,
+            started_at: check.started_at,
+            completed_at: check.completed_at,
+        })
+        .collect())
+}
+
+async fn github_get(
+    http: &reqwest::Client,
+    token: &str,
+    url: String,
+    operation: &str,
+) -> Result<reqwest::Response, WorkspaceCommandError> {
+    let response = http
+        .get(url)
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "Narview")
+        .send()
+        .await
+        .map_err(|error| {
+            WorkspaceCommandError::new(
+                "github-network-error",
+                format!("Could not {operation}: {error}"),
+            )
+        })?;
+
+    if !response.status().is_success() {
+        return Err(WorkspaceCommandError::new(
+            "github-request-error",
+            format!(
+                "GitHub rejected {operation} with HTTP {}.",
+                response.status()
+            ),
+        ));
+    }
+
+    Ok(response)
 }
 
 fn summarize_pull_requests(
@@ -347,6 +876,165 @@ struct GithubPullRequest {
 #[derive(Debug, Deserialize)]
 struct GithubUser {
     login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubPullRequestDetail {
+    title: String,
+    body: Option<String>,
+    draft: Option<bool>,
+    html_url: String,
+    updated_at: String,
+    user: Option<GithubUser>,
+    base: GithubBranchRef,
+    head: GithubHeadRef,
+    mergeable: Option<bool>,
+    mergeable_state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubBranchRef {
+    #[serde(rename = "ref")]
+    git_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubHeadRef {
+    #[serde(rename = "ref")]
+    git_ref: String,
+    sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubPullRequestFile {
+    filename: String,
+    status: String,
+    additions: u64,
+    deletions: u64,
+    patch: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQlResponse {
+    data: Option<GraphQlData>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQlError {
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlData {
+    repository: Option<GraphQlRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlRepository {
+    pull_request: Option<GraphQlPullRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlPullRequest {
+    review_threads: GraphQlReviewThreadConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlReviewThreadConnection {
+    page_info: GraphQlPageInfo,
+    nodes: Vec<GraphQlReviewThread>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlPageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlReviewThread {
+    id: String,
+    is_resolved: bool,
+    is_outdated: bool,
+    path: String,
+    line: Option<u64>,
+    original_line: Option<u64>,
+    comments: GraphQlReviewThreadCommentConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlReviewThreadCommentConnection {
+    nodes: Vec<GraphQlReviewThreadComment>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlReviewThreadComment {
+    author: Option<GraphQlAuthor>,
+    body: String,
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQlAuthor {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCheckRunsResponse {
+    check_runs: Vec<GithubCheckRun>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCheckRun {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    html_url: Option<String>,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+}
+
+fn normalize_file_status(status: &str, missing_patch: bool) -> String {
+    if missing_patch && matches!(status, "added" | "modified" | "changed") {
+        return "binary".to_string();
+    }
+
+    match status {
+        "added" | "removed" | "renamed" => status.to_string(),
+        _ => "modified".to_string(),
+    }
+}
+
+fn normalize_merge_state_status(status: String) -> String {
+    match status.as_str() {
+        "behind" => "BEHIND",
+        "blocked" => "BLOCKED",
+        "clean" => "CLEAN",
+        "dirty" => "DIRTY",
+        "draft" => "DRAFT",
+        "has_hooks" => "HAS_HOOKS",
+        "unstable" => "UNSTABLE",
+        _ => "UNKNOWN",
+    }
+    .to_string()
+}
+
+fn normalize_check_status(status: &str) -> String {
+    match status {
+        "completed" => "completed",
+        "queued" | "requested" | "waiting" | "pending" => "queued",
+        _ => "in-progress",
+    }
+    .to_string()
 }
 
 fn workspace_file_path(app: &AppHandle) -> Result<PathBuf, WorkspaceCommandError> {
@@ -421,9 +1109,9 @@ fn parse_repository_slug(value: &str) -> Result<WorkspaceRepository, WorkspaceCo
 
 fn valid_repository_part(value: &str) -> bool {
     !value.is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
 }
 
 fn sort_repositories(repositories: &mut [WorkspaceRepository]) {
@@ -448,6 +1136,13 @@ fn now_epoch_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn now_epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
 
