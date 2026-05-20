@@ -39,7 +39,7 @@ assert(workflow.includes("tauri-apps/tauri-action@v0"), "Release workflow must u
 assert(workflow.includes("ubuntu-22.04"), "Release workflow must build Linux AppImage on Ubuntu 22.04.");
 assert(workflow.includes("macos-latest"), "Release workflow must build macOS artifacts.");
 assert(workflow.includes("aarch64-apple-darwin"), "Release workflow must build Apple Silicon macOS artifacts.");
-assert(workflow.includes("x86_64-apple-darwin"), "Release workflow must build Intel macOS artifacts.");
+assert(!workflow.includes("x86_64-apple-darwin"), "Release workflow should not build Intel macOS artifacts for v1.");
 assert(!workflow.includes("TAURI_SIGNING_PRIVATE_KEY"), "Release workflow must not require updater signing secrets yet.");
 assert(!workflow.includes("APPLE_CERTIFICATE"), "Release workflow must not require macOS signing secrets yet.");
 assert(!workflow.includes("APPLE_API_KEY_PATH"), "Release workflow must not require macOS notarization secrets yet.");

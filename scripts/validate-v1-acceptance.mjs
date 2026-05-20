@@ -70,7 +70,7 @@ const expectedSmokeCoverage = [
   "adds a Reply to the selected GitHub Review Thread",
   "resolves and unresolves Review Threads while preserving local Reviewed state",
   "reports partial failures for confirmed bulk GitHub actions and applies local side effects only to successes",
-  "loads hunks, expands context, and fetches the whole file on demand",
+  "loads cached hunks, expands context, and fetches the whole file on demand",
   "restores the last active Pull Request after app restart",
   "updates Review Session state as the reviewer navigates threads",
   "checks for desktop updates from the updater panel",

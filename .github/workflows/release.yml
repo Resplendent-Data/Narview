@@ -31,10 +31,6 @@ jobs:
             platform: macos-latest
             args: "--target aarch64-apple-darwin"
             artifactPlatform: macos
-          - label: macOS Intel
-            platform: macos-latest
-            args: "--target x86_64-apple-darwin"
-            artifactPlatform: macos
           - label: Linux x64 AppImage
             platform: ubuntu-22.04
             args: ""
@@ -78,7 +74,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.artifactPlatform == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.artifactPlatform == 'macos' && 'aarch64-apple-darwin' || '' }}
 
       - name: Cache Rust builds
         uses: swatinem/rust-cache@v2
