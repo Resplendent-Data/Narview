@@ -105,7 +105,32 @@ jobs:
         with:
           tagName: ${{ env.TAG_NAME }}
           releaseName: Narview ${{ env.TAG_NAME }}
-          releaseBody: Installers for Narview ${{ env.TAG_NAME }}. Updater signing metadata can be enabled when release signing is configured.
+          releaseBody: |
+            Installers for Narview ${{ env.TAG_NAME }}.
+
+            ## macOS
+
+            These release-candidate builds are ad-hoc signed but not Apple Developer ID notarized yet. If macOS says Narview is damaged or cannot be verified:
+
+            1. Drag Narview.app to Applications.
+            2. Run:
+
+               ```bash
+               xattr -cr "/Applications/Narview.app"
+               ```
+
+            3. Open Narview again.
+
+            Fully normal macOS first-open behavior requires Apple Developer ID signing and notarization secrets.
+
+            ## Linux
+
+            Download the AppImage, make it executable, then open it:
+
+            ```bash
+            chmod +x Narview_*_amd64.AppImage
+            ./Narview_*_amd64.AppImage
+            ```
           releaseDraft: false
           prerelease: ${{ contains(env.TAG_NAME, '-') }}
           args: ${{ matrix.args }}
