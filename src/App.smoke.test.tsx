@@ -423,6 +423,7 @@ function createReviewTarget(overrides: Partial<ReviewTarget> & Pick<ReviewTarget
     priority: "normal",
     nodeIds: [overrides.id],
     edgeIds: [],
+    reviewThreadIds: [],
     filePath: overrides.paths.length === 1 ? overrides.paths[0] : null,
     modulePath: overrides.paths[0]?.split("/").slice(0, -1).join("/") || "src",
     fallback: false,
@@ -1466,6 +1467,19 @@ describe("App shell", () => {
     expect(within(screen.getByLabelText("Review Work")).getByText("0/5")).toBeInTheDocument();
   });
 
+  it("shows attached Review Threads in target context with origin and outdated state", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("Review Target review threads")).toHaveTextContent("CodeRabbit"));
+    expect(screen.getByLabelText("Review Target review threads")).toHaveTextContent("Unresolved");
+
+    await user.click(within(screen.getByLabelText("Review Path")).getByRole("button", { name: /src-tauri\/src\/github\.rs/i }));
+
+    await waitFor(() => expect(screen.getByLabelText("Review Target review threads")).toHaveTextContent("Outdated"));
+    expect(screen.getByLabelText("Review Target review threads")).toHaveTextContent("Human");
+  });
+
   it("loads non-draft Pull Requests by default and includes drafts when filtered", async () => {
     const user = userEvent.setup();
     const workspaceClient = createWorkspaceClient({
@@ -1532,12 +1546,12 @@ describe("App shell", () => {
     );
 
     await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(1));
-    expect(within(screen.getByLabelText("Inspector")).getByText("Unresolved")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Inspector")).getAllByText("Unresolved").length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /refresh current pull request/i }));
 
     await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(2));
-    expect(within(screen.getByLabelText("Inspector")).getByText("Resolved")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Inspector")).getAllByText("Resolved").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Refreshed GitHub Pull Request review data/).length).toBeGreaterThan(0);
   });
 
@@ -1582,7 +1596,7 @@ describe("App shell", () => {
     await user.keyboard("{Control>}r{/Control}");
 
     await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(2));
-    expect(within(screen.getByLabelText("Inspector")).getByText("Resolved")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Inspector")).getAllByText("Resolved").length).toBeGreaterThan(0);
   });
 
   it("refreshes the whole Pull Request after pending checks finish", async () => {
@@ -1677,7 +1691,7 @@ describe("App shell", () => {
     await waitFor(() => expect(workspaceClient.fetchPullRequestChecks).toHaveBeenCalledWith(readyPullRequest));
     await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(liveChecks).toHaveTextContent("3/3 passing"));
-    expect(within(screen.getByLabelText("Inspector")).getByText("Resolved")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Inspector")).getAllByText("Resolved").length).toBeGreaterThan(0);
   });
 
   it("switches between Pull Requests without clone assumptions", async () => {
@@ -2350,6 +2364,136 @@ describe("App shell", () => {
     expect(grouped?.reasoning).toEqual(expect.arrayContaining([expect.stringContaining("deterministic test naming")]));
   });
 
+  it("attaches line Review Threads to the nearest Attention Node and keeps CodeRabbit as target context", () => {
+    const nearNode = createSyntheticAttentionNode({
+      id: "src/session.ts:symbol:rotateSession",
+      filePath: "src/session.ts",
+      label: "rotateSession",
+      lineStart: 40,
+      lineEnd: 52,
+    });
+    const distantNode = createSyntheticAttentionNode({
+      id: "src/session.ts:symbol:legacySession",
+      filePath: "src/session.ts",
+      label: "legacySession",
+      lineStart: 500,
+      lineEnd: 520,
+    });
+    const currentData: CachedPullRequestData = {
+      ...createOverviewFixture(),
+      fileSummaries: [{ path: "src/session.ts", additions: 6, deletions: 2, status: "modified" }],
+      reviewThreads: [
+        {
+          id: "thread-human-near",
+          authorLogin: "monalisa",
+          filePath: "src/session.ts",
+          line: 44,
+          state: "unresolved",
+          body: "Please verify the rotation branch.",
+          updatedAt: "2026-05-18T12:00:00Z",
+        },
+        {
+          id: "thread-coderabbit-near",
+          authorLogin: "coderabbitai",
+          filePath: "src/session.ts",
+          line: 47,
+          state: "unresolved",
+          body: "Potential stale token reuse.",
+          updatedAt: "2026-05-18T12:01:00Z",
+        },
+      ],
+    };
+    const index = createReviewTargetIndex([distantNode, nearNode]);
+    const attentionMap = buildAttentionMapPresentation(index, currentData);
+    const targets = buildReviewTargets({ analysisIndex: index, attentionMap, currentData });
+    const nearTarget = targets.find((target) => target.nodeIds.includes(nearNode.id));
+
+    expect(attentionMap.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `review-thread:thread-human-near:${nearNode.id}`,
+          to: nearNode.id,
+        }),
+      ]),
+    );
+    expect(nearTarget?.reviewThreadIds).toEqual(expect.arrayContaining(["thread-human-near", "thread-coderabbit-near"]));
+    expect(targets.some((target) => target.kind === "thread-group" && target.reviewThreadIds.includes("thread-coderabbit-near"))).toBe(false);
+  });
+
+  it("creates file-level Review Targets for file comments, unmapped threads, and outdated context", () => {
+    const changedNode = createSyntheticAttentionNode({
+      id: "src/session.ts:symbol:rotateSession",
+      filePath: "src/session.ts",
+      label: "rotateSession",
+      lineStart: 10,
+      lineEnd: 20,
+    });
+    const currentData: CachedPullRequestData = {
+      ...createOverviewFixture(),
+      fileSummaries: [
+        { path: "src/session.ts", additions: 10, deletions: 2, status: "modified" },
+        { path: "docs/review.md", additions: 3, deletions: 0, status: "modified" },
+      ],
+      reviewThreads: [
+        {
+          id: "thread-file",
+          authorLogin: "monalisa",
+          filePath: "src/session.ts",
+          line: null,
+          state: "unresolved",
+          body: "Whole-file review: confirm the session lifecycle.",
+          updatedAt: "2026-05-18T12:00:00Z",
+        },
+        {
+          id: "thread-outdated-unmapped",
+          authorLogin: "hubot",
+          filePath: "docs/review.md",
+          line: 12,
+          state: "outdated",
+          body: "Older docs comment should remain visible.",
+          updatedAt: "2026-05-18T12:01:00Z",
+        },
+      ],
+    };
+    const index = createReviewTargetIndex([changedNode]);
+    const targets = buildReviewTargets({
+      analysisIndex: index,
+      attentionMap: buildAttentionMapPresentation(index, currentData),
+      currentData,
+    });
+    const fileThreadTarget = targets.find((target) => target.reviewThreadIds.includes("thread-file"));
+    const outdatedTarget = targets.find((target) => target.reviewThreadIds.includes("thread-outdated-unmapped"));
+
+    expect(fileThreadTarget).toMatchObject({
+      kind: "thread-group",
+      title: "src/session.ts review threads",
+      paths: ["src/session.ts"],
+      size: expect.objectContaining({ reviewThreads: 1 }),
+    });
+    expect(outdatedTarget).toMatchObject({
+      kind: "thread-group",
+      title: "docs/review.md review threads",
+      paths: ["docs/review.md"],
+    });
+
+    const inspector = buildReviewTargetInspectorModel({
+      target: outdatedTarget ?? null,
+      analysisIndex: index,
+      pullRequest: readyPullRequest,
+      files: currentData.fileSummaries,
+      fileContents: [],
+      reviewThreads: currentData.reviewThreads,
+    });
+
+    expect(inspector?.reviewThreads).toEqual([
+      expect.objectContaining({
+        id: "thread-outdated-unmapped",
+        state: "outdated",
+      }),
+    ]);
+    expect(inspector?.reasons).toEqual(expect.arrayContaining([expect.stringContaining("could not be mapped")]));
+  });
+
   it("groups same-symbol hunk splits and splits oversized weakly related groups", () => {
     const hunkOne = createSyntheticAttentionNode({
       id: "src/session.ts:hunk-1",
@@ -2411,10 +2555,11 @@ describe("App shell", () => {
       reason: "Synthetic tight same-module relationship.",
     }));
     const oversizedIndex = createReviewTargetIndex(oversizedNodes, oversizedRelationships);
+    const splitCurrentData = { ...createOverviewFixture(), reviewThreads: [] };
     const splitTargets = buildReviewTargets({
       analysisIndex: oversizedIndex,
-      attentionMap: buildAttentionMapPresentation(oversizedIndex, createOverviewFixture()),
-      currentData: createOverviewFixture(),
+      attentionMap: buildAttentionMapPresentation(oversizedIndex, splitCurrentData),
+      currentData: splitCurrentData,
       maxNodesPerTarget: 4,
     });
 
@@ -2516,15 +2661,16 @@ describe("App shell", () => {
     };
     const firstIndex = createReviewTargetIndex([firstNode, secondNode], [relationship]);
     const secondIndex = createReviewTargetIndex([secondNode, firstNode], [relationship]);
+    const currentData = { ...createOverviewFixture(), reviewThreads: [] };
     const firstTargets = buildReviewTargets({
       analysisIndex: firstIndex,
-      attentionMap: buildAttentionMapPresentation(firstIndex, createOverviewFixture()),
-      currentData: createOverviewFixture(),
+      attentionMap: buildAttentionMapPresentation(firstIndex, currentData),
+      currentData,
     });
     const secondTargets = buildReviewTargets({
       analysisIndex: secondIndex,
-      attentionMap: buildAttentionMapPresentation(secondIndex, createOverviewFixture()),
-      currentData: createOverviewFixture(),
+      attentionMap: buildAttentionMapPresentation(secondIndex, currentData),
+      currentData,
     });
 
     expect(firstTargets[0].stableKey).toBe(secondTargets[0].stableKey);

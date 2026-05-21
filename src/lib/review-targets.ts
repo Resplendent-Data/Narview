@@ -5,10 +5,11 @@ import type {
   AttentionNode,
   AttentionRelationship,
 } from "./analysis-index";
-import type { CachedPullRequestData } from "./pr-cache";
+import type { CachedPullRequestData, CachedReviewThread } from "./pr-cache";
 import type { HotspotScore } from "./review-overview";
+import { attachReviewThreadsToNodes, type ReviewThreadAttachment } from "./review-thread-attachments";
 
-export type ReviewTargetKind = "node-group" | "generated-cluster";
+export type ReviewTargetKind = "node-group" | "generated-cluster" | "thread-group";
 export type ReviewTargetPriority = "high" | "normal" | "low";
 
 export interface ReviewTarget {
@@ -20,6 +21,7 @@ export interface ReviewTarget {
   priority: ReviewTargetPriority;
   nodeIds: string[];
   edgeIds: string[];
+  reviewThreadIds: string[];
   paths: string[];
   filePath: string | null;
   modulePath: string;
@@ -58,16 +60,18 @@ export function buildReviewTargets(input: BuildReviewTargetsInput): ReviewTarget
   const maxNodesPerTarget = input.maxNodesPerTarget ?? defaultMaxNodesPerTarget;
   const reviewNodes = input.analysisIndex.nodes.filter((node) => node.reviewTarget);
   const nodeById = new Map(reviewNodes.map((node) => [node.id, node]));
+  const threadAttachments = attachReviewThreadsToNodes(input.currentData.reviewThreads, reviewNodes);
   const edges = [
     ...buildRelationshipGroupEdges(input.analysisIndex.relationships, nodeById),
     ...buildNearbyGroupEdges(reviewNodes),
   ];
   const componentTargets = buildConnectedComponents(reviewNodes, edges).flatMap((component) =>
-    splitComponentIntoTargets(component, edges, input.currentData, maxNodesPerTarget),
+    splitComponentIntoTargets(component, edges, threadAttachments, maxNodesPerTarget),
   );
   const clusterTargets = buildGeneratedClusterTargets(input.attentionMap, input.hotspots ?? []);
+  const threadGroupTargets = buildThreadGroupTargets(input.currentData, threadAttachments);
 
-  return [...componentTargets, ...clusterTargets].sort(compareReviewTargets);
+  return [...componentTargets, ...clusterTargets, ...threadGroupTargets].sort(compareReviewTargets);
 }
 
 function buildRelationshipGroupEdges(relationships: AttentionRelationship[], nodeById: Map<string, AttentionNode>) {
@@ -176,16 +180,16 @@ function buildConnectedComponents(nodes: AttentionNode[], edges: GroupEdge[]) {
 function splitComponentIntoTargets(
   component: AttentionNode[],
   allEdges: GroupEdge[],
-  currentData: CachedPullRequestData,
+  threadAttachments: ReviewThreadAttachment[],
   maxNodesPerTarget: number,
 ) {
   if (component.length <= maxNodesPerTarget) {
-    return [createNodeGroupTarget(component, allEdges, currentData)];
+    return [createNodeGroupTarget(component, allEdges, threadAttachments)];
   }
 
   const chunks = chunkOversizedComponent(component, maxNodesPerTarget);
   return chunks.map((chunk) =>
-    createNodeGroupTarget(chunk, allEdges, currentData, [
+    createNodeGroupTarget(chunk, allEdges, threadAttachments, [
       `Split from an oversized ${component.length}-node relationship group to keep one logic question per target.`,
     ]),
   );
@@ -210,7 +214,7 @@ function chunkOversizedComponent(component: AttentionNode[], maxNodesPerTarget: 
 function createNodeGroupTarget(
   nodes: AttentionNode[],
   allEdges: GroupEdge[],
-  currentData: CachedPullRequestData,
+  threadAttachments: ReviewThreadAttachment[],
   extraReasons: string[] = [],
 ): ReviewTarget {
   const sortedNodes = [...nodes].sort(compareAttentionNodes);
@@ -219,7 +223,8 @@ function createNodeGroupTarget(
   const paths = uniqueSorted(sortedNodes.map((node) => node.filePath));
   const edgeReasons = allEdges.filter((edge) => nodeIdSet.has(edge.from) && nodeIdSet.has(edge.to));
   const stableKey = `nodes:${nodeIds.slice().sort().join("|")}`;
-  const reviewThreads = countThreadsForPaths(currentData, paths);
+  const attachedThreads = getLineThreadsForNodeSet(threadAttachments, nodeIdSet);
+  const reviewThreads = countUnresolvedThreads(attachedThreads);
   const fallback = sortedNodes.some((node) => node.kind === "hunk" || node.kind === "file-fallback");
 
   return {
@@ -231,6 +236,7 @@ function createNodeGroupTarget(
     priority: reviewThreads > 0 ? "high" : fallback ? "normal" : "normal",
     nodeIds,
     edgeIds: edgeReasons.map((edge) => edge.id).sort(),
+    reviewThreadIds: attachedThreads.map((thread) => thread.id).sort(),
     paths,
     filePath: paths.length === 1 ? paths[0] : null,
     modulePath: getCommonDirectory(paths),
@@ -281,6 +287,7 @@ function buildGeneratedClusterTargets(attentionMap: AttentionMapPresentation, ho
         priority: "low" as const,
         nodeIds: [node.id],
         edgeIds: [],
+        reviewThreadIds: [],
         paths,
         filePath: null,
         modulePath: "Generated Cluster",
@@ -299,6 +306,62 @@ function buildGeneratedClusterTargets(attentionMap: AttentionMapPresentation, ho
       },
     ];
   });
+}
+
+function buildThreadGroupTargets(currentData: CachedPullRequestData, threadAttachments: ReviewThreadAttachment[]) {
+  const filesByPath = new Map(currentData.fileSummaries.map((file) => [file.path, file]));
+  const grouped = new Map<string, ReviewThreadAttachment[]>();
+
+  for (const attachment of threadAttachments) {
+    if (attachment.kind === "line-node") {
+      continue;
+    }
+
+    grouped.set(attachment.filePath, [...(grouped.get(attachment.filePath) ?? []), attachment]);
+  }
+
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([path, attachments]) => {
+      const file = filesByPath.get(path) ?? null;
+      const threads = attachments.map((attachment) => attachment.thread).sort(compareThreads);
+      const stableKey = `threads:${path}`;
+      const unresolvedThreads = countUnresolvedThreads(threads);
+      const fileLevelCount = attachments.filter((attachment) => attachment.kind === "file").length;
+      const unmappedCount = attachments.length - fileLevelCount;
+
+      return {
+        id: `target:${stableHash(stableKey)}`,
+        stableKey,
+        fingerprint: buildThreadGroupFingerprint(stableKey, threads),
+        kind: "thread-group" as const,
+        title: `${path} review threads`,
+        priority: unresolvedThreads > 0 ? ("high" as const) : ("normal" as const),
+        nodeIds: [],
+        edgeIds: [],
+        reviewThreadIds: threads.map((thread) => thread.id).sort(),
+        paths: [path],
+        filePath: path,
+        modulePath: getCommonDirectory([path]),
+        fallback: true,
+        reasoning: [
+          fileLevelCount > 0
+            ? `${fileLevelCount} file-level Review Thread${fileLevelCount === 1 ? "" : "s"} without a line anchor.`
+            : "",
+          unmappedCount > 0
+            ? `${unmappedCount} Review Thread${unmappedCount === 1 ? "" : "s"} could not be mapped to a changed Attention Node.`
+            : "",
+          "Kept as a file-level Review Target so the thread stays visible in the Attention Map workflow.",
+        ].filter((reason): reason is string => Boolean(reason)),
+        size: {
+          nodes: 0,
+          files: 1,
+          changedLines: (file?.additions ?? 0) + (file?.deletions ?? 0),
+          relationships: 0,
+          reviewThreads: unresolvedThreads,
+        },
+      } satisfies ReviewTarget;
+    });
 }
 
 function isStrongRelationship(relationship: AttentionRelationship) {
@@ -340,9 +403,15 @@ function getHunkContext(label: string) {
   return (match?.[1] ?? label).trim().toLowerCase();
 }
 
-function countThreadsForPaths(currentData: CachedPullRequestData, paths: string[]) {
-  const pathSet = new Set(paths);
-  return currentData.reviewThreads.filter((thread) => pathSet.has(thread.filePath) && thread.state === "unresolved").length;
+function getLineThreadsForNodeSet(threadAttachments: ReviewThreadAttachment[], nodeIdSet: Set<string>) {
+  return threadAttachments
+    .filter((attachment) => attachment.kind === "line-node" && attachment.nodeId !== null && nodeIdSet.has(attachment.nodeId))
+    .map((attachment) => attachment.thread)
+    .sort(compareThreads);
+}
+
+function countUnresolvedThreads(threads: CachedReviewThread[]) {
+  return threads.filter((thread) => thread.state === "unresolved").length;
 }
 
 function getTargetTitle(nodes: AttentionNode[], paths: string[]) {
@@ -416,6 +485,29 @@ function buildNodeGroupFingerprint(stableKey: string, nodes: AttentionNode[], ed
   );
 }
 
+function buildThreadGroupFingerprint(stableKey: string, threads: CachedReviewThread[]) {
+  return stableHash(
+    JSON.stringify({
+      stableKey,
+      threads: threads.map((thread) => ({
+        id: thread.id,
+        authorLogin: thread.authorLogin,
+        filePath: thread.filePath,
+        line: thread.line,
+        state: thread.state,
+        body: thread.body,
+        updatedAt: thread.updatedAt,
+        comments: thread.comments?.map((comment) => ({
+          id: comment.id,
+          authorLogin: comment.authorLogin,
+          body: comment.body,
+          updatedAt: comment.updatedAt,
+        })),
+      })),
+    }),
+  );
+}
+
 function samePathSet(left: string[], right: string[]) {
   return left.length === right.length && uniqueSorted(left).join("|") === uniqueSorted(right).join("|");
 }
@@ -447,6 +539,14 @@ function compareAttentionNodes(left: AttentionNode, right: AttentionNode) {
   return (
     left.filePath.localeCompare(right.filePath) ||
     (left.lineStart ?? Number.MAX_SAFE_INTEGER) - (right.lineStart ?? Number.MAX_SAFE_INTEGER) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function compareThreads(left: CachedReviewThread, right: CachedReviewThread) {
+  return (
+    left.filePath.localeCompare(right.filePath) ||
+    (left.line ?? Number.MAX_SAFE_INTEGER) - (right.line ?? Number.MAX_SAFE_INTEGER) ||
     left.id.localeCompare(right.id)
   );
 }

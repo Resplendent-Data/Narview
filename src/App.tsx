@@ -120,6 +120,7 @@ import {
   clearReviewQueueStore,
   defaultReviewQueueFilters,
   filterReviewThreads,
+  getReviewThreadOrigin,
   readReviewQueueStore,
   setReviewThreadReviewed,
   syncReviewThreads,
@@ -917,6 +918,54 @@ function ReviewTargetInspector({
               {reviewed ? "Mark target active" : "Mark target reviewed"}
               <Kbd>Path</Kbd>
             </Button>
+          </div>
+
+          <div className="space-y-2" aria-label="Review Target review threads">
+            <h3 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Review Threads</h3>
+            {model.reviewThreads.length > 0 ? (
+              <div className="space-y-2">
+                {model.reviewThreads.slice(0, 4).map((thread) => {
+                  const origin = getReviewThreadOrigin(thread);
+                  return (
+                    <div
+                      className={cn(
+                        "rounded-md border border-border bg-background p-2 text-xs",
+                        thread.state === "outdated" && "border-amber-500/50 bg-amber-500/10",
+                      )}
+                      key={thread.id}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate font-semibold">{getThreadTitle(thread.body)}</p>
+                          <p className="mt-1 truncate font-mono text-muted-foreground">
+                            {thread.filePath}
+                            {thread.line !== null ? `:${thread.line}` : " · file"}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                          <Badge variant={origin === "coderabbit" ? "warning" : "info"}>
+                            {origin === "coderabbit" ? "CodeRabbit" : "Human"}
+                          </Badge>
+                          <Badge variant={thread.state === "outdated" ? "warning" : "muted"}>
+                            {getThreadStateLabel(thread.state)}
+                          </Badge>
+                        </div>
+                      </div>
+                      <p className="mt-2 line-clamp-2 text-muted-foreground">{stripMarkdownPreview(thread.body, 160)}</p>
+                    </div>
+                  );
+                })}
+                {model.reviewThreads.length > 4 && (
+                  <p className="text-xs text-muted-foreground">
+                    {model.reviewThreads.length - 4} more Review Thread{model.reviewThreads.length - 4 === 1 ? "" : "s"} attached.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">
+                No GitHub Review Threads are attached to this target.
+              </p>
+            )}
           </div>
 
           <div className="space-y-2" aria-label="Review Target changed context">

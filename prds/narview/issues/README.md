@@ -33,7 +33,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 | 27 | Persistent Review Target Inspector | AFK | done | 26-review-path-rail-keyboard-focus-and-progress.md | 33, 34, 35 | [27-persistent-review-target-inspector.md](./27-persistent-review-target-inspector.md) |
 | 28 | Reviewed State For Targets And Threads | AFK | done | 26-review-path-rail-keyboard-focus-and-progress.md, 27-persistent-review-target-inspector.md | 47, 48, 49, 50, 51, 55, 56 | [28-reviewed-state-for-targets-and-threads.md](./28-reviewed-state-for-targets-and-threads.md) |
 | 29 | Target Fingerprints And Needs Re-Review | AFK | done | 28-reviewed-state-for-targets-and-threads.md | 52, 53, 54 | [29-target-fingerprints-and-needs-re-review.md](./29-target-fingerprints-and-needs-re-review.md) |
-| 30 | Review Thread Attachment And File Threads | AFK | ready | 27-persistent-review-target-inspector.md | 36, 37, 38, 39, 40, 62 | [30-review-thread-attachment-and-file-threads.md](./30-review-thread-attachment-and-file-threads.md) |
+| 30 | Review Thread Attachment And File Threads | AFK | done | 27-persistent-review-target-inspector.md | 36, 37, 38, 39, 40, 62 | [30-review-thread-attachment-and-file-threads.md](./30-review-thread-attachment-and-file-threads.md) |
 | 31 | Read-Only Mode And GitHub Write Permissions | AFK | ready | 30-review-thread-attachment-and-file-threads.md | 45, 46 | [31-read-only-mode-and-github-write-permissions.md](./31-read-only-mode-and-github-write-permissions.md) |
 | 32 | Start Line And File Review Threads | AFK | ready | 30-review-thread-attachment-and-file-threads.md, 31-read-only-mode-and-github-write-permissions.md | 41, 42, 43, 44, 46 | [32-start-line-and-file-review-threads.md](./32-start-line-and-file-review-threads.md) |
 | 33 | Human Feedback Packets | AFK | ready | 30-review-thread-attachment-and-file-threads.md | 57, 58, 59, 60, 61 | [33-human-feedback-packets.md](./33-human-feedback-packets.md) |
@@ -43,7 +43,6 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 ## Ready
 
-- [Review Thread Attachment And File Threads](./30-review-thread-attachment-and-file-threads.md)
 - [Read-Only Mode And GitHub Write Permissions](./31-read-only-mode-and-github-write-permissions.md)
 - [Start Line And File Review Threads](./32-start-line-and-file-review-threads.md)
 - [Human Feedback Packets](./33-human-feedback-packets.md)
@@ -84,3 +83,4 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 - [Persistent Review Target Inspector](./27-persistent-review-target-inspector.md)
 - [Reviewed State For Targets And Threads](./28-reviewed-state-for-targets-and-threads.md)
 - [Target Fingerprints And Needs Re-Review](./29-target-fingerprints-and-needs-re-review.md)
+- [Review Thread Attachment And File Threads](./30-review-thread-attachment-and-file-threads.md)

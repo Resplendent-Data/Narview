@@ -71,6 +71,7 @@ export function buildReviewTargetInspectorModel(input: BuildReviewTargetInspecto
   const target = input.target;
   const targetNodeIds = new Set(target.nodeIds);
   const targetPathSet = new Set(target.paths);
+  const targetReviewThreadIds = new Set(target.reviewThreadIds);
   const nodes = input.analysisIndex.nodes
     .filter((node) => targetNodeIds.has(node.id))
     .sort(compareAttentionNodes);
@@ -99,7 +100,7 @@ export function buildReviewTargetInspectorModel(input: BuildReviewTargetInspecto
     baseComparisons: pathContexts.flatMap((context) => buildBaseComparisons(context, input.pullRequest)),
     relatedEdges,
     relatedTests: relatedEdges.filter((relationship) => relationship.kind === "test-file"),
-    reviewThreads: input.reviewThreads.filter((thread) => targetPathSet.has(thread.filePath)),
+    reviewThreads: input.reviewThreads.filter((thread) => targetReviewThreadIds.has(thread.id)),
     reasons: uniqueSorted([...target.reasoning, ...nodes.flatMap((node) => node.reasons ?? [])]),
     fallback: target.fallback || nodes.some((node) => node.kind === "hunk" || node.kind === "file-fallback"),
   };

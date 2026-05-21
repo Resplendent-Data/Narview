@@ -9,6 +9,7 @@ import {
 import { getFileKind, type FileKind } from "./file-changes";
 import { isGeneratedOrLowSignalPath } from "./generated-files";
 import type { CachedFileSummary, CachedPullRequestData } from "./pr-cache";
+import { attachReviewThreadsToNodes } from "./review-thread-attachments";
 import { getPullRequestKey } from "./review-session";
 import type { PullRequestAnalysisInput, PullRequestSummary } from "./workspace";
 
@@ -344,19 +345,25 @@ export function buildAttentionMapPresentation(index: AnalysisIndex, currentData:
     });
   }
 
-  for (const thread of currentData.reviewThreads) {
-    const fileNodeId = fileNodeIds.get(thread.filePath);
-    const firstNodeForFile = index.nodes.find((node) => node.filePath === thread.filePath);
-    if (!fileNodeId || !firstNodeForFile) {
+  for (const attachment of attachReviewThreadsToNodes(
+    currentData.reviewThreads,
+    index.nodes.filter((node) => node.reviewTarget),
+  )) {
+    if (attachment.kind !== "line-node" || !attachment.nodeId) {
+      continue;
+    }
+
+    const fileNodeId = fileNodeIds.get(attachment.filePath);
+    if (!fileNodeId) {
       continue;
     }
 
     edges.push({
-      id: `review-thread:${thread.id}:${firstNodeForFile.id}`,
+      id: `review-thread:${attachment.thread.id}:${attachment.nodeId}`,
       from: fileNodeId,
-      to: firstNodeForFile.id,
+      to: attachment.nodeId,
       kind: "review-thread",
-      reason: `Review Thread ${thread.id} is attached to ${thread.filePath}.`,
+      reason: `Review Thread ${attachment.thread.id} is attached to the nearest changed node in ${attachment.filePath}.`,
     });
   }
 
