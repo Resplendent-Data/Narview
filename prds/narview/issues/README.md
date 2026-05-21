@@ -1,6 +1,6 @@
-# Narview V1 Issues
+# Narview Issues
 
-Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-v1.md).
+Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-v1.md) and [Attention Map Review Workflow](../2026-05-21-attention-map-review-workflow.md).
 
 | Order | Title | Type | Status | Blocked by | Stories | File |
 |---:|---|---|---|---|---|---|
@@ -22,10 +22,45 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 | 16 | Large PR Performance Hardening | AFK | done | 06-review-overview-with-hotspots-and-readiness.md, 11-lazy-diff-viewer-with-context-expansion.md, 12-thread-centered-guided-review-flow.md | 7, 10, 11, 33, 35, 46, 48, 52 | [16-large-pr-performance-hardening.md](./16-large-pr-performance-hardening.md) |
 | 17 | Auto-Update Release Pipeline | HITL | done | 01-launchable-guided-review-shell.md | 56, 57, 58 | [17-auto-update-release-pipeline.md](./17-auto-update-release-pipeline.md) |
 | 18 | V1 End-To-End Acceptance Pass | AFK | done | 09-confirmed-bulk-review-actions.md, 13-handoff-packets.md, 14-command-palette-and-keyboard-flow-completion.md, 15-privacy-diagnostics-and-data-controls.md, 16-large-pr-performance-hardening.md, 17-auto-update-release-pipeline.md | 1-58 | [18-v1-end-to-end-acceptance-pass.md](./18-v1-end-to-end-acceptance-pass.md) |
+| 19 | Managed Review Clone Setup And Health | AFK | ready | None | 2, 3, 8, 45, 46 | [19-managed-review-clone-setup-and-health.md](./19-managed-review-clone-setup-and-health.md) |
+| 20 | PR Head Checkout And Clone Fallbacks | AFK | ready | 19-managed-review-clone-setup-and-health.md | 4, 5, 6, 7 | [20-pr-head-checkout-and-clone-fallbacks.md](./20-pr-head-checkout-and-clone-fallbacks.md) |
+| 21 | Analysis Index And Hunk Map MVP | AFK | ready | 20-pr-head-checkout-and-clone-fallbacks.md | 1, 9, 10, 11, 13, 15 | [21-analysis-index-and-hunk-map-mvp.md](./21-analysis-index-and-hunk-map-mvp.md) |
+| 22 | Deep Analysis For TypeScript JavaScript And Python | AFK | ready | 21-analysis-index-and-hunk-map-mvp.md | 12, 14, 18 | [22-deep-analysis-for-typescript-javascript-and-python.md](./22-deep-analysis-for-typescript-javascript-and-python.md) |
+| 23 | Context Nodes Edges And Test Relations | AFK | ready | 22-deep-analysis-for-typescript-javascript-and-python.md | 16, 17, 18, 19, 27 | [23-context-nodes-edges-and-test-relations.md](./23-context-nodes-edges-and-test-relations.md) |
+| 24 | Structural Hotspots And Generated Clusters | AFK | ready | 23-context-nodes-edges-and-test-relations.md | 20, 21, 22, 26, 64, 65 | [24-structural-hotspots-and-generated-clusters.md](./24-structural-hotspots-and-generated-clusters.md) |
+| 25 | Review Target Builder And Grouping | AFK | ready | 24-structural-hotspots-and-generated-clusters.md | 23, 25, 28, 30, 31, 32 | [25-review-target-builder-and-grouping.md](./25-review-target-builder-and-grouping.md) |
+| 26 | Review Path Rail Keyboard Focus And Progress | AFK | ready | 25-review-target-builder-and-grouping.md | 23, 24, 25, 26, 28, 29, 55, 56 | [26-review-path-rail-keyboard-focus-and-progress.md](./26-review-path-rail-keyboard-focus-and-progress.md) |
+| 27 | Persistent Review Target Inspector | AFK | ready | 26-review-path-rail-keyboard-focus-and-progress.md | 33, 34, 35 | [27-persistent-review-target-inspector.md](./27-persistent-review-target-inspector.md) |
+| 28 | Reviewed State For Targets And Threads | AFK | ready | 26-review-path-rail-keyboard-focus-and-progress.md, 27-persistent-review-target-inspector.md | 47, 48, 49, 50, 51, 55, 56 | [28-reviewed-state-for-targets-and-threads.md](./28-reviewed-state-for-targets-and-threads.md) |
+| 29 | Target Fingerprints And Needs Re-Review | AFK | ready | 28-reviewed-state-for-targets-and-threads.md | 52, 53, 54 | [29-target-fingerprints-and-needs-re-review.md](./29-target-fingerprints-and-needs-re-review.md) |
+| 30 | Review Thread Attachment And File Threads | AFK | ready | 27-persistent-review-target-inspector.md | 36, 37, 38, 39, 40, 62 | [30-review-thread-attachment-and-file-threads.md](./30-review-thread-attachment-and-file-threads.md) |
+| 31 | Read-Only Mode And GitHub Write Permissions | AFK | ready | 30-review-thread-attachment-and-file-threads.md | 45, 46 | [31-read-only-mode-and-github-write-permissions.md](./31-read-only-mode-and-github-write-permissions.md) |
+| 32 | Start Line And File Review Threads | AFK | ready | 30-review-thread-attachment-and-file-threads.md, 31-read-only-mode-and-github-write-permissions.md | 41, 42, 43, 44, 46 | [32-start-line-and-file-review-threads.md](./32-start-line-and-file-review-threads.md) |
+| 33 | Human Feedback Packets | AFK | ready | 30-review-thread-attachment-and-file-threads.md | 57, 58, 59, 60, 61 | [33-human-feedback-packets.md](./33-human-feedback-packets.md) |
+| 34 | Checks Merge Readiness And Outdated Context | AFK | ready | 30-review-thread-attachment-and-file-threads.md | 62, 63 | [34-checks-merge-readiness-and-outdated-context.md](./34-checks-merge-readiness-and-outdated-context.md) |
+| 35 | Privacy Performance And No-LLM Hardening | AFK | ready | 24-structural-hotspots-and-generated-clusters.md, 33-human-feedback-packets.md | 17, 21, 22, 64 | [35-privacy-performance-and-no-llm-hardening.md](./35-privacy-performance-and-no-llm-hardening.md) |
+| 36 | Attention Map End-To-End Acceptance Pass | AFK | ready | 29-target-fingerprints-and-needs-re-review.md, 32-start-line-and-file-review-threads.md, 33-human-feedback-packets.md, 34-checks-merge-readiness-and-outdated-context.md, 35-privacy-performance-and-no-llm-hardening.md | 1-65 | [36-attention-map-end-to-end-acceptance-pass.md](./36-attention-map-end-to-end-acceptance-pass.md) |
 
 ## Ready
 
-None
+- [Managed Review Clone Setup And Health](./19-managed-review-clone-setup-and-health.md)
+- [PR Head Checkout And Clone Fallbacks](./20-pr-head-checkout-and-clone-fallbacks.md)
+- [Analysis Index And Hunk Map MVP](./21-analysis-index-and-hunk-map-mvp.md)
+- [Deep Analysis For TypeScript JavaScript And Python](./22-deep-analysis-for-typescript-javascript-and-python.md)
+- [Context Nodes Edges And Test Relations](./23-context-nodes-edges-and-test-relations.md)
+- [Structural Hotspots And Generated Clusters](./24-structural-hotspots-and-generated-clusters.md)
+- [Review Target Builder And Grouping](./25-review-target-builder-and-grouping.md)
+- [Review Path Rail Keyboard Focus And Progress](./26-review-path-rail-keyboard-focus-and-progress.md)
+- [Persistent Review Target Inspector](./27-persistent-review-target-inspector.md)
+- [Reviewed State For Targets And Threads](./28-reviewed-state-for-targets-and-threads.md)
+- [Target Fingerprints And Needs Re-Review](./29-target-fingerprints-and-needs-re-review.md)
+- [Review Thread Attachment And File Threads](./30-review-thread-attachment-and-file-threads.md)
+- [Read-Only Mode And GitHub Write Permissions](./31-read-only-mode-and-github-write-permissions.md)
+- [Start Line And File Review Threads](./32-start-line-and-file-review-threads.md)
+- [Human Feedback Packets](./33-human-feedback-packets.md)
+- [Checks Merge Readiness And Outdated Context](./34-checks-merge-readiness-and-outdated-context.md)
+- [Privacy Performance And No-LLM Hardening](./35-privacy-performance-and-no-llm-hardening.md)
+- [Attention Map End-To-End Acceptance Pass](./36-attention-map-end-to-end-acceptance-pass.md)
 
 ## In Progress
 
