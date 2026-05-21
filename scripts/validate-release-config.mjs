@@ -42,7 +42,7 @@ assert(workflow.includes("aarch64-apple-darwin"), "Release workflow must build A
 assert(!workflow.includes("x86_64-apple-darwin"), "Release workflow should not build Intel macOS artifacts for v1.");
 assert(workflow.includes("TAURI_SIGNING_PRIVATE_KEY"), "Release workflow must require updater signing secrets.");
 assert(workflow.includes("TAURI_SIGNING_PRIVATE_KEY_PASSWORD"), "Release workflow must provide the updater signing key password.");
-assert(workflow.includes("uploadUpdaterJson: true"), "Release workflow must upload signed updater metadata.");
+assert(workflow.includes("includeUpdaterJson: true"), "Release workflow must upload signed updater metadata.");
 assert(
   workflow.includes("--config src-tauri/tauri.release.generated.conf.json"),
   "Release workflow must build with generated updater release config.",

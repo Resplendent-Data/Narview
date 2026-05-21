@@ -16,7 +16,7 @@ Release checklist for now:
 - Confirm the GitHub Release includes macOS and Linux installers, `.sig` files, and `latest.json`.
 - Use the in-app Updates panel to manually check update status from the previous signed packaged desktop app.
 
-GitHub's latest release endpoint ignores prereleases. Because Narview's updater endpoint uses `/releases/latest/download/latest.json`, release-candidate tags such as `v0.1.0-rc.6` must be published as latest-compatible GitHub releases instead of GitHub prereleases.
+GitHub's latest release endpoint ignores prereleases. Because Narview's updater endpoint uses `/releases/latest/download/latest.json`, release-candidate tags such as `v0.1.0-rc.7` must be published as latest-compatible GitHub releases instead of GitHub prereleases.
 
 Existing `0.1.0-rc.4` and `0.1.0-rc.5` installs cannot auto-update into the new signed channel because those builds were shipped without trusted signed updater metadata. Install the next signed release manually once; automatic updates should work from that build onward as long as the updater key is preserved.
 
