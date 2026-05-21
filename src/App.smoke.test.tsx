@@ -513,6 +513,66 @@ describe("App shell", () => {
     expect(diffCodeLine?.closest(".diff-row")).toHaveClass("diff-row-comment-anchor");
   });
 
+  it("scrolls to the top review thread card when the active thread has no diff anchor", async () => {
+    const originalScrollTo = HTMLElement.prototype.scrollTo;
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+      configurable: true,
+      value: scrollTo,
+    });
+
+    try {
+      const fetchedPullRequestData = createOverviewFixture();
+      fetchedPullRequestData.reviewThreads = [
+        {
+          id: "thread-top-of-file",
+          authorLogin: "coderabbitai",
+          filePath: "src/auth/session.ts",
+          line: 10_333,
+          state: "resolved",
+          body: "This thread belongs at the top of the file because no diff anchor matches it.",
+          updatedAt: "2026-05-18T12:04:00Z",
+        },
+      ];
+      const workspaceClient = createWorkspaceClient({
+        listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+        refreshPullRequests: vi.fn().mockResolvedValue({
+          repositories: [narviewRepository],
+          pullRequests: [readyPullRequest],
+          status: {
+            state: "fresh",
+            message: "Fetched 1 open pull request.",
+            rateLimitResetEpochSeconds: null,
+            refreshedAtEpochSeconds: 1_800_000_000,
+          },
+        }),
+        fetchPullRequestData: vi.fn().mockResolvedValue(fetchedPullRequestData),
+      });
+
+      render(
+        <App
+          authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+          workspaceClient={workspaceClient}
+        />,
+      );
+
+      await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(1));
+
+      expect(screen.getByLabelText("Active review thread")).toHaveTextContent("This thread belongs at the top of the file");
+      expect(within(screen.getByLabelText("Diff viewer")).queryByLabelText("Inline review thread")).not.toBeInTheDocument();
+      await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "smooth" }));
+    } finally {
+      if (originalScrollTo) {
+        Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+          configurable: true,
+          value: originalScrollTo,
+        });
+      } else {
+        delete (HTMLElement.prototype as { scrollTo?: HTMLElement["scrollTo"] }).scrollTo;
+      }
+    }
+  });
+
   it("toggles focus mode from the visible control", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -733,6 +793,50 @@ describe("App shell", () => {
     await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(2));
     expect(within(screen.getByLabelText("Inspector")).getByText("Resolved")).toBeInTheDocument();
     expect(screen.getAllByText(/Refreshed GitHub Pull Request review data/).length).toBeGreaterThan(0);
+  });
+
+  it("shows the current Pull Request in the canvas header and refreshes it with Control+R", async () => {
+    const user = userEvent.setup();
+    const initialData = createOverviewFixture();
+    const refreshedData = createOverviewFixture();
+    refreshedData.reviewThreads = refreshedData.reviewThreads.map((thread) => ({
+      ...thread,
+      state: "resolved",
+      updatedAt: "2026-05-18T12:05:00Z",
+    }));
+    const workspaceClient = createWorkspaceClient({
+      listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+      refreshPullRequests: vi.fn().mockResolvedValue({
+        repositories: [narviewRepository],
+        pullRequests: [readyPullRequest],
+        status: {
+          state: "fresh",
+          message: "Fetched 1 open pull request.",
+          rateLimitResetEpochSeconds: null,
+          refreshedAtEpochSeconds: 1_800_000_000,
+        },
+      }),
+      fetchPullRequestData: vi.fn().mockResolvedValueOnce(initialData).mockResolvedValueOnce(refreshedData),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(1));
+    const currentPullRequest = screen.getByRole("group", { name: /current pull request/i });
+    expect(within(currentPullRequest).getByText("Add checkout guard")).toBeInTheDocument();
+    expect(within(currentPullRequest).getByText("#12")).toBeInTheDocument();
+    expect(within(currentPullRequest).getByText("Resplendent-Data/Narview")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /refresh current pull request/i })).toHaveTextContent("⌃R");
+
+    await user.keyboard("{Control>}r{/Control}");
+
+    await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalledTimes(2));
+    expect(within(screen.getByLabelText("Inspector")).getByText("Resolved")).toBeInTheDocument();
   });
 
   it("refreshes the whole Pull Request after pending checks finish", async () => {

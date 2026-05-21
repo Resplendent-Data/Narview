@@ -942,6 +942,7 @@ export function App({
   });
   const pullRequestDataInFlightKeyRef = useRef<string | null>(null);
   const checkRefreshInFlightKeyRef = useRef<string | null>(null);
+  const reviewCanvasScrollRef = useRef<HTMLDivElement | null>(null);
   const activeInlineThreadRef = useRef<HTMLDivElement | null>(null);
   const [privacyMessage, setPrivacyMessage] = useState<string | null>(null);
   const [diagnosticsPreview, setDiagnosticsPreview] = useState<DiagnosticsPreview | null>(null);
@@ -981,6 +982,7 @@ export function App({
     routedPullRequests[0] ??
     fallbackPullRequest;
   const selectedPullRequestDisplay = `${selectedPullRequest.repository} #${selectedPullRequest.number}`;
+  const selectedPullRequestTitle = selectedPullRequest.title.trim() || "Untitled Pull Request";
   const activePullRequestKey = routedPullRequests.length > 0 ? getPullRequestKey(selectedPullRequest) : null;
   const selectedCacheEntry = activePullRequestKey ? readCacheStore().entries[activePullRequestKey] : null;
   const selectedPullRequestPinned = selectedCacheEntry?.pinned ?? false;
@@ -1201,12 +1203,17 @@ export function App({
   }, [diffMode]);
 
   useEffect(() => {
-    if (!activeThreadAnchoredInDiff) {
+    if (!selectedReviewThread) {
       return;
     }
 
     const scrollTimer = window.setTimeout(() => {
-      activeInlineThreadRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      if (activeThreadAnchoredInDiff) {
+        activeInlineThreadRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+        return;
+      }
+
+      reviewCanvasScrollRef.current?.scrollTo?.({ top: 0, behavior: "smooth" });
     }, 0);
 
     return () => window.clearTimeout(scrollTimer);
@@ -2204,6 +2211,14 @@ export function App({
     handleSetFileChangeViewed(selectedFileChange.id, !selectedFileChange.viewed);
   };
 
+  const refreshCurrentPullRequest = () => {
+    if (!activePullRequestKey || selectedPullRequestLoadingData) {
+      return;
+    }
+
+    void refreshSelectedPullRequestData(selectedPullRequest);
+  };
+
   const noActiveThreadReason = "No Review Thread is selected.";
   const noVisibleThreadReason = "No Review Threads match the current filters.";
   const noSelectedBulkReason = "Select one or more Review Threads first.";
@@ -2245,10 +2260,11 @@ export function App({
       category: "Navigation",
       label: "Refresh Current Pull Request",
       description: "Reload files, Review Threads, checks, and merge state for the active Pull Request.",
+      shortcut: "⌃R",
       disabled: !activePullRequestKey || selectedPullRequestLoadingData,
       disabledReason: !activePullRequestKey ? "Open a Pull Request first." : "This Pull Request is already refreshing.",
       keywords: ["pull request", "github", "sync"],
-      run: () => void refreshSelectedPullRequestData(selectedPullRequest),
+      run: refreshCurrentPullRequest,
     },
     {
       id: "navigation.open-settings",
@@ -2530,6 +2546,12 @@ export function App({
         return;
       }
 
+      if (event.ctrlKey && !event.metaKey && !event.altKey && key === "r") {
+        event.preventDefault();
+        refreshCurrentPullRequest();
+        return;
+      }
+
       if (pullRequestDialogOpen && !event.metaKey && !event.ctrlKey && !event.altKey) {
         const shortcutIndex = getNumericShortcutIndex(key);
         const shortcutPullRequest = shortcutIndex !== null ? pullRequestDialogPullRequests[shortcutIndex] : null;
@@ -2590,7 +2612,7 @@ export function App({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [allFilteredThreadsSelected, moveReviewThread, openCommandPalette, openHotspotsDialog, openPullRequestDialog, openThreadDialog, openThreadFileInDiff, pullRequestDialogOpen, pullRequestDialogPullRequests, selectPullRequestFromDialog, selectedReviewThread, threadResolveAction, toggleSelectedFileViewed]);
+  }, [allFilteredThreadsSelected, moveReviewThread, openCommandPalette, openHotspotsDialog, openPullRequestDialog, openThreadDialog, openThreadFileInDiff, pullRequestDialogOpen, pullRequestDialogPullRequests, refreshCurrentPullRequest, selectPullRequestFromDialog, selectedReviewThread, threadResolveAction, toggleSelectedFileViewed]);
 
   const refreshBadge = getRefreshBadge(refreshStatus);
 
@@ -2605,7 +2627,9 @@ export function App({
           />
           <div>
             <h1 className="text-sm font-semibold leading-none">Narview</h1>
-            <p className="mt-1 text-xs text-muted-foreground">{selectedPullRequestDisplay}</p>
+            <p className="mt-1 max-w-80 truncate text-xs text-muted-foreground" title={`${selectedPullRequestDisplay} · ${selectedPullRequestTitle}`}>
+              {selectedPullRequestDisplay}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -2763,24 +2787,44 @@ export function App({
         )}
 
         <section aria-label="Review canvas" className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-          <div className="flex h-11 items-center justify-between border-b border-border px-3">
-            <div className="flex min-w-0 items-center gap-2">
-              <Badge variant={selectedReviewThread ? "danger" : selectedPullRequestLoadingData ? "info" : "muted"}>
-                {selectedReviewThread ? "Needs attention" : selectedPullRequestLoadingData ? "Loading" : "No thread"}
-              </Badge>
-              <span className="truncate text-sm font-medium">{activeThreadFile}</span>
-              {activeThreadLine !== null && <span className="text-xs text-muted-foreground">line {activeThreadLine}</span>}
+          <div className="flex h-11 items-center justify-between gap-3 border-b border-border px-3">
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              <div
+                aria-label="Current Pull Request"
+                className="flex min-w-0 w-72 shrink-0 items-center gap-2 rounded-md border border-border bg-card px-2 py-1"
+                role="group"
+                title={`${selectedPullRequestDisplay} · ${selectedPullRequestTitle}`}
+              >
+                <GitPullRequest className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <div className="min-w-0">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-xs font-semibold leading-none">{selectedPullRequestTitle}</span>
+                    <Badge className="shrink-0" variant={selectedPullRequest.isDraft ? "warning" : "info"}>
+                      #{selectedPullRequest.number}
+                    </Badge>
+                  </div>
+                  <p className="mt-1 truncate text-[11px] leading-none text-muted-foreground">{selectedPullRequest.repository}</p>
+                </div>
+              </div>
+              <div className="hidden min-w-0 items-center gap-2 2xl:flex">
+                <Badge className="shrink-0 whitespace-nowrap" variant={selectedReviewThread ? "danger" : selectedPullRequestLoadingData ? "info" : "muted"}>
+                  {selectedReviewThread ? "Needs attention" : selectedPullRequestLoadingData ? "Loading" : "No thread"}
+                </Badge>
+                <span className="truncate text-sm font-medium">{activeThreadFile}</span>
+                {activeThreadLine !== null && <span className="shrink-0 text-xs text-muted-foreground">line {activeThreadLine}</span>}
+              </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <Button
                 aria-label="Refresh current Pull Request"
                 variant="outline"
                 size="sm"
-                onClick={() => void refreshSelectedPullRequestData(selectedPullRequest)}
+                onClick={refreshCurrentPullRequest}
                 disabled={!activePullRequestKey || selectedPullRequestLoadingData}
               >
                 <RefreshCw className={cn("h-3.5 w-3.5", selectedPullRequestLoadingData && "animate-spin")} aria-hidden="true" />
                 Refresh PR
+                <Kbd>⌃R</Kbd>
               </Button>
               <Button variant="outline" size="sm" onClick={() => setFocusMode((current) => !current)}>
                 {focusMode ? <PanelLeftOpen className="h-3.5 w-3.5" aria-hidden="true" /> : <PanelLeftClose className="h-3.5 w-3.5" aria-hidden="true" />}
@@ -2912,7 +2956,7 @@ export function App({
             )}
           </div>
 
-          <div aria-label="Review canvas scroll area" className="pane-scroll flex-1 p-4">
+          <div aria-label="Review canvas scroll area" className="pane-scroll flex-1 p-4" ref={reviewCanvasScrollRef}>
             <section className="rounded-md border border-border bg-background p-4" aria-label="Review overview">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
@@ -3228,6 +3272,7 @@ export function App({
                 <span>Next <Kbd>K</Kbd></span>
                 <span>Previous <Kbd>J</Kbd></span>
                 <span>Threads <Kbd>T</Kbd></span>
+                <span>Refresh PR <Kbd>⌃R</Kbd></span>
                 <span>Reviewed <Kbd>R</Kbd></span>
                 <span>Resolve <Kbd>E</Kbd></span>
                 <span>Reply <Kbd>⇧R</Kbd></span>
