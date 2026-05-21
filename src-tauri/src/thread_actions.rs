@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::State;
 
-use crate::auth::AuthState;
+use crate::auth::{configured_github_review_thread_write_permission, AuthState};
 use crate::workspace::WorkspaceState;
 
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
@@ -132,7 +132,7 @@ pub async fn unresolve_review_thread(
 }
 
 fn github_token(auth_state: &AuthState) -> Result<String, ThreadActionError> {
-    auth_state
+    let token = auth_state
         .github_token()
         .map_err(|error| {
             ThreadActionError::new(
@@ -143,7 +143,16 @@ fn github_token(auth_state: &AuthState) -> Result<String, ThreadActionError> {
                 ),
             )
         })?
-        .ok_or_else(|| ThreadActionError::new("github-thread-unauthorized", "Sign in to write to GitHub Review Threads."))
+        .ok_or_else(|| ThreadActionError::new("github-thread-unauthorized", "Sign in to write to GitHub Review Threads."))?;
+
+    if !configured_github_review_thread_write_permission() {
+        return Err(ThreadActionError::new(
+            "github-thread-permission-error",
+            "GitHub write access is needed to publish line-level and file-level Review Threads. Sign in with repo or public_repo scope.",
+        ));
+    }
+
+    Ok(token)
 }
 
 async fn send_graphql(

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Manager, State};
 
-use crate::auth::{AuthCommandError, AuthState};
+use crate::auth::{configured_github_review_thread_write_permission, AuthCommandError, AuthState};
 
 const WORKSPACE_FILE_NAME: &str = "workspace.json";
 const REVIEW_CLONES_DIR_NAME: &str = "review-clones";
@@ -368,7 +368,8 @@ pub fn get_review_clone_status(
     repository: String,
 ) -> Result<ReviewCloneStatusResponse, WorkspaceCommandError> {
     let repository = parse_repository_slug(&repository)?;
-    let write_permission = auth_state.github_token().ok().flatten().is_some();
+    let write_permission =
+        auth_state.github_token().ok().flatten().is_some() && configured_github_review_thread_write_permission();
     let root = review_clones_root_path(&app)?;
 
     Ok(inspect_review_clone_at(
@@ -387,7 +388,7 @@ pub async fn ensure_review_clone(
 ) -> Result<ReviewCloneStatusResponse, WorkspaceCommandError> {
     let repository = parse_repository_slug(&repository)?;
     let token = auth_state.github_token().ok().flatten();
-    let write_permission = token.is_some();
+    let write_permission = token.is_some() && configured_github_review_thread_write_permission();
     let root = review_clones_root_path(&app)?;
     let remote_url = review_clone_remote_url(&repository);
 

@@ -492,6 +492,18 @@ impl OAuthConfig {
 
         Self { client_id, scopes }
     }
+
+    fn can_write_review_threads(&self) -> bool {
+        self.scopes
+            .split_whitespace()
+            .any(|scope| matches!(scope, "repo" | "public_repo"))
+    }
+}
+
+pub(crate) fn configured_github_review_thread_write_permission() -> bool {
+    OAuthConfig::from_env()
+        .map(|config| config.can_write_review_threads())
+        .unwrap_or(false)
 }
 
 fn normalize_env_value(value: Option<String>) -> Option<String> {
@@ -1050,6 +1062,17 @@ mod tests {
 
         assert_eq!(config.client_id, "override-client");
         assert_eq!(config.scopes, "read:user");
+    }
+
+    #[test]
+    fn oauth_config_detects_review_thread_write_scope() {
+        let private_repo_config = OAuthConfig::from_values(None, None, Some("read:user repo".to_string()));
+        let public_repo_config = OAuthConfig::from_values(None, None, Some("public_repo read:user".to_string()));
+        let read_only_config = OAuthConfig::from_values(None, None, Some("read:user".to_string()));
+
+        assert!(private_repo_config.can_write_review_threads());
+        assert!(public_repo_config.can_write_review_threads());
+        assert!(!read_only_config.can_write_review_threads());
     }
 
     #[test]

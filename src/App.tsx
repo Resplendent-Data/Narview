@@ -140,6 +140,7 @@ import {
   type ReviewSessionSnapshot,
 } from "./lib/review-session";
 import {
+  createThreadActionFailure,
   tauriThreadActionClient,
   type ThreadActionClient,
   type ThreadActionResult,
@@ -1585,6 +1586,11 @@ export function App({
   const reviewCloneWriteBadge = selectedReviewCloneStatus.writePermission
     ? ({ label: "GitHub writes available", variant: "success" as const })
     : ({ label: "Read-Only Mode", variant: "warning" as const });
+  const customThreadActionClient = threadActionClient !== tauriThreadActionClient;
+  const canPublishReviewThreads = selectedReviewCloneStatus.writePermission || customThreadActionClient;
+  const reviewThreadWriteDisabledReason = canPublishReviewThreads
+    ? null
+    : "Read-Only Mode: GitHub write access is needed to publish line-level and file-level Review Threads. Inspection, Attention Map navigation, and local Reviewed state still work.";
   const selectedPullRequestDisplay = `${selectedPullRequest.repository} #${selectedPullRequest.number}`;
   const selectedPullRequestTitle = selectedPullRequest.title.trim() || "Untitled Pull Request";
   const activePullRequestKey = routedPullRequests.length > 0 ? getPullRequestKey(selectedPullRequest) : null;
@@ -1866,7 +1872,8 @@ export function App({
   const activeThreadStateLabel = activeThread ? getThreadStateLabel(activeThread.state) : "No thread";
   const activeThreadBody = activeThread?.body ?? "No GitHub review thread is selected for this Pull Request.";
   const threadResolveAction: ThreadWriteAction = activeThreadState === "resolved" ? "unresolve" : "resolve";
-  const replyCanSubmit = Boolean(selectedReviewThread) && threadActionBusy === null && replyDraft.trim().length > 0;
+  const replyCanSubmit =
+    Boolean(selectedReviewThread) && canPublishReviewThreads && threadActionBusy === null && replyDraft.trim().length > 0;
   const selectedFileDiffState = selectedFileChange
     ? buildLazyDiffState(selectedFileChange.file, {
         mode: diffMode,
@@ -2972,6 +2979,17 @@ export function App({
     if (!selectedReviewThread || threadActionBusy !== null) {
       return;
     }
+    if (!canPublishReviewThreads) {
+      setThreadActionResult(
+        createThreadActionFailure(
+          action,
+          selectedReviewThread.id,
+          "github-thread-read-only",
+          reviewThreadWriteDisabledReason ?? "GitHub write access is unavailable.",
+        ),
+      );
+      return;
+    }
 
     const submittedReplyBody = replyDraft.trim();
     setThreadActionBusy(action);
@@ -3072,6 +3090,19 @@ export function App({
     const action = bulkConfirmAction;
     setBulkConfirmAction(null);
     setBulkActionResult(null);
+    if (!canPublishReviewThreads) {
+      setBulkActionResult({
+        action,
+        message: reviewThreadWriteDisabledReason ?? "GitHub write access is unavailable.",
+        successes: [],
+        failures: selectedBulkThreads.map((view) => ({
+          id: view.id,
+          message: reviewThreadWriteDisabledReason ?? "GitHub write access is unavailable.",
+          retryable: false,
+        })),
+      });
+      return;
+    }
     setThreadActionBusy(action);
 
     try {
@@ -3316,8 +3347,12 @@ export function App({
       label: threadResolveAction === "unresolve" ? "Unresolve Active Review Thread" : "Resolve Active Review Thread",
       description: "Run the same GitHub thread action as the Inspector button.",
       shortcut: "E",
-      disabled: !selectedReviewThread || threadActionBusy !== null,
-      disabledReason: !selectedReviewThread ? noActiveThreadReason : "A GitHub Review Thread action is already running.",
+      disabled: !selectedReviewThread || !canPublishReviewThreads || threadActionBusy !== null,
+      disabledReason: !selectedReviewThread
+        ? noActiveThreadReason
+        : !canPublishReviewThreads
+          ? (reviewThreadWriteDisabledReason ?? "GitHub write access is unavailable.")
+          : "A GitHub Review Thread action is already running.",
       keywords: ["github", "thread"],
       run: () => void runThreadAction(threadResolveAction),
     },
@@ -3448,8 +3483,13 @@ export function App({
       category: "Bulk",
       label: "Bulk Resolve Selected On GitHub",
       description: "Open the explicit confirmation dialog before resolving selected Review Threads.",
-      disabled: selectedBulkThreads.length === 0 || threadActionBusy !== null,
-      disabledReason: selectedBulkThreads.length === 0 ? noSelectedBulkReason : "A GitHub Review Thread action is already running.",
+      disabled: selectedBulkThreads.length === 0 || !canPublishReviewThreads || threadActionBusy !== null,
+      disabledReason:
+        selectedBulkThreads.length === 0
+          ? noSelectedBulkReason
+          : !canPublishReviewThreads
+            ? (reviewThreadWriteDisabledReason ?? "GitHub write access is unavailable.")
+            : "A GitHub Review Thread action is already running.",
       keywords: ["bulk actions", "github"],
       run: () => setBulkConfirmAction("resolve"),
     },
@@ -3458,8 +3498,13 @@ export function App({
       category: "Bulk",
       label: "Bulk Unresolve Selected On GitHub",
       description: "Open the explicit confirmation dialog before unresolving selected Review Threads.",
-      disabled: selectedBulkThreads.length === 0 || threadActionBusy !== null,
-      disabledReason: selectedBulkThreads.length === 0 ? noSelectedBulkReason : "A GitHub Review Thread action is already running.",
+      disabled: selectedBulkThreads.length === 0 || !canPublishReviewThreads || threadActionBusy !== null,
+      disabledReason:
+        selectedBulkThreads.length === 0
+          ? noSelectedBulkReason
+          : !canPublishReviewThreads
+            ? (reviewThreadWriteDisabledReason ?? "GitHub write access is unavailable.")
+            : "A GitHub Review Thread action is already running.",
       keywords: ["bulk actions", "github"],
       run: () => setBulkConfirmAction("unresolve"),
     },
@@ -3878,10 +3923,22 @@ export function App({
                 <Button size="sm" variant="outline" onClick={() => applyBulkReviewedState(false)} disabled={selectedBulkThreads.length === 0}>
                   Bulk mark unreviewed
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => setBulkConfirmAction("resolve")} disabled={selectedBulkThreads.length === 0 || threadActionBusy !== null}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setBulkConfirmAction("resolve")}
+                  disabled={selectedBulkThreads.length === 0 || !canPublishReviewThreads || threadActionBusy !== null}
+                  title={!canPublishReviewThreads ? (reviewThreadWriteDisabledReason ?? undefined) : undefined}
+                >
                   Resolve selected
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => setBulkConfirmAction("unresolve")} disabled={selectedBulkThreads.length === 0 || threadActionBusy !== null}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setBulkConfirmAction("unresolve")}
+                  disabled={selectedBulkThreads.length === 0 || !canPublishReviewThreads || threadActionBusy !== null}
+                  title={!canPublishReviewThreads ? (reviewThreadWriteDisabledReason ?? undefined) : undefined}
+                >
                   Unresolve selected
                 </Button>
                 {bulkUndo && (
@@ -4002,6 +4059,11 @@ export function App({
                     <Badge variant={reviewCloneWriteBadge.variant}>{reviewCloneWriteBadge.label}</Badge>
                   </div>
                 </div>
+                {!selectedReviewCloneStatus.writePermission && (
+                  <p className="mt-2 rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300" role="status">
+                    GitHub write access is needed to publish line-level and file-level Review Threads. You can still inspect this Pull Request, navigate the Attention Map, and update local Reviewed state.
+                  </p>
+                )}
                 <div className="mt-2 rounded-md border border-border bg-background/70 p-2 text-xs" aria-label="Pull Request analysis input">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-medium">PR head input</span>
@@ -4513,6 +4575,11 @@ export function App({
             </div>
 
             <div className="space-y-2 border-b border-border p-3">
+              {reviewThreadWriteDisabledReason && (
+                <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300" role="status">
+                  {reviewThreadWriteDisabledReason}
+                </p>
+              )}
               <textarea
                 aria-label="Reply body"
                 className="min-h-20 w-full resize-none rounded-md border border-input bg-background p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -4525,6 +4592,7 @@ export function App({
                 }}
                 placeholder="Reply to this Review Thread"
                 value={replyDraft}
+                disabled={!canPublishReviewThreads}
               />
               <Button
                 className="w-full justify-between"
@@ -4548,7 +4616,7 @@ export function App({
                 className="w-full justify-between"
                 variant="outline"
                 onClick={() => void runThreadAction(threadResolveAction)}
-                disabled={!selectedReviewThread || threadActionBusy !== null}
+                disabled={!selectedReviewThread || !canPublishReviewThreads || threadActionBusy !== null}
               >
                 {threadResolveAction === "unresolve" ? "Unresolve" : "Resolve"}
                 <Kbd>E</Kbd>
@@ -5344,7 +5412,7 @@ export function App({
               <Button variant="outline" onClick={() => setBulkConfirmAction(null)}>
                 Cancel
               </Button>
-              <Button onClick={() => void runConfirmedBulkThreadAction()} disabled={threadActionBusy !== null}>
+              <Button onClick={() => void runConfirmedBulkThreadAction()} disabled={!canPublishReviewThreads || threadActionBusy !== null}>
                 Confirm
               </Button>
             </div>

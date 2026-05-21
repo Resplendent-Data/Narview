@@ -956,6 +956,53 @@ describe("App shell", () => {
     await waitFor(() => expect(cloneHealth).toHaveTextContent("Read-Only Mode"));
   });
 
+  it("keeps PR inspection and local reviewed state available while GitHub writes are read-only", async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedOutSession) })}
+        workspaceClient={createWorkspaceClient()}
+      />,
+    );
+
+    expect(await screen.findByLabelText("Attention map")).toBeInTheDocument();
+    expect(screen.getByLabelText("Review Target Inspector")).toBeInTheDocument();
+    expect(screen.getAllByText(/write access is needed to publish line-level and file-level Review Threads/i).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Reply body")).toBeDisabled();
+    expect(screen.getByRole("button", { name: /submit reply/i })).toBeDisabled();
+    expect(within(screen.getByLabelText("Inspector")).getByRole("button", { name: /^resolve/i })).toBeDisabled();
+
+    const threadReviewedButton = within(screen.getByLabelText("Inspector")).getByRole("button", { name: /^mark reviewed/i });
+    expect(threadReviewedButton).toBeEnabled();
+    await user.click(threadReviewedButton);
+    expect(within(screen.getByLabelText("Inspector")).getByRole("button", { name: /^mark unreviewed/i })).toBeInTheDocument();
+
+    await user.keyboard("a");
+    expect(within(screen.getByLabelText("Review queue summary")).getByRole("button", { name: /^resolve selected/i })).toBeDisabled();
+  });
+
+  it("enables GitHub Review Thread writes when the active auth can publish feedback", async () => {
+    const user = userEvent.setup();
+    const workspaceClient = createWorkspaceClient({
+      listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+      getReviewCloneStatus: vi.fn().mockResolvedValue(readyReviewCloneStatus),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    await waitFor(() => expect(workspaceClient.getReviewCloneStatus).toHaveBeenCalledWith("Resplendent-Data/Narview"));
+    await user.type(screen.getByLabelText("Reply body"), "Ready to publish.");
+
+    expect(screen.getByRole("button", { name: /submit reply/i })).toBeEnabled();
+    expect(within(screen.getByLabelText("Inspector")).getByRole("button", { name: /^resolve/i })).toBeEnabled();
+    expect(screen.queryByText(/write access is needed to publish line-level and file-level Review Threads/i)).not.toBeInTheDocument();
+  });
+
   it("prepares the Pull Request head as the Review Clone analysis input when a PR opens", async () => {
     const workspaceClient = createWorkspaceClient({
       listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
