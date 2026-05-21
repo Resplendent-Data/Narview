@@ -100,6 +100,17 @@ pub struct CachedReviewThread {
     state: String,
     body: String,
     updated_at: String,
+    comments: Vec<CachedReviewThreadComment>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedReviewThreadComment {
+    id: String,
+    author_login: Option<String>,
+    body: String,
+    updated_at: String,
+    url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -672,7 +683,7 @@ async fn fetch_review_threads(
 
     loop {
         let body = json!({
-            "query": "query NarviewReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewDecision reviewThreads(first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line originalLine comments(first: 1) { nodes { author { login } body updatedAt } } } } } } }",
+            "query": "query NarviewReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewDecision reviewThreads(first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { id author { login } body updatedAt url } } } } } } }",
             "variables": {
                 "owner": repository.owner,
                 "name": repository.name,
@@ -736,13 +747,25 @@ async fn fetch_review_threads(
         };
 
         threads.extend(connection.nodes.into_iter().map(|thread| {
-            let first_comment = thread.comments.nodes.into_iter().next();
+            let comments = thread
+                .comments
+                .nodes
+                .into_iter()
+                .map(|comment| CachedReviewThreadComment {
+                    id: comment.id,
+                    author_login: comment.author.map(|author| author.login),
+                    body: comment.body,
+                    updated_at: comment
+                        .updated_at
+                        .unwrap_or_else(|| fallback_updated_at.to_string()),
+                    url: comment.url,
+                })
+                .collect::<Vec<_>>();
+            let first_comment = comments.first();
             CachedReviewThread {
                 id: thread.id,
                 author_login: first_comment
-                    .as_ref()
-                    .and_then(|comment| comment.author.as_ref())
-                    .map(|author| author.login.clone()),
+                    .and_then(|comment| comment.author_login.clone()),
                 file_path: thread.path,
                 line: thread.line.or(thread.original_line),
                 state: if thread.is_resolved {
@@ -753,12 +776,12 @@ async fn fetch_review_threads(
                     "unresolved".to_string()
                 },
                 body: first_comment
-                    .as_ref()
                     .map(|comment| comment.body.clone())
                     .unwrap_or_else(|| "Review thread has no visible comment body.".to_string()),
                 updated_at: first_comment
-                    .and_then(|comment| comment.updated_at)
+                    .map(|comment| comment.updated_at.clone())
                     .unwrap_or_else(|| fallback_updated_at.to_string()),
+                comments,
             }
         }));
 
@@ -978,9 +1001,11 @@ struct GraphQlReviewThreadCommentConnection {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GraphQlReviewThreadComment {
+    id: String,
     author: Option<GraphQlAuthor>,
     body: String,
     updated_at: Option<String>,
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

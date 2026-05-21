@@ -4,6 +4,14 @@ import { getPullRequestKey } from "./review-session";
 export type FetchStage = "metadata" | "review-threads" | "file-summaries" | "checks" | "diff-content";
 export type RefreshTrigger = "open" | "focus" | "manual" | "background";
 
+export interface CachedReviewThreadComment {
+  id: string;
+  authorLogin: string | null;
+  body: string;
+  updatedAt: string;
+  url: string | null;
+}
+
 export interface CachedReviewThread {
   id: string;
   authorLogin: string | null;
@@ -12,6 +20,7 @@ export interface CachedReviewThread {
   state: "unresolved" | "resolved" | "outdated";
   body: string;
   updatedAt: string;
+  comments?: CachedReviewThreadComment[];
 }
 
 export interface CachedFileSummary {

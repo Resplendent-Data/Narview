@@ -67,6 +67,7 @@ import {
   writeCachedPullRequestData,
   type CachedFileSummary,
   type CachedPullRequestData,
+  type CachedReviewThreadComment,
   type CachedReviewThread,
   type CacheStats,
 } from "./lib/pr-cache";
@@ -642,10 +643,56 @@ function InlineReviewThread({
           {view.reviewed && <Badge variant="success">Reviewed</Badge>}
         </div>
       </div>
-      <MarkdownContent
-        value={view.thread.body}
-        emptyFallback={<p className="text-sm text-muted-foreground">No review comment body was returned by GitHub.</p>}
-      />
+      <ReviewThreadConversation thread={view.thread} emptyFallback="No review comment body was returned by GitHub." />
+    </div>
+  );
+}
+
+function ReviewThreadConversation({
+  emptyFallback,
+  thread,
+}: {
+  emptyFallback: string;
+  thread: CachedReviewThread | null;
+}) {
+  if (!thread) {
+    return <p className="text-sm text-muted-foreground">{emptyFallback}</p>;
+  }
+
+  const comments = getThreadComments(thread);
+  const [initialComment, ...replies] = comments;
+  const initialCommentTime = formatThreadCommentTime(initialComment.updatedAt);
+
+  return (
+    <div className="space-y-3 font-sans text-sm">
+      <article>
+        <p className="mb-2 text-xs text-muted-foreground">
+          @{initialComment.authorLogin ?? "unknown"} commented{initialCommentTime ? ` ${initialCommentTime}` : ""}
+        </p>
+        <MarkdownContent
+          value={initialComment.body}
+          emptyFallback={<p className="text-sm text-muted-foreground">{emptyFallback}</p>}
+        />
+      </article>
+      {replies.length > 0 && (
+        <div className="space-y-3 border-t border-border pt-3" aria-label="Review thread replies">
+          {replies.map((reply) => {
+            const replyTime = formatThreadCommentTime(reply.updatedAt);
+
+            return (
+              <article className="border-l border-border pl-3" key={reply.id}>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  @{reply.authorLogin ?? "unknown"} replied{replyTime ? ` ${replyTime}` : ""}
+                </p>
+                <MarkdownContent
+                  value={reply.body}
+                  emptyFallback={<p className="text-sm text-muted-foreground">Reply body was not returned by GitHub.</p>}
+                />
+              </article>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -678,6 +725,36 @@ function getPullRequestSummaryPreview(value: string) {
 
 function getThreadTitle(body: string) {
   return stripMarkdownPreview(body, 96) || "Review thread";
+}
+
+function getThreadComments(thread: CachedReviewThread): CachedReviewThreadComment[] {
+  if (thread.comments && thread.comments.length > 0) {
+    return thread.comments;
+  }
+
+  return [
+    {
+      id: `${thread.id}:initial`,
+      authorLogin: thread.authorLogin,
+      body: thread.body,
+      updatedAt: thread.updatedAt,
+      url: null,
+    },
+  ];
+}
+
+function formatThreadCommentTime(value: string) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return "";
+  }
+
+  return new Date(timestamp).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function filtersMatch(left: ReviewQueueFilters, right: ReviewQueueFilters) {
@@ -1059,6 +1136,7 @@ export function App({
         const haystack = [
           getThreadTitle(view.thread.body),
           stripMarkdownPreview(view.thread.body, 240),
+          ...getThreadComments(view.thread).map((comment) => stripMarkdownPreview(comment.body, 240)),
           view.thread.filePath,
           view.thread.authorLogin ?? "",
           view.thread.state,
@@ -1149,6 +1227,7 @@ export function App({
   const activeThreadStateLabel = activeThread ? getThreadStateLabel(activeThread.state) : "No thread";
   const activeThreadBody = activeThread?.body ?? "No GitHub review thread is selected for this Pull Request.";
   const threadResolveAction: ThreadWriteAction = activeThreadState === "resolved" ? "unresolve" : "resolve";
+  const replyCanSubmit = Boolean(selectedReviewThread) && threadActionBusy === null && replyDraft.trim().length > 0;
   const selectedFileDiffState = selectedFileChange
     ? buildLazyDiffState(selectedFileChange.file, {
         mode: diffMode,
@@ -2003,18 +2082,43 @@ export function App({
     }
   };
 
+  const appendReplyToCachedThread = (threadId: string, body: string, replyUrl: string | null) => {
+    const updatedAt = new Date().toISOString();
+    const optimisticReply: CachedReviewThreadComment = {
+      id: replyUrl ?? `${threadId}:reply:${updatedAt}`,
+      authorLogin: authSession.accountLogin,
+      body,
+      updatedAt,
+      url: replyUrl,
+    };
+    const reviewThreads = reviewOverviewCache.reviewThreads.map((thread) =>
+      thread.id === threadId
+        ? {
+            ...thread,
+            comments: [...getThreadComments(thread), optimisticReply],
+            updatedAt,
+          }
+        : thread,
+    );
+
+    upsertCachedPullRequest(selectedPullRequest, { reviewThreads });
+    setCacheSummary(cacheStats());
+    setReviewQueueRevision((current) => current + 1);
+  };
+
   const runThreadAction = async (action: ThreadWriteAction) => {
-    if (!selectedReviewThread) {
+    if (!selectedReviewThread || threadActionBusy !== null) {
       return;
     }
 
+    const submittedReplyBody = replyDraft.trim();
     setThreadActionBusy(action);
     setThreadActionResult(null);
 
     try {
       const result =
         action === "reply"
-          ? await threadActionClient.reply(selectedReviewThread.id, replyDraft)
+          ? await threadActionClient.reply(selectedReviewThread.id, submittedReplyBody)
           : action === "resolve"
             ? await threadActionClient.resolve(selectedReviewThread.id)
             : await threadActionClient.unresolve(selectedReviewThread.id);
@@ -2022,6 +2126,7 @@ export function App({
       setThreadActionResult(result);
 
       if (result.ok && action === "reply") {
+        appendReplyToCachedThread(selectedReviewThread.id, submittedReplyBody, result.replyUrl);
         setReplyDraft("");
       }
       if (result.ok && action === "resolve") {
@@ -3039,10 +3144,7 @@ export function App({
                   )}
                 </div>
                 <div className="mt-3">
-                  <MarkdownContent
-                    value={activeThread?.body}
-                    emptyFallback={<p className="text-sm text-muted-foreground">{activeThreadBody}</p>}
-                  />
+                  <ReviewThreadConversation thread={activeThread} emptyFallback={activeThreadBody} />
                 </div>
               </section>
             )}
@@ -3323,9 +3425,24 @@ export function App({
                 aria-label="Reply body"
                 className="min-h-20 w-full resize-none rounded-md border border-input bg-background p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onChange={(event) => setReplyDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    void runThreadAction("reply");
+                  }
+                }}
                 placeholder="Reply to this Review Thread"
                 value={replyDraft}
               />
+              <Button
+                className="w-full justify-between"
+                variant="default"
+                onClick={() => void runThreadAction("reply")}
+                disabled={!replyCanSubmit}
+              >
+                Submit reply
+                <Kbd>⌘↵</Kbd>
+              </Button>
               <Button
                 className="w-full justify-between"
                 variant="secondary"
@@ -3334,15 +3451,6 @@ export function App({
               >
                 {selectedReviewThread?.reviewed ? "Mark unreviewed" : "Mark reviewed"}
                 <Kbd>R</Kbd>
-              </Button>
-              <Button
-                className="w-full justify-between"
-                variant="outline"
-                onClick={() => void runThreadAction("reply")}
-                disabled={!selectedReviewThread || threadActionBusy !== null}
-              >
-                Reply
-                <Kbd>⇧R</Kbd>
               </Button>
               <Button
                 className="w-full justify-between"

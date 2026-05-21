@@ -447,6 +447,52 @@ describe("App shell", () => {
     expect(within(thread).getByRole("button", { name: /code copied/i })).toBeInTheDocument();
   });
 
+  it("renders Review Thread replies under the initial comment", async () => {
+    const user = userEvent.setup();
+    const fetchedPullRequestData = createOverviewFixture();
+    fetchedPullRequestData.reviewThreads = [
+      {
+        ...fetchedPullRequestData.reviewThreads[0],
+        body: "Initial review concern.",
+        comments: [
+          {
+            id: "comment-initial",
+            authorLogin: "coderabbitai",
+            body: "Initial review concern.",
+            updatedAt: "2026-05-18T12:00:00Z",
+            url: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r1",
+          },
+          {
+            id: "comment-reply",
+            authorLogin: "monalisa",
+            body: "I pushed a follow-up fix for this thread.",
+            updatedAt: "2026-05-18T12:05:00Z",
+            url: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r2",
+          },
+        ],
+      },
+    ];
+    const workspaceClient = createWorkspaceClient({
+      fetchPullRequestData: vi.fn().mockResolvedValue(fetchedPullRequestData),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    const dialog = await openPullRequestsDialog(user);
+    await user.type(within(dialog).getByLabelText("Pull Request URL"), readyPullRequest.url);
+    await user.click(within(dialog).getByRole("button", { name: /^open$/i }));
+
+    const thread = await screen.findByLabelText("Active review thread");
+    expect(within(thread).getByText("Initial review concern.")).toBeInTheDocument();
+    expect(within(thread).getByLabelText("Review thread replies")).toHaveTextContent("I pushed a follow-up fix for this thread.");
+    expect(within(thread).getByText(/@monalisa replied/i)).toBeInTheDocument();
+  });
+
   it("places the active Review Thread inline at the commented diff line", async () => {
     const fetchedPullRequestData = createOverviewFixture();
     fetchedPullRequestData.fileSummaries = [
@@ -2062,15 +2108,30 @@ describe("App shell", () => {
   it("adds a Reply to the selected GitHub Review Thread", async () => {
     const user = userEvent.setup();
     const threadActionClient = createThreadActionClient();
+    const workspaceClient = createWorkspaceClient({
+      fetchPullRequestData: vi.fn().mockResolvedValue(createOverviewFixture()),
+    });
 
-    render(<App threadActionClient={threadActionClient} />);
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        threadActionClient={threadActionClient}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    const dialog = await openPullRequestsDialog(user);
+    await user.type(within(dialog).getByLabelText("Pull Request URL"), readyPullRequest.url);
+    await user.click(within(dialog).getByRole("button", { name: /^open$/i }));
+    await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalled());
 
     await user.type(screen.getByLabelText("Reply body"), "Good catch. I patched this.");
-    await user.click(screen.getByRole("button", { name: /^reply/i }));
+    await user.click(screen.getByRole("button", { name: /submit reply/i }));
 
     expect(threadActionClient.reply).toHaveBeenCalledWith("thread-1", "Good catch. I patched this.");
     expect(await screen.findByText("Reply added to GitHub Review Thread.")).toBeInTheDocument();
     expect(screen.getByLabelText("Reply body")).toHaveValue("");
+    expect(await screen.findByText("Good catch. I patched this.")).toBeInTheDocument();
   });
 
   it("resolves and unresolves Review Threads while preserving local Reviewed state", async () => {
@@ -2133,7 +2194,7 @@ describe("App shell", () => {
     render(<App threadActionClient={threadActionClient} />);
 
     await user.type(screen.getByLabelText("Reply body"), "Trying a reply.");
-    await user.click(screen.getByRole("button", { name: /^reply/i }));
+    await user.click(screen.getByRole("button", { name: /submit reply/i }));
 
     expect(await screen.findByText("GitHub rejected this Review Thread write. Check account access and token scopes.")).toBeInTheDocument();
   });
