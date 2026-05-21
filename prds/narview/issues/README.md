@@ -25,7 +25,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 | 19 | Managed Review Clone Setup And Health | AFK | done | None | 2, 3, 8, 45, 46 | [19-managed-review-clone-setup-and-health.md](./19-managed-review-clone-setup-and-health.md) |
 | 20 | PR Head Checkout And Clone Fallbacks | AFK | done | 19-managed-review-clone-setup-and-health.md | 4, 5, 6, 7 | [20-pr-head-checkout-and-clone-fallbacks.md](./20-pr-head-checkout-and-clone-fallbacks.md) |
 | 21 | Analysis Index And Hunk Map MVP | AFK | done | 20-pr-head-checkout-and-clone-fallbacks.md | 1, 9, 10, 11, 13, 15 | [21-analysis-index-and-hunk-map-mvp.md](./21-analysis-index-and-hunk-map-mvp.md) |
-| 22 | Deep Analysis For TypeScript JavaScript And Python | AFK | ready | 21-analysis-index-and-hunk-map-mvp.md | 12, 14, 18 | [22-deep-analysis-for-typescript-javascript-and-python.md](./22-deep-analysis-for-typescript-javascript-and-python.md) |
+| 22 | Deep Analysis For TypeScript JavaScript And Python | AFK | done | 21-analysis-index-and-hunk-map-mvp.md | 12, 14, 18 | [22-deep-analysis-for-typescript-javascript-and-python.md](./22-deep-analysis-for-typescript-javascript-and-python.md) |
 | 23 | Context Nodes Edges And Test Relations | AFK | ready | 22-deep-analysis-for-typescript-javascript-and-python.md | 16, 17, 18, 19, 27 | [23-context-nodes-edges-and-test-relations.md](./23-context-nodes-edges-and-test-relations.md) |
 | 24 | Structural Hotspots And Generated Clusters | AFK | ready | 23-context-nodes-edges-and-test-relations.md | 20, 21, 22, 26, 64, 65 | [24-structural-hotspots-and-generated-clusters.md](./24-structural-hotspots-and-generated-clusters.md) |
 | 25 | Review Target Builder And Grouping | AFK | ready | 24-structural-hotspots-and-generated-clusters.md | 23, 25, 28, 30, 31, 32 | [25-review-target-builder-and-grouping.md](./25-review-target-builder-and-grouping.md) |
@@ -43,7 +43,6 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 ## Ready
 
-- [Deep Analysis For TypeScript JavaScript And Python](./22-deep-analysis-for-typescript-javascript-and-python.md)
 - [Context Nodes Edges And Test Relations](./23-context-nodes-edges-and-test-relations.md)
 - [Structural Hotspots And Generated Clusters](./24-structural-hotspots-and-generated-clusters.md)
 - [Review Target Builder And Grouping](./25-review-target-builder-and-grouping.md)
@@ -86,3 +85,4 @@ No issues in progress.
 - [Managed Review Clone Setup And Health](./19-managed-review-clone-setup-and-health.md)
 - [PR Head Checkout And Clone Fallbacks](./20-pr-head-checkout-and-clone-fallbacks.md)
 - [Analysis Index And Hunk Map MVP](./21-analysis-index-and-hunk-map-mvp.md)
+- [Deep Analysis For TypeScript JavaScript And Python](./22-deep-analysis-for-typescript-javascript-and-python.md)

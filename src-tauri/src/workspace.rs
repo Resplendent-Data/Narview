@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +18,7 @@ const REVIEW_CLONE_METADATA_DIR_NAME: &str = "metadata";
 const GITHUB_API_ROOT: &str = "https://api.github.com";
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const MAX_PATCH_CACHE_BYTES: usize = 3 * 1024 * 1024;
+const MAX_ANALYSIS_FILE_BYTES: u64 = 1 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -254,6 +255,33 @@ pub struct PullRequestAnalysisInputResponse {
     message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnalysisFileContentState {
+    Loaded,
+    Missing,
+    Unsupported,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisFileContent {
+    path: String,
+    state: AnalysisFileContentState,
+    content: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestAnalysisFilesResponse {
+    repository: WorkspaceRepository,
+    pull_request_number: u64,
+    head_sha: Option<String>,
+    files: Vec<AnalysisFileContent>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceFile {
@@ -426,6 +454,28 @@ pub async fn prepare_pull_request_review_clone(
         WorkspaceCommandError::new(
             "review-clone-task-error",
             format!("Could not prepare the Pull Request Review Clone task: {error}"),
+        )
+    })?
+}
+
+#[tauri::command]
+pub async fn read_pull_request_analysis_files(
+    app: AppHandle,
+    repository: String,
+    number: u64,
+    paths: Vec<String>,
+) -> Result<PullRequestAnalysisFilesResponse, WorkspaceCommandError> {
+    let repository = parse_repository_slug(&repository)?;
+    let root = review_clones_root_path(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        read_pull_request_analysis_files_at(&repository, &root, number, paths)
+    })
+    .await
+    .map_err(|error| {
+        WorkspaceCommandError::new(
+            "analysis-file-task-error",
+            format!("Could not read Pull Request analysis files: {error}"),
         )
     })?
 }
@@ -1702,6 +1752,151 @@ fn prepare_pull_request_review_clone_at(
     ))
 }
 
+fn read_pull_request_analysis_files_at(
+    repository: &WorkspaceRepository,
+    root: &Path,
+    number: u64,
+    paths: Vec<String>,
+) -> Result<PullRequestAnalysisFilesResponse, WorkspaceCommandError> {
+    let clone_path = review_clone_repository_path(root, repository);
+    if !clone_path.is_dir() || !clone_path.join(".git").exists() {
+        return Ok(PullRequestAnalysisFilesResponse {
+            repository: repository.clone(),
+            pull_request_number: number,
+            head_sha: None,
+            files: paths
+                .into_iter()
+                .map(|path| AnalysisFileContent {
+                    path,
+                    state: AnalysisFileContentState::Unavailable,
+                    content: None,
+                    message: Some(
+                        "Review Clone is not ready for deep analysis file reads.".to_string(),
+                    ),
+                })
+                .collect(),
+        });
+    }
+
+    let head_sha = run_git_in_clone(
+        &clone_path,
+        &["rev-parse".to_string(), "HEAD".to_string()],
+        None,
+    )
+    .ok();
+    let clone_root = fs::canonicalize(&clone_path)
+        .map_err(|error| WorkspaceCommandError::io("resolve Review Clone path", error))?;
+    let files = paths
+        .into_iter()
+        .map(|path| read_analysis_file_from_clone(&clone_root, path))
+        .collect();
+
+    Ok(PullRequestAnalysisFilesResponse {
+        repository: repository.clone(),
+        pull_request_number: number,
+        head_sha,
+        files,
+    })
+}
+
+fn read_analysis_file_from_clone(clone_root: &Path, path: String) -> AnalysisFileContent {
+    let file_path = match safe_clone_relative_path(clone_root, &path) {
+        Ok(file_path) => file_path,
+        Err(message) => {
+            return AnalysisFileContent {
+                path,
+                state: AnalysisFileContentState::Unavailable,
+                content: None,
+                message: Some(message),
+            }
+        }
+    };
+
+    let metadata = match fs::metadata(&file_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return AnalysisFileContent {
+                path,
+                state: AnalysisFileContentState::Missing,
+                content: None,
+                message: Some("File does not exist at the prepared Pull Request head.".to_string()),
+            }
+        }
+        Err(error) => {
+            return AnalysisFileContent {
+                path,
+                state: AnalysisFileContentState::Unavailable,
+                content: None,
+                message: Some(format!("Could not inspect file for analysis: {error}")),
+            }
+        }
+    };
+
+    if !metadata.is_file() {
+        return AnalysisFileContent {
+            path,
+            state: AnalysisFileContentState::Unsupported,
+            content: None,
+            message: Some("Path is not a regular file.".to_string()),
+        };
+    }
+
+    if metadata.len() > MAX_ANALYSIS_FILE_BYTES {
+        return AnalysisFileContent {
+            path,
+            state: AnalysisFileContentState::Unsupported,
+            content: None,
+            message: Some("File is too large for local deep analysis.".to_string()),
+        };
+    }
+
+    match fs::read_to_string(&file_path) {
+        Ok(content) => AnalysisFileContent {
+            path,
+            state: AnalysisFileContentState::Loaded,
+            content: Some(content),
+            message: None,
+        },
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => AnalysisFileContent {
+            path,
+            state: AnalysisFileContentState::Unsupported,
+            content: None,
+            message: Some("File is not valid UTF-8 text.".to_string()),
+        },
+        Err(error) => AnalysisFileContent {
+            path,
+            state: AnalysisFileContentState::Unavailable,
+            content: None,
+            message: Some(format!("Could not read file for analysis: {error}")),
+        },
+    }
+}
+
+fn safe_clone_relative_path(clone_root: &Path, path: &str) -> Result<PathBuf, String> {
+    let requested = Path::new(path);
+    if requested.as_os_str().is_empty() {
+        return Err("File path is empty.".to_string());
+    }
+
+    let mut relative = PathBuf::new();
+    for component in requested.components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            _ => return Err("File path must stay inside the Review Clone.".to_string()),
+        }
+    }
+
+    let candidate = clone_root.join(relative);
+    if let Ok(canonical) = fs::canonicalize(&candidate) {
+        if !canonical.starts_with(clone_root) {
+            return Err("File path resolves outside the Review Clone.".to_string());
+        }
+        return Ok(canonical);
+    }
+
+    Ok(candidate)
+}
+
 fn failed_pull_request_analysis_response(
     repository: &WorkspaceRepository,
     number: u64,
@@ -2330,6 +2525,50 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("merge"));
+
+        fs::remove_dir_all(repos.root).ok();
+    }
+
+    #[test]
+    fn reads_prepared_pull_request_files_for_deep_analysis() {
+        if !git_available() {
+            return;
+        }
+
+        let repos = create_test_pull_request_repos(true);
+        let analysis_root = repos.root.join("analysis");
+        let repository = WorkspaceRepository::new("acme", "api");
+        let detail = test_pull_request_detail(&repos, &repos.base_remote, "acme/api");
+
+        let prepared = prepare_pull_request_review_clone_at(
+            &repository,
+            &analysis_root,
+            42,
+            &repos.base_remote,
+            &detail,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(prepared.state, PullRequestAnalysisInputState::Ready);
+
+        let contents = read_pull_request_analysis_files_at(
+            &repository,
+            &analysis_root,
+            42,
+            vec!["README.md".to_string(), "../outside.txt".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(contents.head_sha.as_deref(), Some(repos.head_sha.as_str()));
+        assert_eq!(contents.files[0].state, AnalysisFileContentState::Loaded);
+        assert_eq!(contents.files[0].content.as_deref(), Some("base\nhead\n"));
+        assert_eq!(contents.files[1].state, AnalysisFileContentState::Unavailable);
+        assert!(contents.files[1]
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("inside the Review Clone"));
 
         fs::remove_dir_all(repos.root).ok();
     }

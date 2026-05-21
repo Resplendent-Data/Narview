@@ -230,6 +230,17 @@ function createWorkspaceClient(overrides: Partial<WorkspaceClient> = {}): Worksp
     getReviewCloneStatus: vi.fn().mockResolvedValue(notClonedReviewCloneStatus),
     ensureReviewClone: vi.fn().mockResolvedValue(readyReviewCloneStatus),
     preparePullRequestReviewClone: vi.fn().mockResolvedValue(readyAnalysisInput),
+    readPullRequestAnalysisFiles: vi.fn().mockImplementation(async (_pullRequest: PullRequestSummary, paths: string[]) => ({
+      repository: narviewRepository,
+      pullRequestNumber: 12,
+      headSha: readyAnalysisInput.headSha,
+      files: paths.map((path) => ({
+        path,
+        state: "unavailable",
+        content: null,
+        message: "No fixture content.",
+      })),
+    })),
     refreshPullRequests: vi.fn().mockResolvedValue({
       repositories: [narviewRepository],
       pullRequests: [readyPullRequest],
@@ -1009,7 +1020,7 @@ describe("App shell", () => {
         pullRequest: readyPullRequest,
         files,
         analysisInput: readyAnalysisInput,
-        analysisVersion: 2,
+        analysisVersion: 3,
       }),
     ).toBe(false);
   });
@@ -1034,6 +1045,113 @@ describe("App shell", () => {
     );
   });
 
+  it("creates symbol Attention Nodes for TypeScript, JavaScript, and Python content", () => {
+    const files: CachedPullRequestData["fileSummaries"] = [
+      {
+        path: "src/session.tsx",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        patch: "@@ -3,3 +3,3 @@\n export function rotateSession() {\n-  return previousToken();\n+  return refreshToken();\n }",
+      },
+      {
+        path: "src/components/Banner.jsx",
+        additions: 1,
+        deletions: 0,
+        status: "modified",
+        patch: "@@ -2,3 +2,4 @@\n export function Banner() {\n+  trackBanner();\n   return <div />;\n }",
+      },
+      {
+        path: "tools/analyze.py",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        patch: "@@ -3,3 +3,3 @@\n def analyze_review():\n-    return parse_old()\n+    return parse_next()",
+      },
+    ];
+
+    const index = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files,
+      analysisInput: readyAnalysisInput,
+      fileContents: [
+        {
+          path: "src/session.tsx",
+          state: "loaded",
+          content:
+            'import { refreshToken } from "./tokens";\n\nexport function rotateSession() {\n  return refreshToken();\n}\n\nfunction refreshToken() {\n  return "next";\n}\n',
+          message: null,
+        },
+        {
+          path: "src/components/Banner.jsx",
+          state: "loaded",
+          content:
+            'import { trackBanner } from "../analytics";\nexport function Banner() {\n  trackBanner();\n  return <div />;\n}\n',
+          message: null,
+        },
+        {
+          path: "tools/analyze.py",
+          state: "loaded",
+          content:
+            "from .parser import parse_next\n\n\ndef analyze_review():\n    return parse_next()\n\nclass ReviewAnalyzer:\n    def inspect(self):\n        return analyze_review()\n",
+          message: null,
+        },
+      ],
+    });
+
+    expect(index.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "symbol", label: "rotateSession", language: "typescript" }),
+        expect.objectContaining({ kind: "symbol", label: "Banner", symbolKind: "component", language: "javascript" }),
+        expect.objectContaining({ kind: "symbol", label: "analyze_review", language: "python" }),
+      ]),
+    );
+    expect(index.relationships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "same-file-call", fromSymbolName: "rotateSession", toSymbolName: "refreshToken" }),
+        expect.objectContaining({ kind: "module-import", targetModule: "./tokens" }),
+        expect.objectContaining({ kind: "module-import", targetModule: ".parser" }),
+      ]),
+    );
+  });
+
+  it("falls back to hunk nodes when supported-language parsing fails", () => {
+    const index = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files: [
+        {
+          path: "src/broken.ts",
+          additions: 1,
+          deletions: 1,
+          status: "modified",
+          patch: "@@ -1,2 +1,2 @@\n-export function broken() {}\n+export function broken(",
+        },
+      ],
+      analysisInput: readyAnalysisInput,
+      fileContents: [
+        {
+          path: "src/broken.ts",
+          state: "loaded",
+          content: "export function broken(",
+          message: null,
+        },
+      ],
+    });
+
+    expect(index.nodes).toEqual([
+      expect.objectContaining({
+        kind: "hunk",
+        reason: "diff-hunk",
+      }),
+    ]);
+    expect(index.fileAnalyses["src/broken.ts"]).toEqual(
+      expect.objectContaining({
+        language: "typescript",
+        state: "fallback",
+      }),
+    );
+  });
+
   it("renders and persists the Analysis Index-backed Attention Map", async () => {
     render(
       <App
@@ -1042,6 +1160,20 @@ describe("App shell", () => {
           listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
           getReviewCloneStatus: vi.fn().mockResolvedValue(readyReviewCloneStatus),
           preparePullRequestReviewClone: vi.fn().mockResolvedValue(readyAnalysisInput),
+          readPullRequestAnalysisFiles: vi.fn().mockImplementation(async (_pullRequest: PullRequestSummary, paths: string[]) => ({
+            repository: narviewRepository,
+            pullRequestNumber: 12,
+            headSha: readyAnalysisInput.headSha,
+            files: paths.map((path) => ({
+              path,
+              state: path === "src/auth/session.ts" ? "loaded" : "unsupported",
+              content:
+                path === "src/auth/session.ts"
+                  ? "export function rotateSession() {\n  return refreshToken();\n}\n\nfunction refreshToken() {\n  return 'next';\n}\n"
+                  : null,
+              message: path === "src/auth/session.ts" ? null : "Unsupported fixture file.",
+            })),
+          })),
           fetchPullRequestData: vi.fn().mockResolvedValue({
             ...createOverviewFixture(),
             fileSummaries: [
@@ -1050,7 +1182,7 @@ describe("App shell", () => {
                 additions: 1,
                 deletions: 1,
                 status: "modified",
-                patch: "@@ -1,2 +1,2 @@\n-export const stale = true;\n+export const stale = false;",
+                patch: "@@ -1,3 +1,3 @@\n export function rotateSession() {\n-  return previousToken();\n+  return refreshToken();\n }",
               },
               {
                 path: "assets/review-map.png",
@@ -1067,9 +1199,10 @@ describe("App shell", () => {
 
     const attentionMap = await screen.findByLabelText("Attention map");
     await waitFor(() => expect(attentionMap).toHaveTextContent("Head 2222222"));
+    await waitFor(() => expect(attentionMap).toHaveTextContent("rotateSession"));
+    expect(attentionMap).toHaveTextContent("Symbols");
     expect(attentionMap).toHaveTextContent("Hunks");
     expect(attentionMap).toHaveTextContent("Fallbacks");
-    expect(attentionMap).toHaveTextContent("src/auth/session.ts");
     expect(attentionMap).toHaveTextContent("assets/review-map.png");
     expect(window.localStorage.getItem(analysisIndexStorageKey)).toContain(readyAnalysisInput.headSha);
   });

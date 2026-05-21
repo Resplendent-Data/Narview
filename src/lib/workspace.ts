@@ -75,6 +75,22 @@ export interface PullRequestAnalysisInput {
   message: string | null;
 }
 
+export type AnalysisFileContentState = "loaded" | "missing" | "unsupported" | "unavailable";
+
+export interface AnalysisFileContent {
+  path: string;
+  state: AnalysisFileContentState;
+  content: string | null;
+  message: string | null;
+}
+
+export interface PullRequestAnalysisFilesResponse {
+  repository: WorkspaceRepository;
+  pullRequestNumber: number;
+  headSha: string | null;
+  files: AnalysisFileContent[];
+}
+
 export interface WorkspaceClient {
   listRepositories: () => Promise<WorkspaceRepositoriesResponse>;
   saveRepository: (slug: string) => Promise<WorkspaceRepositoriesResponse>;
@@ -82,6 +98,7 @@ export interface WorkspaceClient {
   getReviewCloneStatus: (repository: string) => Promise<ReviewCloneStatus>;
   ensureReviewClone: (repository: string) => Promise<ReviewCloneStatus>;
   preparePullRequestReviewClone: (pullRequest: PullRequestSummary) => Promise<PullRequestAnalysisInput>;
+  readPullRequestAnalysisFiles: (pullRequest: PullRequestSummary, paths: string[]) => Promise<PullRequestAnalysisFilesResponse>;
   refreshPullRequests: (includeDrafts: boolean) => Promise<PullRequestRefreshResponse>;
   fetchPullRequestData: (pullRequest: PullRequestSummary) => Promise<CachedPullRequestData>;
   fetchPullRequestChecks: (pullRequest: PullRequestSummary) => Promise<PullRequestChecksResponse>;
@@ -228,6 +245,20 @@ const localWorkspaceClient: WorkspaceClient = {
     );
   },
 
+  async readPullRequestAnalysisFiles(pullRequest, paths) {
+    return {
+      repository: parseSlug(pullRequest.repository),
+      pullRequestNumber: pullRequest.number,
+      headSha: null,
+      files: paths.map((path) => ({
+        path,
+        state: "unavailable",
+        content: null,
+        message: "Desktop runtime required to read Pull Request analysis files.",
+      })),
+    };
+  },
+
   async refreshPullRequests() {
     return {
       repositories: readLocalRepositories(),
@@ -312,6 +343,21 @@ export const tauriWorkspaceClient: WorkspaceClient = {
     } catch (error) {
       if (isDesktopRuntimeUnavailable(messageFromError(error))) {
         return localWorkspaceClient.preparePullRequestReviewClone(pullRequest);
+      }
+      throw new Error(messageFromError(error));
+    }
+  },
+
+  async readPullRequestAnalysisFiles(pullRequest, paths) {
+    try {
+      return await invoke<PullRequestAnalysisFilesResponse>("read_pull_request_analysis_files", {
+        repository: pullRequest.repository,
+        number: pullRequest.number,
+        paths,
+      });
+    } catch (error) {
+      if (isDesktopRuntimeUnavailable(messageFromError(error))) {
+        return localWorkspaceClient.readPullRequestAnalysisFiles(pullRequest, paths);
       }
       throw new Error(messageFromError(error));
     }

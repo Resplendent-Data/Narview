@@ -33,6 +33,7 @@ pub fn run() {
             workspace::get_review_clone_status,
             workspace::ensure_review_clone,
             workspace::prepare_pull_request_review_clone,
+            workspace::read_pull_request_analysis_files,
             workspace::refresh_pull_requests,
             workspace::fetch_pull_request_data,
             workspace::fetch_pull_request_checks,

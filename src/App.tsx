@@ -126,6 +126,7 @@ import {
   idleRefreshStatus,
   createUnavailablePullRequestAnalysisInput,
   createUnavailableReviewCloneStatus,
+  type PullRequestAnalysisFilesResponse,
   type PullRequestAnalysisInput,
   type PullRequestAnalysisInputState,
   type PullRequestSummary,
@@ -1036,6 +1037,8 @@ export function App({
   const [reviewCloneMessage, setReviewCloneMessage] = useState<string | null>(null);
   const [analysisInputStatuses, setAnalysisInputStatuses] = useState<Record<string, PullRequestAnalysisInput>>({});
   const [analysisInputBusyKey, setAnalysisInputBusyKey] = useState<string | null>(null);
+  const [analysisFileContents, setAnalysisFileContents] = useState<Record<string, PullRequestAnalysisFilesResponse>>({});
+  const [analysisFileContentBusyKey, setAnalysisFileContentBusyKey] = useState<string | null>(null);
   const [includeDrafts, setIncludeDrafts] = useState(false);
   const [pullRequests, setPullRequests] = useState<PullRequestSummary[]>([]);
   const [quickOpenedPullRequest, setQuickOpenedPullRequest] = useState<PullRequestSummary | null>(null);
@@ -1160,14 +1163,16 @@ export function App({
     pullRequestDataStatus.key === activePullRequestKey &&
     pullRequestDataStatus.state === "loading";
   const reviewOverviewCache = createOverviewCache(selectedPullRequest, selectedCacheEntry ?? undefined);
+  const selectedAnalysisFileContents = activePullRequestKey ? analysisFileContents[activePullRequestKey] : null;
   const analysisIndex: AnalysisIndex = useMemo(
     () =>
       buildOrReuseAnalysisIndex({
         pullRequest: selectedPullRequest,
         files: reviewOverviewCache.fileSummaries,
         analysisInput: selectedAnalysisInputStatus,
+        fileContents: selectedAnalysisFileContents?.files ?? [],
       }),
-    [reviewOverviewCache.fileSummaries, selectedAnalysisInputStatus, selectedPullRequest],
+    [reviewOverviewCache.fileSummaries, selectedAnalysisFileContents, selectedAnalysisInputStatus, selectedPullRequest],
   );
   const attentionMapPresentation = useMemo(
     () => buildAttentionMapPresentation(analysisIndex, reviewOverviewCache),
@@ -1688,6 +1693,98 @@ export function App({
     activePullRequestKey,
     authSession.state,
     routedPullRequests.length,
+    selectedPullRequest,
+    workspaceClient,
+  ]);
+
+  useEffect(() => {
+    if (
+      analysisFileContentBusyKey &&
+      (!activePullRequestKey ||
+        authSession.state !== "signed-in" ||
+        selectedAnalysisInputStatus.state !== "ready")
+    ) {
+      setAnalysisFileContentBusyKey(null);
+    }
+  }, [activePullRequestKey, analysisFileContentBusyKey, authSession.state, selectedAnalysisInputStatus.state]);
+
+  useEffect(() => {
+    if (
+      !activePullRequestKey ||
+      routedPullRequests.length === 0 ||
+      authSession.state !== "signed-in" ||
+      selectedAnalysisInputStatus.state !== "ready" ||
+      reviewOverviewCache.fileSummaries.length === 0
+    ) {
+      return;
+    }
+
+    const paths = reviewOverviewCache.fileSummaries.map((file) => file.path);
+    const existing = analysisFileContents[activePullRequestKey];
+    const existingPathSignature = existing?.files.map((file) => file.path).join("|") ?? "";
+    const nextPathSignature = paths.join("|");
+    if (
+      existing &&
+      existingPathSignature === nextPathSignature &&
+      (existing.headSha === selectedAnalysisInputStatus.headSha || existing.headSha === null)
+    ) {
+      return;
+    }
+
+    let active = true;
+    setAnalysisFileContentBusyKey(activePullRequestKey);
+
+    workspaceClient
+      .readPullRequestAnalysisFiles(selectedPullRequest, paths)
+      .then((contents) => {
+        if (!active) {
+          return;
+        }
+
+        setAnalysisFileContents((current) => ({
+          ...current,
+          [activePullRequestKey]: contents,
+        }));
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        setAnalysisFileContents((current) => ({
+          ...current,
+          [activePullRequestKey]: {
+            repository: selectedAnalysisInputStatus.repository,
+            pullRequestNumber: selectedAnalysisInputStatus.pullRequestNumber,
+            headSha: selectedAnalysisInputStatus.headSha,
+            files: paths.map((path) => ({
+              path,
+              state: "unavailable",
+              content: null,
+              message,
+            })),
+          },
+        }));
+      })
+      .finally(() => {
+        if (active) {
+          setAnalysisFileContentBusyKey((current) => (current === activePullRequestKey ? null : current));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    activePullRequestKey,
+    analysisFileContents,
+    authSession.state,
+    fileChangeSignature,
+    reviewOverviewCache.fileSummaries,
+    routedPullRequests.length,
+    selectedAnalysisInputStatus.headSha,
+    selectedAnalysisInputStatus.state,
     selectedPullRequest,
     workspaceClient,
   ]);
@@ -3393,10 +3490,14 @@ export function App({
                     {attentionMapPresentation.nodes.length} nodes
                   </Badge>
                 </div>
-                <div className="mt-3 grid grid-cols-4 gap-2 text-xs">
+                <div className="mt-3 grid grid-cols-5 gap-2 text-xs">
                   <div className="rounded-md bg-muted p-2">
                     <p className="text-muted-foreground">Files</p>
                     <p className="mt-1 font-semibold">{attentionMapPresentation.summary.files}</p>
+                  </div>
+                  <div className="rounded-md bg-muted p-2">
+                    <p className="text-muted-foreground">Symbols</p>
+                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.symbolNodes}</p>
                   </div>
                   <div className="rounded-md bg-muted p-2">
                     <p className="text-muted-foreground">Hunks</p>
@@ -3415,12 +3516,13 @@ export function App({
                   {analysisIndex.nodes.slice(0, 5).map((node) => (
                     <div key={node.id} className="rounded-md border border-border bg-background/70 px-2 py-2 text-xs">
                       <div className="flex items-center justify-between gap-2">
-                        <p className="min-w-0 truncate font-medium">{node.filePath}</p>
-                        <Badge variant={node.kind === "hunk" ? "info" : "warning"}>
-                          {node.kind === "hunk" ? "Hunk" : "Fallback"}
+                        <p className="min-w-0 truncate font-medium">{node.kind === "symbol" ? node.label : node.filePath}</p>
+                        <Badge variant={node.kind === "file-fallback" ? "warning" : "info"}>
+                          {node.kind === "symbol" ? "Symbol" : node.kind === "hunk" ? "Hunk" : "Fallback"}
                         </Badge>
                       </div>
                       <p className="mt-1 truncate text-muted-foreground">
+                        {node.kind === "symbol" ? `${node.filePath} · ${node.symbolKind ?? "symbol"} · ` : ""}
                         {node.reason.replace(/-/g, " ")}
                         {node.lineStart ? ` · L${node.lineStart}${node.lineEnd && node.lineEnd !== node.lineStart ? `-${node.lineEnd}` : ""}` : ""}
                       </p>
