@@ -1020,7 +1020,7 @@ describe("App shell", () => {
         pullRequest: readyPullRequest,
         files,
         analysisInput: readyAnalysisInput,
-        analysisVersion: 3,
+        analysisVersion: 4,
       }),
     ).toBe(false);
   });
@@ -1037,7 +1037,7 @@ describe("App shell", () => {
     expect(presentation.summary.files).toBe(currentData.fileSummaries.length);
     expect(presentation.summary.hunkNodes).toBe(index.nodes.filter((node) => node.kind === "hunk").length);
     expect(presentation.summary.reviewThreads).toBe(currentData.reviewThreads.length);
-    expect(presentation.edges).toHaveLength(index.nodes.length);
+    expect(presentation.edges.length).toBeGreaterThanOrEqual(index.nodes.length);
     expect(presentation.nodes.find((node) => node.id === "file:src/auth/session.ts")).toEqual(
       expect.objectContaining({
         threadCount: 1,
@@ -1152,6 +1152,90 @@ describe("App shell", () => {
     );
   });
 
+  it("adds capped Context Nodes and explainable graph edges around changed symbols", () => {
+    const files: CachedPullRequestData["fileSummaries"] = [
+      {
+        path: "src/session.ts",
+        additions: 2,
+        deletions: 2,
+        status: "modified",
+        patch:
+          "@@ -1,7 +1,7 @@\n export function rotateSession() {\n-  const token = previousToken();\n+  const token = refreshToken();\n   auditSession();\n@@ -15,1 +15,1 @@\n-export const SESSION_KIND = 'old';\n+export const SESSION_KIND = 'rotated';",
+      },
+      {
+        path: "src/session.test.ts",
+        additions: 1,
+        deletions: 0,
+        status: "modified",
+        patch: "@@ -1,2 +1,3 @@\n import { rotateSession } from './session';\n+rotateSession();",
+      },
+    ];
+    const index = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files,
+      analysisInput: readyAnalysisInput,
+      fileContents: [
+        {
+          path: "src/session.ts",
+          state: "loaded",
+          content:
+            "export function rotateSession() {\n  const token = refreshToken();\n  auditSession();\n  loadSession();\n  invalidateSession();\n  return token;\n}\n\nfunction refreshToken() {\n  return 'next';\n}\nfunction auditSession() {}\nfunction loadSession() {}\nfunction invalidateSession() {}\nexport const SESSION_KIND = 'rotated';\n",
+          message: null,
+        },
+        {
+          path: "src/session.test.ts",
+          state: "loaded",
+          content: "import { rotateSession } from './session';\nrotateSession();\n",
+          message: null,
+        },
+      ],
+    });
+
+    expect(index.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "symbol", label: "rotateSession", reviewTarget: true }),
+        expect.objectContaining({ kind: "symbol", label: "SESSION_KIND", reviewTarget: true }),
+        expect.objectContaining({ kind: "context", label: "refreshToken", reviewTarget: false }),
+      ]),
+    );
+    expect(index.fileAnalyses["src/session.ts"]).toEqual(
+      expect.objectContaining({
+        contextNodeCount: 3,
+        contextOverflowCount: 1,
+      }),
+    );
+    expect(index.relationships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "same-file", fromSymbolName: "rotateSession", toSymbolName: "SESSION_KIND" }),
+        expect.objectContaining({ kind: "test-file", targetFilePath: "src/session.ts" }),
+      ]),
+    );
+
+    const presentation = buildAttentionMapPresentation(index, {
+      ...createOverviewFixture(),
+      fileSummaries: files,
+      reviewThreads: [
+        {
+          id: "thread-session",
+          authorLogin: "monalisa",
+          filePath: "src/session.ts",
+          line: 2,
+          state: "unresolved",
+          body: "Please verify the rotation logic.",
+          updatedAt: "2026-05-18T12:00:00Z",
+        },
+      ],
+    });
+    expect(presentation.summary.contextNodes).toBe(3);
+    expect(presentation.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "review-thread", reason: expect.stringContaining("thread-session") }),
+        expect.objectContaining({ kind: "test-file", reason: expect.stringContaining("deterministic test naming") }),
+      ]),
+    );
+    expect(presentation.edges.every((edge) => edge.reason.length > 0)).toBe(true);
+  });
+
   it("renders and persists the Analysis Index-backed Attention Map", async () => {
     render(
       <App
@@ -1201,8 +1285,10 @@ describe("App shell", () => {
     await waitFor(() => expect(attentionMap).toHaveTextContent("Head 2222222"));
     await waitFor(() => expect(attentionMap).toHaveTextContent("rotateSession"));
     expect(attentionMap).toHaveTextContent("Symbols");
+    expect(attentionMap).toHaveTextContent("Context");
     expect(attentionMap).toHaveTextContent("Hunks");
     expect(attentionMap).toHaveTextContent("Fallbacks");
+    expect(attentionMap).toHaveTextContent("Edges");
     expect(attentionMap).toHaveTextContent("assets/review-map.png");
     expect(window.localStorage.getItem(analysisIndexStorageKey)).toContain(readyAnalysisInput.headSha);
   });

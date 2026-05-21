@@ -3490,7 +3490,7 @@ export function App({
                     {attentionMapPresentation.nodes.length} nodes
                   </Badge>
                 </div>
-                <div className="mt-3 grid grid-cols-5 gap-2 text-xs">
+                <div className="mt-3 grid grid-cols-6 gap-2 text-xs">
                   <div className="rounded-md bg-muted p-2">
                     <p className="text-muted-foreground">Files</p>
                     <p className="mt-1 font-semibold">{attentionMapPresentation.summary.files}</p>
@@ -3498,6 +3498,10 @@ export function App({
                   <div className="rounded-md bg-muted p-2">
                     <p className="text-muted-foreground">Symbols</p>
                     <p className="mt-1 font-semibold">{attentionMapPresentation.summary.symbolNodes}</p>
+                  </div>
+                  <div className="rounded-md bg-muted p-2">
+                    <p className="text-muted-foreground">Context</p>
+                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.contextNodes}</p>
                   </div>
                   <div className="rounded-md bg-muted p-2">
                     <p className="text-muted-foreground">Hunks</p>
@@ -3508,8 +3512,8 @@ export function App({
                     <p className="mt-1 font-semibold">{attentionMapPresentation.summary.fallbackNodes}</p>
                   </div>
                   <div className="rounded-md bg-muted p-2">
-                    <p className="text-muted-foreground">Threads</p>
-                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.reviewThreads}</p>
+                    <p className="text-muted-foreground">Edges</p>
+                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.relationships}</p>
                   </div>
                 </div>
                 <div className="mt-3 space-y-2">
@@ -3517,8 +3521,8 @@ export function App({
                     <div key={node.id} className="rounded-md border border-border bg-background/70 px-2 py-2 text-xs">
                       <div className="flex items-center justify-between gap-2">
                         <p className="min-w-0 truncate font-medium">{node.kind === "symbol" ? node.label : node.filePath}</p>
-                        <Badge variant={node.kind === "file-fallback" ? "warning" : "info"}>
-                          {node.kind === "symbol" ? "Symbol" : node.kind === "hunk" ? "Hunk" : "Fallback"}
+                        <Badge variant={node.kind === "file-fallback" ? "warning" : node.kind === "context" ? "muted" : "info"}>
+                          {node.kind === "symbol" ? "Symbol" : node.kind === "context" ? "Context" : node.kind === "hunk" ? "Hunk" : "Fallback"}
                         </Badge>
                       </div>
                       <p className="mt-1 truncate text-muted-foreground">

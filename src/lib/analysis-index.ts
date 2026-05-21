@@ -12,11 +12,12 @@ import { getPullRequestKey } from "./review-session";
 import type { PullRequestAnalysisInput, PullRequestSummary } from "./workspace";
 
 export const analysisIndexStorageKey = "narview.analysisIndex.v1";
-export const analysisIndexVersion = 2;
+export const analysisIndexVersion = 3;
 
-export type AttentionNodeKind = "symbol" | "hunk" | "file-fallback";
+export type AttentionNodeKind = "symbol" | "context" | "hunk" | "file-fallback";
 export type AttentionNodeReason =
   | "changed-symbol"
+  | "context-symbol"
   | "diff-hunk"
   | "generated-hunk-fallback"
   | "unsupported-file"
@@ -35,13 +36,14 @@ export interface AttentionNode {
   lineEnd: number | null;
   additions: number;
   deletions: number;
+  reviewTarget: boolean;
   symbolName?: string;
   symbolKind?: CodeSymbol["kind"];
   language?: CodeSymbol["language"] | null;
   reasons?: string[];
 }
 
-export type AttentionRelationshipKind = CodeRelationship["kind"];
+export type AttentionRelationshipKind = CodeRelationship["kind"] | "test-file" | "review-thread" | "same-file";
 
 export interface AttentionRelationship {
   id: string;
@@ -52,6 +54,7 @@ export interface AttentionRelationship {
   fromSymbolName: string | null;
   toSymbolName: string | null;
   targetModule: string | null;
+  targetFilePath: string | null;
   line: number;
   reason: string;
 }
@@ -63,6 +66,8 @@ export interface FileAnalysisSummary {
   relationshipCount: number;
   importCount: number;
   exportCount: number;
+  contextNodeCount: number;
+  contextOverflowCount: number;
   reasons: string[];
 }
 
@@ -109,7 +114,8 @@ export interface AttentionMapEdge {
   id: string;
   from: string;
   to: string;
-  kind: "file-hunk";
+  kind: "file-hunk" | AttentionRelationshipKind;
+  reason: string;
 }
 
 export interface AttentionMapPresentation {
@@ -118,6 +124,7 @@ export interface AttentionMapPresentation {
   summary: {
     files: number;
     symbolNodes: number;
+    contextNodes: number;
     hunkNodes: number;
     fallbackNodes: number;
     reviewThreads: number;
@@ -130,6 +137,8 @@ interface BuiltAttentionNodes {
   relationships: AttentionRelationship[];
   fileAnalysis: FileAnalysisSummary;
 }
+
+const contextNodeCapPerFile = 3;
 
 export function readAnalysisIndexStore(): AnalysisIndexStore {
   if (typeof window === "undefined") {
@@ -196,6 +205,14 @@ export function buildAnalysisIndex(input: BuildAnalysisIndexInput): AnalysisInde
     relationships.push(...result.relationships);
     return result.nodes;
   });
+  const graphRelationships = [
+    ...relationships.map((relationship) => ({
+      ...relationship,
+      targetFilePath: relationship.targetFilePath ?? resolveModuleTargetFile(relationship.filePath, relationship.targetModule, input.files),
+    })),
+    ...buildSameFileRelationships(nodes),
+    ...buildTestRelationships(input.files, nodes),
+  ];
 
   return {
     version: 1,
@@ -208,7 +225,7 @@ export function buildAnalysisIndex(input: BuildAnalysisIndexInput): AnalysisInde
     storageScope: "local-storage-outside-review-clone",
     generatedAtEpochMs: input.nowEpochMs ?? Date.now(),
     nodes,
-    relationships,
+    relationships: graphRelationships,
     fileAnalyses,
   };
 }
@@ -266,6 +283,41 @@ export function buildAttentionMapPresentation(index: AnalysisIndex, currentData:
       from: fileNodeId,
       to: node.id,
       kind: "file-hunk",
+      reason: `Groups ${node.label} under ${node.filePath}.`,
+    });
+  }
+
+  for (const relationship of index.relationships) {
+    const from = relationship.fromNodeId ?? (relationship.filePath ? fileNodeIds.get(relationship.filePath) ?? null : null);
+    const to =
+      relationship.toNodeId ??
+      (relationship.targetFilePath ? fileNodeIds.get(relationship.targetFilePath) ?? null : null);
+    if (!from || !to || from === to) {
+      continue;
+    }
+
+    edges.push({
+      id: relationship.id,
+      from,
+      to,
+      kind: relationship.kind,
+      reason: relationship.reason,
+    });
+  }
+
+  for (const thread of currentData.reviewThreads) {
+    const fileNodeId = fileNodeIds.get(thread.filePath);
+    const firstNodeForFile = index.nodes.find((node) => node.filePath === thread.filePath);
+    if (!fileNodeId || !firstNodeForFile) {
+      continue;
+    }
+
+    edges.push({
+      id: `review-thread:${thread.id}:${firstNodeForFile.id}`,
+      from: fileNodeId,
+      to: firstNodeForFile.id,
+      kind: "review-thread",
+      reason: `Review Thread ${thread.id} is attached to ${thread.filePath}.`,
     });
   }
 
@@ -275,6 +327,7 @@ export function buildAttentionMapPresentation(index: AnalysisIndex, currentData:
     summary: {
       files: fileNodeIds.size,
       symbolNodes: index.nodes.filter((node) => node.kind === "symbol").length,
+      contextNodes: index.nodes.filter((node) => node.kind === "context").length,
       hunkNodes: index.nodes.filter((node) => node.kind === "hunk").length,
       fallbackNodes: index.nodes.filter((node) => node.kind === "file-fallback").length,
       reviewThreads: currentData.reviewThreads.length,
@@ -302,16 +355,24 @@ function buildAttentionNodesForFile(
   if (deepAnalysis.state === "parsed") {
     const changedSymbols = deepAnalysis.symbols.filter((symbol) => symbolIntersectsRanges(symbol, changedRanges));
     if (changedSymbols.length > 0) {
-      const nodeIdBySymbolId = new Map(changedSymbols.map((symbol) => [symbol.id, `${symbol.id}:attention-symbol`]));
+      const changedSymbolIds = new Set(changedSymbols.map((symbol) => symbol.id));
+      const contextSymbols = getContextSymbolsForChangedSymbols(deepAnalysis, changedSymbolIds);
+      const visibleContextSymbols = contextSymbols.slice(0, contextNodeCapPerFile);
+      const contextOverflowCount = Math.max(0, contextSymbols.length - visibleContextSymbols.length);
+      const nodeIdBySymbolId = new Map([
+        ...changedSymbols.map((symbol) => [symbol.id, `${symbol.id}:attention-symbol`] as const),
+        ...visibleContextSymbols.map((symbol) => [symbol.id, `${symbol.id}:context-symbol`] as const),
+      ]);
 
       return {
-        nodes: changedSymbols.map((symbol) => buildSymbolNode(file, fileKind, symbol)),
-        relationships: deepAnalysis.relationships.map((relationship) => ({
-          ...relationship,
-          fromNodeId: relationship.fromSymbolId ? nodeIdBySymbolId.get(relationship.fromSymbolId) ?? null : null,
-          toNodeId: relationship.toSymbolId ? nodeIdBySymbolId.get(relationship.toSymbolId) ?? null : null,
-        })),
-        fileAnalysis: summarizeFileAnalysis(deepAnalysis),
+        nodes: [
+          ...changedSymbols.map((symbol) => buildSymbolNode(file, fileKind, symbol)),
+          ...visibleContextSymbols.map((symbol) => buildContextNode(file, fileKind, symbol)),
+        ],
+        relationships: deepAnalysis.relationships.map((relationship) =>
+          toAttentionRelationship(relationship, nodeIdBySymbolId),
+        ),
+        fileAnalysis: summarizeFileAnalysis(deepAnalysis, visibleContextSymbols.length, contextOverflowCount),
       };
     }
   }
@@ -350,10 +411,11 @@ function buildAttentionNodesForFile(
         lineEnd: lastLine?.newLine ?? lastLine?.oldLine ?? null,
         additions: hunk.lines.filter((line) => line.kind === "addition").length,
         deletions: hunk.lines.filter((line) => line.kind === "deletion").length,
+        reviewTarget: true,
       } satisfies AttentionNode;
     }),
     relationships: [],
-    fileAnalysis: summarizeFileAnalysis(deepAnalysis),
+    fileAnalysis: summarizeFileAnalysis(deepAnalysis, 0, 0),
   };
 }
 
@@ -367,7 +429,7 @@ function fallbackBuildResult(
     nodes: [buildFileFallbackNode(file, fileKind, reason)],
     relationships: [],
     fileAnalysis: deepAnalysis
-      ? summarizeFileAnalysis(deepAnalysis)
+      ? summarizeFileAnalysis(deepAnalysis, 0, 0)
       : {
           language: null,
           state: "unsupported",
@@ -375,6 +437,8 @@ function fallbackBuildResult(
           relationshipCount: 0,
           importCount: 0,
           exportCount: 0,
+          contextNodeCount: 0,
+          contextOverflowCount: 0,
           reasons: [reason],
         },
   };
@@ -394,10 +458,33 @@ function buildSymbolNode(file: CachedFileSummary, fileKind: FileKind, symbol: Co
     lineEnd: symbol.endLine,
     additions: file.additions,
     deletions: file.deletions,
+    reviewTarget: true,
     symbolName: symbol.name,
     symbolKind: symbol.kind,
     language: symbol.language,
     reasons: symbol.reasons,
+  };
+}
+
+function buildContextNode(file: CachedFileSummary, fileKind: FileKind, symbol: CodeSymbol): AttentionNode {
+  return {
+    id: `${symbol.id}:context-symbol`,
+    kind: "context",
+    reason: "context-symbol",
+    filePath: file.path,
+    fileKind,
+    status: file.status,
+    hunkId: null,
+    label: symbol.name,
+    lineStart: symbol.startLine,
+    lineEnd: symbol.endLine,
+    additions: 0,
+    deletions: 0,
+    reviewTarget: false,
+    symbolName: symbol.name,
+    symbolKind: symbol.kind,
+    language: symbol.language,
+    reasons: [`${symbol.name} is unchanged context for a changed symbol relationship.`],
   };
 }
 
@@ -415,10 +502,60 @@ function buildFileFallbackNode(file: CachedFileSummary, fileKind: FileKind, reas
     lineEnd: null,
     additions: file.additions,
     deletions: file.deletions,
+    reviewTarget: true,
   };
 }
 
-function summarizeFileAnalysis(deepAnalysis: DeepAnalysisResult): FileAnalysisSummary {
+function toAttentionRelationship(
+  relationship: CodeRelationship,
+  nodeIdBySymbolId: Map<string, string>,
+): AttentionRelationship {
+  return {
+    id: relationship.id,
+    kind: relationship.kind,
+    filePath: relationship.filePath,
+    fromNodeId: relationship.fromSymbolId ? nodeIdBySymbolId.get(relationship.fromSymbolId) ?? null : null,
+    toNodeId: relationship.toSymbolId ? nodeIdBySymbolId.get(relationship.toSymbolId) ?? null : null,
+    fromSymbolName: relationship.fromSymbolName,
+    toSymbolName: relationship.toSymbolName,
+    targetModule: relationship.targetModule,
+    targetFilePath: null,
+    line: relationship.line,
+    reason: relationship.reason,
+  };
+}
+
+function getContextSymbolsForChangedSymbols(deepAnalysis: DeepAnalysisResult, changedSymbolIds: Set<string>) {
+  const symbolsById = new Map(deepAnalysis.symbols.map((symbol) => [symbol.id, symbol]));
+  const contextSymbols = new Map<string, CodeSymbol>();
+
+  for (const relationship of deepAnalysis.relationships) {
+    if (!relationship.fromSymbolId || !relationship.toSymbolId) {
+      continue;
+    }
+
+    if (changedSymbolIds.has(relationship.fromSymbolId) && !changedSymbolIds.has(relationship.toSymbolId)) {
+      const symbol = symbolsById.get(relationship.toSymbolId);
+      if (symbol) {
+        contextSymbols.set(symbol.id, symbol);
+      }
+    }
+    if (changedSymbolIds.has(relationship.toSymbolId) && !changedSymbolIds.has(relationship.fromSymbolId)) {
+      const symbol = symbolsById.get(relationship.fromSymbolId);
+      if (symbol) {
+        contextSymbols.set(symbol.id, symbol);
+      }
+    }
+  }
+
+  return [...contextSymbols.values()].sort((left, right) => left.startLine - right.startLine);
+}
+
+function summarizeFileAnalysis(
+  deepAnalysis: DeepAnalysisResult,
+  contextNodeCount: number,
+  contextOverflowCount: number,
+): FileAnalysisSummary {
   return {
     language: deepAnalysis.language,
     state: deepAnalysis.state,
@@ -426,6 +563,8 @@ function summarizeFileAnalysis(deepAnalysis: DeepAnalysisResult): FileAnalysisSu
     relationshipCount: deepAnalysis.relationships.length,
     importCount: deepAnalysis.imports.length,
     exportCount: deepAnalysis.exports.length,
+    contextNodeCount,
+    contextOverflowCount,
     reasons: deepAnalysis.reasons,
   };
 }
@@ -462,6 +601,147 @@ function getChangedLineRanges(pullRequest: PullRequestSummary, file: CachedFileS
 
 function symbolIntersectsRanges(symbol: CodeSymbol, ranges: Array<{ start: number; end: number }>) {
   return ranges.some((range) => symbol.startLine <= range.end && symbol.endLine >= range.start);
+}
+
+function buildSameFileRelationships(nodes: AttentionNode[]): AttentionRelationship[] {
+  const reviewTargetsByFile = new Map<string, AttentionNode[]>();
+  for (const node of nodes.filter((candidate) => candidate.reviewTarget)) {
+    reviewTargetsByFile.set(node.filePath, [...(reviewTargetsByFile.get(node.filePath) ?? []), node]);
+  }
+
+  return [...reviewTargetsByFile.entries()].flatMap(([filePath, fileNodes]) =>
+    fileNodes.flatMap((node, index) =>
+      fileNodes.slice(index + 1).map((related) => ({
+        id: `same-file:${node.id}:${related.id}`,
+        kind: "same-file" as const,
+        filePath,
+        fromNodeId: node.id,
+        toNodeId: related.id,
+        fromSymbolName: node.symbolName ?? node.label,
+        toSymbolName: related.symbolName ?? related.label,
+        targetModule: null,
+        targetFilePath: related.filePath,
+        line: node.lineStart ?? related.lineStart ?? 0,
+        reason: `${node.label} and ${related.label} are changed review targets in ${filePath}.`,
+      })),
+    ),
+  );
+}
+
+function buildTestRelationships(files: CachedFileSummary[], nodes: AttentionNode[]): AttentionRelationship[] {
+  const nodesByPath = new Map<string, AttentionNode[]>();
+  for (const node of nodes.filter((candidate) => candidate.reviewTarget)) {
+    nodesByPath.set(node.filePath, [...(nodesByPath.get(node.filePath) ?? []), node]);
+  }
+
+  const paths = files.map((file) => file.path);
+  const testPaths = paths.filter(isTestPath);
+  const implementationPaths = paths.filter((path) => !isTestPath(path));
+  const relationships: AttentionRelationship[] = [];
+
+  for (const testPath of testPaths) {
+    const testNodes = nodesByPath.get(testPath) ?? [];
+    const testStem = normalizedTestStem(testPath);
+    for (const implementationPath of implementationPaths) {
+      if (!testStem || !normalizedPathStem(implementationPath).includes(testStem)) {
+        continue;
+      }
+
+      const implementationNodes = nodesByPath.get(implementationPath) ?? [];
+      const fromNode = testNodes[0];
+      const toNode = implementationNodes[0];
+      relationships.push({
+        id: `test-file:${testPath}:${implementationPath}`,
+        kind: "test-file",
+        filePath: testPath,
+        fromNodeId: fromNode?.id ?? null,
+        toNodeId: toNode?.id ?? null,
+        fromSymbolName: fromNode?.symbolName ?? fromNode?.label ?? null,
+        toSymbolName: toNode?.symbolName ?? toNode?.label ?? null,
+        targetModule: null,
+        targetFilePath: implementationPath,
+        line: fromNode?.lineStart ?? 0,
+        reason: `${testPath} appears to cover ${implementationPath} by deterministic test naming.`,
+      });
+    }
+  }
+
+  return relationships;
+}
+
+function resolveModuleTargetFile(filePath: string, targetModule: string | null, files: CachedFileSummary[]) {
+  if (!targetModule || !targetModule.startsWith(".")) {
+    return null;
+  }
+
+  const candidateBase = normalizePath(`${dirname(filePath)}/${targetModule.replace(/^\.\//, "")}`);
+  const candidates = [
+    candidateBase,
+    `${candidateBase}.ts`,
+    `${candidateBase}.tsx`,
+    `${candidateBase}.js`,
+    `${candidateBase}.jsx`,
+    `${candidateBase}.py`,
+    `${candidateBase}/index.ts`,
+    `${candidateBase}/index.tsx`,
+    `${candidateBase}/index.js`,
+    `${candidateBase}/index.jsx`,
+  ];
+  const filePaths = new Set(files.map((file) => file.path));
+  return candidates.find((candidate) => filePaths.has(candidate)) ?? null;
+}
+
+function isTestPath(path: string) {
+  const lowerPath = path.toLowerCase();
+  return (
+    lowerPath.includes("/__tests__/") ||
+    lowerPath.includes("/tests/") ||
+    lowerPath.includes(".test.") ||
+    lowerPath.includes(".spec.") ||
+    /(^|\/)test_[^/]+\.py$/.test(lowerPath) ||
+    /(^|\/)[^/]+_test\.py$/.test(lowerPath)
+  );
+}
+
+function normalizedTestStem(path: string) {
+  return (path.split("/").at(-1) ?? "")
+    .replace(/\.(tsx|ts|jsx|js|py)$/i, "")
+    .toLowerCase()
+    .replace(/^test_/, "")
+    .replace(/_test$/, "")
+    .replace(/\.test$/, "")
+    .replace(/\.spec$/, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function normalizedPathStem(path: string) {
+  return path
+    .split("/")
+    .at(-1)
+    ?.replace(/\.(tsx|ts|jsx|js|py)$/i, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "") ?? "";
+}
+
+function dirname(path: string) {
+  const parts = path.split("/");
+  parts.pop();
+  return parts.join("/");
+}
+
+function normalizePath(path: string) {
+  const parts: string[] = [];
+  for (const part of path.split("/")) {
+    if (!part || part === ".") {
+      continue;
+    }
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return parts.join("/");
 }
 
 function getAnalysisHeadSha(analysisInput: PullRequestAnalysisInput) {
