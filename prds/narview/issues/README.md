@@ -31,7 +31,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 | 25 | Review Target Builder And Grouping | AFK | done | 24-structural-hotspots-and-generated-clusters.md | 23, 25, 28, 30, 31, 32 | [25-review-target-builder-and-grouping.md](./25-review-target-builder-and-grouping.md) |
 | 26 | Review Path Rail Keyboard Focus And Progress | AFK | done | 25-review-target-builder-and-grouping.md | 23, 24, 25, 26, 28, 29, 55, 56 | [26-review-path-rail-keyboard-focus-and-progress.md](./26-review-path-rail-keyboard-focus-and-progress.md) |
 | 27 | Persistent Review Target Inspector | AFK | done | 26-review-path-rail-keyboard-focus-and-progress.md | 33, 34, 35 | [27-persistent-review-target-inspector.md](./27-persistent-review-target-inspector.md) |
-| 28 | Reviewed State For Targets And Threads | AFK | ready | 26-review-path-rail-keyboard-focus-and-progress.md, 27-persistent-review-target-inspector.md | 47, 48, 49, 50, 51, 55, 56 | [28-reviewed-state-for-targets-and-threads.md](./28-reviewed-state-for-targets-and-threads.md) |
+| 28 | Reviewed State For Targets And Threads | AFK | done | 26-review-path-rail-keyboard-focus-and-progress.md, 27-persistent-review-target-inspector.md | 47, 48, 49, 50, 51, 55, 56 | [28-reviewed-state-for-targets-and-threads.md](./28-reviewed-state-for-targets-and-threads.md) |
 | 29 | Target Fingerprints And Needs Re-Review | AFK | ready | 28-reviewed-state-for-targets-and-threads.md | 52, 53, 54 | [29-target-fingerprints-and-needs-re-review.md](./29-target-fingerprints-and-needs-re-review.md) |
 | 30 | Review Thread Attachment And File Threads | AFK | ready | 27-persistent-review-target-inspector.md | 36, 37, 38, 39, 40, 62 | [30-review-thread-attachment-and-file-threads.md](./30-review-thread-attachment-and-file-threads.md) |
 | 31 | Read-Only Mode And GitHub Write Permissions | AFK | ready | 30-review-thread-attachment-and-file-threads.md | 45, 46 | [31-read-only-mode-and-github-write-permissions.md](./31-read-only-mode-and-github-write-permissions.md) |
@@ -43,7 +43,6 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 ## Ready
 
-- [Reviewed State For Targets And Threads](./28-reviewed-state-for-targets-and-threads.md)
 - [Target Fingerprints And Needs Re-Review](./29-target-fingerprints-and-needs-re-review.md)
 - [Review Thread Attachment And File Threads](./30-review-thread-attachment-and-file-threads.md)
 - [Read-Only Mode And GitHub Write Permissions](./31-read-only-mode-and-github-write-permissions.md)
@@ -84,3 +83,4 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 - [Review Target Builder And Grouping](./25-review-target-builder-and-grouping.md)
 - [Review Path Rail Keyboard Focus And Progress](./26-review-path-rail-keyboard-focus-and-progress.md)
 - [Persistent Review Target Inspector](./27-persistent-review-target-inspector.md)
+- [Reviewed State For Targets And Threads](./28-reviewed-state-for-targets-and-threads.md)

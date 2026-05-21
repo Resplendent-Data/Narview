@@ -66,6 +66,14 @@ import {
 import { buildReviewOverview, getMergeReadiness, scoreHotspots, summarizeChecks } from "./lib/review-overview";
 import { buildReviewPathItems, buildReviewWorkProgress, moveReviewPathSelection } from "./lib/review-path";
 import { buildReviewTargetInspectorModel } from "./lib/review-target-inspector";
+import {
+  buildReviewedTargetIdSet,
+  clearReviewTargetStateStore,
+  readReviewTargetStateStore,
+  reviewTargetStorageKey,
+  setReviewTargetReviewed,
+  syncReviewTargets,
+} from "./lib/review-target-state";
 import { buildReviewTargets, type ReviewTarget } from "./lib/review-targets";
 import {
   buildReviewThreadViews,
@@ -1416,6 +1424,20 @@ describe("App shell", () => {
     expect(screen.getByLabelText("Review Path")).toBeInTheDocument();
   });
 
+  it("resolving a Review Thread marks only that thread reviewed and leaves the Review Target explicit", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+    render(<App threadActionClient={threadActionClient} />);
+
+    await user.click(within(screen.getByLabelText("Inspector")).getByRole("button", { name: /^resolve/i }));
+
+    expect(threadActionClient.resolve).toHaveBeenCalledWith("thread-1");
+    expect(await within(screen.getByLabelText("Inspector")).findByRole("button", { name: /^mark unreviewed/i })).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Review Path")).getByRole("button", { name: /mark target reviewed/i })).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Review Work")).getByText("0/5")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Review Work")).getByText("1/3")).toBeInTheDocument();
+  });
+
   it("loads non-draft Pull Requests by default and includes drafts when filtered", async () => {
     const user = userEvent.setup();
     const workspaceClient = createWorkspaceClient({
@@ -2532,6 +2554,74 @@ describe("App shell", () => {
       threads: { total: 2, reviewed: 1, remaining: 1 },
       combinedRemaining: 3,
     });
+  });
+
+  it("persists Review Target reviewed state per user without coupling it to thread reviewed or resolved state", () => {
+    const pullRequestKey = "Resplendent-Data/Narview#12";
+    const targets = [
+      createReviewTarget({
+        id: "target-feedback",
+        title: "Feedback target",
+        paths: ["src/auth/session.ts"],
+        size: {
+          nodes: 1,
+          files: 1,
+          changedLines: 10,
+          relationships: 0,
+          reviewThreads: 1,
+        },
+      }),
+      createReviewTarget({
+        id: "target-no-feedback",
+        title: "No feedback target",
+        paths: ["docs/readme.md"],
+        size: {
+          nodes: 1,
+          files: 1,
+          changedLines: 2,
+          relationships: 0,
+          reviewThreads: 0,
+        },
+      }),
+    ];
+    const threads = [
+      {
+        id: "thread-feedback",
+        authorLogin: "monalisa",
+        filePath: "src/auth/session.ts",
+        line: 24,
+        state: "resolved" as const,
+        body: "Resolved thread stays separate from target reviewed state.",
+        updatedAt: "2026-05-18T12:00:00Z",
+      },
+    ];
+
+    syncReviewTargets("octocat", pullRequestKey, targets);
+    syncReviewTargets("monalisa", pullRequestKey, targets);
+    setReviewTargetReviewed("octocat", "target-no-feedback", true, 1_800_000_000_000);
+    syncReviewThreads("octocat", pullRequestKey, threads);
+    setReviewThreadReviewed("octocat", "thread-feedback", true, 1_800_000_000_001);
+
+    const octocatReviewedTargets = buildReviewedTargetIdSet("octocat", targets, readReviewTargetStateStore());
+    const monalisaReviewedTargets = buildReviewedTargetIdSet("monalisa", targets, readReviewTargetStateStore());
+    const threadViews = buildReviewThreadViews("octocat", pullRequestKey, threads);
+    const progress = buildReviewWorkProgress(buildReviewPathItems(targets, []), octocatReviewedTargets, threadViews);
+
+    expect(octocatReviewedTargets).toEqual(new Set(["target-no-feedback"]));
+    expect(monalisaReviewedTargets.size).toBe(0);
+    expect(threadViews[0]).toMatchObject({
+      reviewed: true,
+      thread: expect.objectContaining({ state: "resolved" }),
+    });
+    expect(progress).toMatchObject({
+      targets: { total: 2, reviewed: 1, remaining: 1 },
+      threads: { total: 1, reviewed: 1, remaining: 0 },
+      combinedRemaining: 1,
+    });
+    expect(window.localStorage.getItem(reviewTargetStorageKey)).toContain("target-no-feedback");
+
+    clearReviewTargetStateStore();
+    expect(buildReviewedTargetIdSet("octocat", targets, readReviewTargetStateStore()).size).toBe(0);
   });
 
   it("builds Review Target inspector content from head symbols, base diff, related tests, and fallback hunks", () => {

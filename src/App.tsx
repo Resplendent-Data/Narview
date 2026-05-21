@@ -104,6 +104,12 @@ import {
 import { buildReviewOverview, type HotspotScore, type RepositoryHotspotOverride } from "./lib/review-overview";
 import { buildReviewTargetInspectorModel, type ReviewTargetInspectorModel } from "./lib/review-target-inspector";
 import { buildReviewPathItems, buildReviewWorkProgress, moveReviewPathSelection, type ReviewPathItem } from "./lib/review-path";
+import {
+  buildReviewedTargetIdSet,
+  readReviewTargetStateStore,
+  setReviewTargetReviewed as setStoredReviewTargetReviewed,
+  syncReviewTargets,
+} from "./lib/review-target-state";
 import { buildReviewTargets } from "./lib/review-targets";
 import {
   buildReviewQueueCounts,
@@ -1424,7 +1430,7 @@ export function App({
   const [selectedReviewThreadId, setSelectedReviewThreadId] = useState<string | null>(null);
   const [selectedReviewTargetId, setSelectedReviewTargetId] = useState<string | null>(null);
   const [targetBaseComparisonOpen, setTargetBaseComparisonOpen] = useState(false);
-  const [reviewedTargetIdsByPullRequest, setReviewedTargetIdsByPullRequest] = useState<Record<string, string[]>>({});
+  const [reviewTargetRevision, setReviewTargetRevision] = useState(0);
   const [reviewQueueFilters, setReviewQueueFilters] = useState<ReviewQueueFilters>(defaultReviewQueueFilters);
   const [reviewQueueRevision, setReviewQueueRevision] = useState(0);
   const [fileChangeFilters, setFileChangeFilters] = useState<FileChangeFilters>(defaultFileChangeFilters);
@@ -1504,6 +1510,7 @@ export function App({
     routedPullRequests.find((pullRequest) => getPullRequestKey(pullRequest) === selectedPullRequestKey) ??
     routedPullRequests[0] ??
     fallbackPullRequest;
+  const selectedPullRequestReviewKey = getPullRequestKey(selectedPullRequest);
   const selectedRepositoryKey = selectedPullRequest.repository.toLowerCase();
   const reviewCloneRepositorySlugs = useMemo(
     () => Array.from(new Set([...repositories.map((repository) => repository.slug), selectedPullRequest.repository])).sort(),
@@ -1580,10 +1587,10 @@ export function App({
       }),
     [analysisIndex, attentionMapPresentation, reviewOverview.hotspots, reviewOverviewCache],
   );
-  const activeReviewTargetScopeKey = activePullRequestKey ?? "local-demo";
+  const reviewTargetStore = useMemo(() => readReviewTargetStateStore(), [reviewTargetRevision]);
   const reviewedTargetIds = useMemo(
-    () => new Set(reviewedTargetIdsByPullRequest[activeReviewTargetScopeKey] ?? []),
-    [activeReviewTargetScopeKey, reviewedTargetIdsByPullRequest],
+    () => buildReviewedTargetIdSet(currentUserKey, reviewTargets, reviewTargetStore),
+    [currentUserKey, reviewTargetStore, reviewTargets],
   );
   const reviewPathItems = useMemo(
     () => buildReviewPathItems(reviewTargets, reviewOverview.hotspots),
@@ -1644,7 +1651,7 @@ export function App({
         : { label: "Ready", variant: "success" as const };
   const baseReviewThreadViews = buildReviewThreadViews(
     currentUserKey,
-    getPullRequestKey(selectedPullRequest),
+    selectedPullRequestReviewKey,
     reviewOverviewCache.reviewThreads,
     reviewQueueStore,
   );
@@ -1666,6 +1673,9 @@ export function App({
   const reviewWorkProgress = buildReviewWorkProgress(reviewPathItems, reviewedTargetIds, reviewThreadViews);
   const reviewPathItemSignature = reviewPathItems.map((item) => item.id).join("|");
   const activeReviewPathItemSignature = activeReviewPathItems.map((item) => item.id).join("|");
+  const reviewTargetSyncSignature = reviewTargets
+    .map((target) => `${target.id}:${target.stableKey}:${target.paths.join(",")}`)
+    .join("|");
   const filteredReviewThreads = filterReviewThreads(reviewThreadViews, reviewQueueFilters);
   const normalizedThreadDialogQuery = threadDialogQuery.trim().toLowerCase();
   const threadDialogSourceViews = filteredReviewThreads;
@@ -1688,6 +1698,11 @@ export function App({
         return normalizedThreadDialogQuery.split(/\s+/).every((term) => haystack.includes(term));
       })
     : threadDialogSourceViews;
+
+  useEffect(() => {
+    syncReviewTargets(currentUserKey, selectedPullRequestReviewKey, reviewTargets);
+    setReviewTargetRevision((current) => current + 1);
+  }, [currentUserKey, reviewTargetSyncSignature, selectedPullRequestReviewKey]);
 
   useEffect(() => {
     if (reviewPathItems.length === 0) {
@@ -2790,19 +2805,9 @@ export function App({
   };
 
   const setReviewTargetReviewed = (targetId: string, reviewed: boolean) => {
-    setReviewedTargetIdsByPullRequest((current) => {
-      const existing = new Set(current[activeReviewTargetScopeKey] ?? []);
-      if (reviewed) {
-        existing.add(targetId);
-      } else {
-        existing.delete(targetId);
-      }
-
-      return {
-        ...current,
-        [activeReviewTargetScopeKey]: [...existing],
-      };
-    });
+    syncReviewTargets(currentUserKey, selectedPullRequestReviewKey, reviewTargets);
+    setStoredReviewTargetReviewed(currentUserKey, targetId, reviewed);
+    setReviewTargetRevision((current) => current + 1);
   };
 
   const moveReviewThread = (direction: 1 | -1) => {
