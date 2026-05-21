@@ -1,7 +1,7 @@
 ---
 title: "Review Path Rail Keyboard Focus And Progress"
 type: AFK
-status: ready
+status: done
 blocked_by: ["25-review-target-builder-and-grouping.md"]
 depends_on_story_ids: [23, 24, 25, 26, 28, 29, 55, 56]
 slice_order: 26
@@ -13,15 +13,15 @@ Build the ordered Review Path rail beside the Attention Map. The path should be 
 
 ## Acceptance criteria
 
-- [ ] The Attention Map graph is rendered with React Flow rather than a custom canvas renderer.
-- [ ] The Review Path lists generated Review Targets in deterministic order.
-- [ ] Review Path order is independent from visual map layout.
-- [ ] The first target is the Hotspot that deserves earliest inspection.
-- [ ] J/K moves through active Review Targets and focuses the Attention Map on selection.
-- [ ] Reviewed targets remain available in a collapsed or visually deemphasized section.
-- [ ] Review Work shows target progress, thread progress, and a combined remaining count.
-- [ ] Manual Review Path reordering is not available in this version.
-- [ ] Tests cover ordering, keyboard movement, map focus, progress counts, reviewed grouping, and no manual reorder controls.
+- [x] The Attention Map graph is rendered with React Flow rather than a custom canvas renderer.
+- [x] The Review Path lists generated Review Targets in deterministic order.
+- [x] Review Path order is independent from visual map layout.
+- [x] The first target is the Hotspot that deserves earliest inspection.
+- [x] J/K moves through active Review Targets and focuses the Attention Map on selection.
+- [x] Reviewed targets remain available in a collapsed or visually deemphasized section.
+- [x] Review Work shows target progress, thread progress, and a combined remaining count.
+- [x] Manual Review Path reordering is not available in this version.
+- [x] Tests cover ordering, keyboard movement, map focus, progress counts, reviewed grouping, and no manual reorder controls.
 
 ## Blocked by
 

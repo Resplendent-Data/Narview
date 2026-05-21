@@ -1,6 +1,17 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  Background,
+  Controls,
+  MiniMap,
+  ReactFlow,
+  ReactFlowProvider,
+  useReactFlow,
+  type Edge,
+  type Node,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import {
   Check,
   ChevronRight,
   Columns2,
@@ -91,6 +102,7 @@ import {
   type FileKind,
 } from "./lib/file-changes";
 import { buildReviewOverview, type HotspotScore, type RepositoryHotspotOverride } from "./lib/review-overview";
+import { buildReviewPathItems, buildReviewWorkProgress, moveReviewPathSelection, type ReviewPathItem } from "./lib/review-path";
 import { buildReviewTargets } from "./lib/review-targets";
 import {
   buildReviewQueueCounts,
@@ -464,6 +476,163 @@ function buildFileExplorerRows(
   return rows;
 }
 
+interface ReviewTargetFlowProps {
+  items: ReviewPathItem[];
+  selectedTargetId: string | null;
+  reviewedTargetIds: Set<string>;
+  onSelectTarget: (targetId: string) => void;
+}
+
+function ReviewTargetFlow({ items, selectedTargetId, reviewedTargetIds, onSelectTarget }: ReviewTargetFlowProps) {
+  const { nodes, edges } = buildReviewTargetFlowElements(items, selectedTargetId, reviewedTargetIds);
+
+  return (
+    <ReactFlowProvider>
+      <ReviewTargetFlowCanvas
+        edges={edges}
+        nodes={nodes}
+        onSelectTarget={onSelectTarget}
+        selectedTargetId={selectedTargetId}
+      />
+    </ReactFlowProvider>
+  );
+}
+
+function ReviewTargetFlowCanvas({
+  edges,
+  nodes,
+  onSelectTarget,
+  selectedTargetId,
+}: {
+  edges: Edge[];
+  nodes: Node[];
+  onSelectTarget: (targetId: string) => void;
+  selectedTargetId: string | null;
+}) {
+  const flow = useReactFlow();
+
+  useEffect(() => {
+    if (!selectedTargetId) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      void flow.fitView({
+        nodes: [{ id: selectedTargetId }],
+        padding: 0.45,
+        duration: 180,
+      });
+    });
+  }, [flow, selectedTargetId]);
+
+  return (
+    <div
+      aria-label="Review target graph"
+      className="h-full min-h-[320px] overflow-hidden rounded-md border border-border bg-background"
+      data-focused-target-id={selectedTargetId ?? ""}
+    >
+      <ReactFlow
+        colorMode="system"
+        edges={edges}
+        fitView
+        maxZoom={1.8}
+        minZoom={0.35}
+        nodes={nodes}
+        nodesConnectable={false}
+        nodesDraggable={false}
+        onNodeClick={(_, node) => onSelectTarget(node.id)}
+        panOnScroll
+        proOptions={{ hideAttribution: true }}
+      >
+        <Background gap={16} />
+        <Controls showInteractive={false} />
+        <MiniMap pannable={false} zoomable={false} />
+      </ReactFlow>
+    </div>
+  );
+}
+
+function buildReviewTargetFlowElements(
+  items: ReviewPathItem[],
+  selectedTargetId: string | null,
+  reviewedTargetIds: Set<string>,
+): { nodes: Node[]; edges: Edge[] } {
+  const visualItems = [...items].sort(
+    (left, right) =>
+      left.target.modulePath.localeCompare(right.target.modulePath) ||
+      left.target.title.localeCompare(right.target.title) ||
+      left.id.localeCompare(right.id),
+  );
+  const columns = Math.max(1, Math.ceil(Math.sqrt(Math.max(visualItems.length, 1))));
+  const nodes = visualItems.map((item, index) => {
+    const selected = item.id === selectedTargetId;
+    const reviewed = reviewedTargetIds.has(item.id);
+    const row = Math.floor(index / columns);
+    const column = index % columns;
+
+    return {
+      id: item.id,
+      data: {
+        label: item.target.title,
+      },
+      position: {
+        x: column * 260,
+        y: row * 140,
+      },
+      selected,
+      style: {
+        width: 210,
+        border: selected ? "2px solid hsl(var(--primary))" : "1px solid hsl(var(--border))",
+        borderRadius: 8,
+        color: "hsl(var(--foreground))",
+        background: reviewed ? "hsl(var(--muted))" : "hsl(var(--card))",
+        opacity: reviewed ? 0.58 : 1,
+        fontSize: 12,
+        lineHeight: 1.35,
+        padding: 10,
+      },
+    } satisfies Node;
+  });
+  const targetByNodeId = new Map<string, string>();
+  for (const item of items) {
+    for (const nodeId of item.target.nodeIds) {
+      targetByNodeId.set(nodeId, item.id);
+    }
+  }
+  const edgesById = new Map<string, Edge>();
+  for (const item of items) {
+    for (const edgeId of item.target.edgeIds) {
+      const [fromTargetId, toTargetId] = findTargetsForEdge(items, targetByNodeId, edgeId);
+      if (!fromTargetId || !toTargetId || fromTargetId === toTargetId) {
+        continue;
+      }
+      const id = `target-edge:${edgeId}`;
+      edgesById.set(id, {
+        id,
+        source: fromTargetId,
+        target: toTargetId,
+        animated: fromTargetId === selectedTargetId || toTargetId === selectedTargetId,
+      });
+    }
+  }
+
+  return {
+    nodes,
+    edges: [...edgesById.values()],
+  };
+}
+
+function findTargetsForEdge(items: ReviewPathItem[], targetByNodeId: Map<string, string>, edgeId: string) {
+  const matchingItems = items.filter((item) => item.target.edgeIds.includes(edgeId));
+  if (matchingItems.length > 1) {
+    return [matchingItems[0].id, matchingItems[1].id] as const;
+  }
+
+  const edgeNodeIds = edgeId.split(":").filter((part) => targetByNodeId.has(part));
+  const targetIds = [...new Set(edgeNodeIds.map((nodeId) => targetByNodeId.get(nodeId)).filter((id): id is string => Boolean(id)))];
+  return [targetIds[0] ?? null, targetIds[1] ?? null] as const;
+}
+
 function getDiffLineClass(kind: DiffLine["kind"]) {
   if (kind === "addition") {
     return "diff-line-addition";
@@ -691,7 +860,7 @@ function InlineReviewThread({
       <div className="mb-2 flex items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
           <p className="text-xs font-medium text-muted-foreground">
-            Review Path {pathIndex} of {pathCount}
+            Review Thread {pathIndex} of {pathCount}
             {view.thread.line !== null ? ` · line ${view.thread.line}` : ""}
           </p>
           <p className="truncate text-xs text-muted-foreground">
@@ -1047,6 +1216,8 @@ export function App({
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [selectedPullRequestKey, setSelectedPullRequestKey] = useState<string | null>(null);
   const [selectedReviewThreadId, setSelectedReviewThreadId] = useState<string | null>(null);
+  const [selectedReviewTargetId, setSelectedReviewTargetId] = useState<string | null>(null);
+  const [reviewedTargetIdsByPullRequest, setReviewedTargetIdsByPullRequest] = useState<Record<string, string[]>>({});
   const [reviewQueueFilters, setReviewQueueFilters] = useState<ReviewQueueFilters>(defaultReviewQueueFilters);
   const [reviewQueueRevision, setReviewQueueRevision] = useState(0);
   const [fileChangeFilters, setFileChangeFilters] = useState<FileChangeFilters>(defaultFileChangeFilters);
@@ -1202,6 +1373,18 @@ export function App({
       }),
     [analysisIndex, attentionMapPresentation, reviewOverview.hotspots, reviewOverviewCache],
   );
+  const activeReviewTargetScopeKey = activePullRequestKey ?? "local-demo";
+  const reviewedTargetIds = useMemo(
+    () => new Set(reviewedTargetIdsByPullRequest[activeReviewTargetScopeKey] ?? []),
+    [activeReviewTargetScopeKey, reviewedTargetIdsByPullRequest],
+  );
+  const reviewPathItems = useMemo(
+    () => buildReviewPathItems(reviewTargets, reviewOverview.hotspots),
+    [reviewOverview.hotspots, reviewTargets],
+  );
+  const selectedReviewPathItem = reviewPathItems.find((item) => item.id === selectedReviewTargetId) ?? null;
+  const activeReviewPathItems = reviewPathItems.filter((item) => !reviewedTargetIds.has(item.id));
+  const reviewedReviewPathItems = reviewPathItems.filter((item) => reviewedTargetIds.has(item.id));
   const readinessBadge = getReadinessBadge(reviewOverview.readiness.state);
   const selectedPullRequestRefreshingChecks =
     activePullRequestKey !== null &&
@@ -1254,6 +1437,9 @@ export function App({
       },
     };
   });
+  const reviewWorkProgress = buildReviewWorkProgress(reviewPathItems, reviewedTargetIds, reviewThreadViews);
+  const reviewPathItemSignature = reviewPathItems.map((item) => item.id).join("|");
+  const activeReviewPathItemSignature = activeReviewPathItems.map((item) => item.id).join("|");
   const filteredReviewThreads = filterReviewThreads(reviewThreadViews, reviewQueueFilters);
   const normalizedThreadDialogQuery = threadDialogQuery.trim().toLowerCase();
   const threadDialogSourceViews = filteredReviewThreads;
@@ -1276,6 +1462,21 @@ export function App({
         return normalizedThreadDialogQuery.split(/\s+/).every((term) => haystack.includes(term));
       })
     : threadDialogSourceViews;
+
+  useEffect(() => {
+    if (reviewPathItems.length === 0) {
+      if (selectedReviewTargetId !== null) {
+        setSelectedReviewTargetId(null);
+      }
+      return;
+    }
+
+    if (selectedReviewTargetId && reviewPathItems.some((item) => item.id === selectedReviewTargetId)) {
+      return;
+    }
+
+    setSelectedReviewTargetId(activeReviewPathItems[0]?.id ?? reviewPathItems[0].id);
+  }, [activeReviewPathItemSignature, reviewPathItemSignature, reviewPathItems, selectedReviewTargetId]);
   const reviewQueueCounts = buildReviewQueueCounts(reviewThreadViews);
   const fileChangeViews = buildFileChangeViews(
     currentUserKey,
@@ -2335,6 +2536,39 @@ export function App({
     openThreadFileInDiff(threadId);
   };
 
+  const selectReviewTarget = (targetId: string) => {
+    setSelectedReviewTargetId(targetId);
+    const target = reviewPathItems.find((item) => item.id === targetId)?.target;
+    const firstFilePath = target?.paths[0];
+    const fileView = firstFilePath ? fileChangeViews.find((view) => view.file.path === firstFilePath) : null;
+    if (fileView) {
+      setSelectedFileChangeId(fileView.id);
+    }
+  };
+
+  const moveReviewTarget = (direction: 1 | -1) => {
+    const nextTargetId = moveReviewPathSelection(reviewPathItems, reviewedTargetIds, selectedReviewTargetId, direction);
+    if (nextTargetId) {
+      selectReviewTarget(nextTargetId);
+    }
+  };
+
+  const setReviewTargetReviewed = (targetId: string, reviewed: boolean) => {
+    setReviewedTargetIdsByPullRequest((current) => {
+      const existing = new Set(current[activeReviewTargetScopeKey] ?? []);
+      if (reviewed) {
+        existing.add(targetId);
+      } else {
+        existing.delete(targetId);
+      }
+
+      return {
+        ...current,
+        [activeReviewTargetScopeKey]: [...existing],
+      };
+    });
+  };
+
   const moveReviewThread = (direction: 1 | -1) => {
     if (filteredReviewThreads.length === 0) {
       return;
@@ -2647,30 +2881,31 @@ export function App({
 
   const noActiveThreadReason = "No Review Thread is selected.";
   const noVisibleThreadReason = "No Review Threads match the current filters.";
+  const noVisibleTargetReason = "No active Review Targets are available.";
   const noSelectedBulkReason = "Select one or more Review Threads first.";
   const noSelectedFileReason = "No file change is selected.";
   const commandItems: CommandPaletteItem[] = [
     {
-      id: "navigation.next-thread",
+      id: "navigation.next-review-target",
       category: "Navigation",
-      label: "Next Review Thread",
-      description: `Move to the next visible Review Thread in ${activeQueue.label}.`,
+      label: "Next Review Target",
+      description: "Move to the next active Review Target in the Review Path.",
       shortcut: "K",
-      disabled: filteredReviewThreads.length === 0,
-      disabledReason: noVisibleThreadReason,
-      keywords: ["review path", "queue"],
-      run: () => moveReviewThread(1),
+      disabled: activeReviewPathItems.length === 0,
+      disabledReason: noVisibleTargetReason,
+      keywords: ["review path", "target", "map"],
+      run: () => moveReviewTarget(1),
     },
     {
-      id: "navigation.previous-thread",
+      id: "navigation.previous-review-target",
       category: "Navigation",
-      label: "Previous Review Thread",
-      description: `Move to the previous visible Review Thread in ${activeQueue.label}.`,
+      label: "Previous Review Target",
+      description: "Move to the previous active Review Target in the Review Path.",
       shortcut: "J",
-      disabled: filteredReviewThreads.length === 0,
-      disabledReason: noVisibleThreadReason,
-      keywords: ["review path", "queue"],
-      run: () => moveReviewThread(-1),
+      disabled: activeReviewPathItems.length === 0,
+      disabledReason: noVisibleTargetReason,
+      keywords: ["review path", "target", "map"],
+      run: () => moveReviewTarget(-1),
     },
     {
       id: "navigation.open-pull-request-dialog",
@@ -2994,10 +3229,10 @@ export function App({
 
       if (key === "k") {
         event.preventDefault();
-        moveReviewThread(1);
+        moveReviewTarget(1);
       } else if (key === "j") {
         event.preventDefault();
-        moveReviewThread(-1);
+        moveReviewTarget(-1);
       } else if (key === "t") {
         event.preventDefault();
         openThreadDialog();
@@ -3038,7 +3273,7 @@ export function App({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [allFilteredThreadsSelected, moveReviewThread, openCommandPalette, openHotspotsDialog, openPullRequestDialog, openThreadDialog, openThreadFileInDiff, pullRequestDialogOpen, pullRequestDialogPullRequests, refreshCurrentPullRequest, selectPullRequestFromDialog, selectedReviewThread, threadResolveAction, toggleSelectedFileViewed]);
+  }, [allFilteredThreadsSelected, moveReviewTarget, openCommandPalette, openHotspotsDialog, openPullRequestDialog, openThreadDialog, openThreadFileInDiff, pullRequestDialogOpen, pullRequestDialogPullRequests, refreshCurrentPullRequest, selectPullRequestFromDialog, selectedReviewThread, threadResolveAction, toggleSelectedFileViewed]);
 
   const refreshBadge = getRefreshBadge(refreshStatus);
 
@@ -3531,27 +3766,105 @@ export function App({
                     <p className="mt-1 font-semibold">{attentionMapPresentation.summary.relationships}</p>
                   </div>
                 </div>
-                <div className="mt-3 space-y-2">
-                  {reviewTargets.slice(0, 5).map((target) => (
-                    <div key={target.id} className="rounded-md border border-border bg-background/70 px-2 py-2 text-xs">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="min-w-0 truncate font-medium">{target.title}</p>
-                        <Badge variant={target.priority === "high" ? "danger" : target.priority === "low" ? "muted" : "info"}>
-                          {target.kind === "generated-cluster" ? "Cluster" : target.fallback ? "Fallback" : "Target"}
-                        </Badge>
+                <div className="mt-3 grid min-h-[320px] grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]">
+                  <ReviewTargetFlow
+                    items={reviewPathItems}
+                    onSelectTarget={selectReviewTarget}
+                    reviewedTargetIds={reviewedTargetIds}
+                    selectedTargetId={selectedReviewTargetId}
+                  />
+                  <aside aria-label="Review Path" className="min-h-0 rounded-md border border-border bg-background p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-semibold">Review Path</h3>
+                        <p className="mt-1 truncate text-xs text-muted-foreground">
+                          {reviewWorkProgress.combinedRemaining} remaining · target order is generated
+                        </p>
                       </div>
-                      <p className="mt-1 truncate text-muted-foreground">
-                        {target.modulePath} · {target.size.nodes} node{target.size.nodes === 1 ? "" : "s"} ·{" "}
-                        {target.size.files} file{target.size.files === 1 ? "" : "s"} · {target.reasoning[0]}
-                      </p>
+                      <Badge variant="info">{activeReviewPathItems.length} active</Badge>
                     </div>
-                  ))}
-                  {reviewTargets.length === 0 && (
-                    <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">No Review Targets are available yet.</p>
-                  )}
-                  {reviewTargets.length > 5 && (
-                    <p className="text-xs text-muted-foreground">Showing 5 of {reviewTargets.length} Review Targets.</p>
-                  )}
+                    <div className="mt-3 grid grid-cols-3 gap-2 text-xs" aria-label="Review Work">
+                      <div className="rounded-md bg-muted p-2">
+                        <p className="text-muted-foreground">Targets</p>
+                        <p className="mt-1 font-semibold">
+                          {reviewWorkProgress.targets.reviewed}/{reviewWorkProgress.targets.total}
+                        </p>
+                      </div>
+                      <div className="rounded-md bg-muted p-2">
+                        <p className="text-muted-foreground">Threads</p>
+                        <p className="mt-1 font-semibold">
+                          {reviewWorkProgress.threads.reviewed}/{reviewWorkProgress.threads.total}
+                        </p>
+                      </div>
+                      <div className="rounded-md bg-muted p-2">
+                        <p className="text-muted-foreground">Remaining</p>
+                        <p className="mt-1 font-semibold">{reviewWorkProgress.combinedRemaining}</p>
+                      </div>
+                    </div>
+                    {selectedReviewPathItem && (
+                      <div className="mt-3 rounded-md border border-border p-2 text-xs" aria-label="Selected Review Target">
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="min-w-0 truncate font-semibold">{selectedReviewPathItem.target.title}</p>
+                          <Badge variant={reviewedTargetIds.has(selectedReviewPathItem.id) ? "success" : "muted"}>
+                            #{selectedReviewPathItem.order}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 truncate text-muted-foreground">{selectedReviewPathItem.orderingReasons.join(", ")}</p>
+                        <Button
+                          className="mt-2 w-full"
+                          onClick={() => setReviewTargetReviewed(selectedReviewPathItem.id, !reviewedTargetIds.has(selectedReviewPathItem.id))}
+                          size="sm"
+                          variant="outline"
+                        >
+                          {reviewedTargetIds.has(selectedReviewPathItem.id) ? "Mark target active" : "Mark target reviewed"}
+                        </Button>
+                      </div>
+                    )}
+                    <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
+                      {activeReviewPathItems.map((item) => (
+                        <button
+                          aria-pressed={selectedReviewTargetId === item.id}
+                          className={cn(
+                            "w-full rounded-md border border-border p-2 text-left text-xs hover:bg-accent",
+                            selectedReviewTargetId === item.id && "border-primary bg-accent text-accent-foreground",
+                          )}
+                          key={item.id}
+                          onClick={() => selectReviewTarget(item.id)}
+                          type="button"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="min-w-0 truncate font-medium">
+                              {item.order}. {item.target.title}
+                            </span>
+                            <Badge variant={item.hotspotScore > 0 ? "warning" : "muted"}>{item.hotspotScore}</Badge>
+                          </div>
+                          <p className="mt-1 truncate text-muted-foreground">{item.orderingReasons.join(", ")}</p>
+                        </button>
+                      ))}
+                      {activeReviewPathItems.length === 0 && (
+                        <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">No active Review Targets.</p>
+                      )}
+                    </div>
+                    {reviewedReviewPathItems.length > 0 && (
+                      <details className="mt-3 rounded-md border border-border p-2 text-xs" aria-label="Reviewed Review Targets">
+                        <summary className="cursor-pointer font-medium text-muted-foreground">
+                          Reviewed targets ({reviewedReviewPathItems.length})
+                        </summary>
+                        <div className="mt-2 space-y-1">
+                          {reviewedReviewPathItems.map((item) => (
+                            <button
+                              className="w-full rounded-md px-2 py-1 text-left text-muted-foreground hover:bg-accent"
+                              key={item.id}
+                              onClick={() => selectReviewTarget(item.id)}
+                              type="button"
+                            >
+                              {item.order}. {item.target.title}
+                            </button>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </aside>
                 </div>
               </section>
 
@@ -3577,7 +3890,7 @@ export function App({
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <p className="text-xs text-muted-foreground">
-                      Review Path {selectedReviewThread ? selectedReviewThreadIndex + 1 : 0} of {filteredReviewThreads.length}
+                      Review Thread {selectedReviewThread ? selectedReviewThreadIndex + 1 : 0} of {filteredReviewThreads.length}
                     </p>
                     {activeThreadState === "outdated" && (
                       <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">Older diff context from a previous hunk.</p>
@@ -3821,8 +4134,8 @@ export function App({
 
               <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <span className="inline-flex items-center gap-1"><Keyboard className="h-3.5 w-3.5" aria-hidden="true" /> Keyboard Flow</span>
-                <span>Next <Kbd>K</Kbd></span>
-                <span>Previous <Kbd>J</Kbd></span>
+                <span>Next target <Kbd>K</Kbd></span>
+                <span>Previous target <Kbd>J</Kbd></span>
                 <span>Threads <Kbd>T</Kbd></span>
                 <span>Refresh PR <Kbd>⌃R</Kbd></span>
                 <span>Reviewed <Kbd>R</Kbd></span>

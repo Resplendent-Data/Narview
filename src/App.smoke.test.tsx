@@ -64,7 +64,8 @@ import {
   writeCachedPullRequestData,
 } from "./lib/pr-cache";
 import { buildReviewOverview, getMergeReadiness, scoreHotspots, summarizeChecks } from "./lib/review-overview";
-import { buildReviewTargets } from "./lib/review-targets";
+import { buildReviewPathItems, buildReviewWorkProgress, moveReviewPathSelection } from "./lib/review-path";
+import { buildReviewTargets, type ReviewTarget } from "./lib/review-targets";
 import {
   buildReviewThreadViews,
   filterReviewThreads,
@@ -404,6 +405,28 @@ function createSyntheticAttentionNode(overrides: Partial<AttentionNode> & Pick<A
   };
 }
 
+function createReviewTarget(overrides: Partial<ReviewTarget> & Pick<ReviewTarget, "id" | "title" | "paths">): ReviewTarget {
+  return {
+    stableKey: overrides.id,
+    kind: "node-group",
+    priority: "normal",
+    nodeIds: [overrides.id],
+    edgeIds: [],
+    filePath: overrides.paths.length === 1 ? overrides.paths[0] : null,
+    modulePath: overrides.paths[0]?.split("/").slice(0, -1).join("/") || "src",
+    fallback: false,
+    reasoning: ["Test target."],
+    size: {
+      nodes: 1,
+      files: overrides.paths.length,
+      changedLines: 10,
+      relationships: 0,
+      reviewThreads: 0,
+    },
+    ...overrides,
+  };
+}
+
 function createQueueThreads(): CachedPullRequestData["reviewThreads"] {
   return [
     {
@@ -669,7 +692,7 @@ describe("App shell", () => {
     );
 
     expect(screen.queryByLabelText("Active review thread")).not.toBeInTheDocument();
-    expect(inlineThread).toHaveTextContent("Review Path 1 of 1");
+    expect(inlineThread).toHaveTextContent("Review Thread 1 of 1");
     expect(inlineThread).toHaveTextContent("line 24");
     expect(inlineThread).toHaveTextContent("The active review comment should sit next to this replacement.");
     expect(diffCodeLine?.closest(".diff-row")).toHaveClass("diff-row-comment-anchor");
@@ -752,7 +775,7 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: /command/i }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByText("Next Review Thread")).toBeInTheDocument();
+    expect(screen.getByText("Next Review Target")).toBeInTheDocument();
 
     await user.keyboard("{Escape}");
     await user.keyboard("{Control>}k{/Control}");
@@ -770,7 +793,7 @@ describe("App shell", () => {
     await user.click(screen.getByRole("button", { name: /command/i }));
     await user.type(screen.getByLabelText("Search commands"), "human threads");
 
-    expect(screen.queryByText("Next Review Thread")).not.toBeInTheDocument();
+    expect(screen.queryByText("Next Review Target")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /filter queue: human threads/i }));
 
     expect(screen.getByLabelText("Source")).toHaveValue("human");
@@ -1341,8 +1364,32 @@ describe("App shell", () => {
     expect(attentionMap).toHaveTextContent("Hunks");
     expect(attentionMap).toHaveTextContent("Fallbacks");
     expect(attentionMap).toHaveTextContent("Edges");
+    expect(within(attentionMap).getByLabelText("Review target graph")).toBeInTheDocument();
+    expect(within(attentionMap).getByLabelText("Review Path")).toHaveTextContent("Review Path");
+    expect(within(attentionMap).getByLabelText("Review Work")).toHaveTextContent("Remaining");
     expect(attentionMap).toHaveTextContent("assets/review-map.png");
     expect(window.localStorage.getItem(analysisIndexStorageKey)).toContain(readyAnalysisInput.headSha);
+  });
+
+  it("moves Review Path focus with J/K and keeps reviewed targets available without reorder controls", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const graph = await screen.findByLabelText("Review target graph");
+    const reviewPath = screen.getByLabelText("Review Path");
+    await waitFor(() => expect(graph).toHaveAttribute("data-focused-target-id", expect.stringMatching(/^target:/)));
+    const firstFocusedTargetId = graph.getAttribute("data-focused-target-id");
+
+    await user.keyboard("k");
+
+    await waitFor(() => expect(graph.getAttribute("data-focused-target-id")).not.toBe(firstFocusedTargetId));
+    expect(reviewPath).toHaveTextContent("Review Path");
+    expect(screen.queryByRole("button", { name: /reorder|move up|move down/i })).not.toBeInTheDocument();
+
+    await user.click(within(reviewPath).getByRole("button", { name: /mark target reviewed/i }));
+
+    expect(within(reviewPath).getByLabelText("Reviewed Review Targets")).toHaveTextContent("Reviewed targets (1)");
+    expect(within(reviewPath).getByLabelText("Review Work")).toHaveTextContent("1/5");
   });
 
   it("loads non-draft Pull Requests by default and includes drafts when filtered", async () => {
@@ -2410,6 +2457,59 @@ describe("App shell", () => {
     expect(firstTargets[0].id).toBe(secondTargets[0].id);
   });
 
+  it("orders Review Path by hotspot score independently from visual layout order", () => {
+    const targets = [
+      createReviewTarget({ id: "target-zeta", title: "Zeta target", paths: ["src/zeta.ts"], modulePath: "src/zeta" }),
+      createReviewTarget({ id: "target-alpha", title: "Alpha target", paths: ["src/alpha.ts"], modulePath: "src/alpha" }),
+    ];
+    const items = buildReviewPathItems(targets, [
+      {
+        kind: "file",
+        path: "src/zeta.ts",
+        score: 80,
+        changedLines: 80,
+        unresolvedThreads: 0,
+        reasons: ["80 changed lines"],
+      },
+      {
+        kind: "file",
+        path: "src/alpha.ts",
+        score: 4,
+        changedLines: 4,
+        unresolvedThreads: 1,
+        reasons: ["4 changed lines", "1 unresolved thread"],
+      },
+    ]);
+    const visualOrder = [...targets].sort((left, right) => left.modulePath.localeCompare(right.modulePath)).map((target) => target.id);
+
+    expect(visualOrder).toEqual(["target-alpha", "target-zeta"]);
+    expect(items.map((item) => item.id)).toEqual(["target-zeta", "target-alpha"]);
+    expect(items[0].orderingReasons).toContain("Hotspot score 80");
+  });
+
+  it("moves through active Review Targets and reports combined Review Work progress", () => {
+    const targets = [
+      createReviewTarget({ id: "target-one", title: "One", paths: ["src/one.ts"] }),
+      createReviewTarget({ id: "target-two", title: "Two", paths: ["src/two.ts"] }),
+      createReviewTarget({ id: "target-three", title: "Three", paths: ["src/three.ts"] }),
+    ];
+    const items = buildReviewPathItems(targets, []);
+    const reviewedTargetIds = new Set(["target-two"]);
+
+    expect(moveReviewPathSelection(items, reviewedTargetIds, "target-one", 1)).toBe("target-three");
+    expect(moveReviewPathSelection(items, reviewedTargetIds, "target-three", -1)).toBe("target-one");
+    expect(
+      buildReviewWorkProgress(items, reviewedTargetIds, [
+        { ...buildReviewThreadViews("octocat", "repo#1", createQueueThreads())[0], reviewed: true },
+        { ...buildReviewThreadViews("octocat", "repo#1", createQueueThreads())[1], reviewed: false },
+      ]),
+    ).toMatchObject({
+      targets: { total: 3, reviewed: 1, remaining: 2 },
+      threads: { total: 2, reviewed: 1, remaining: 1 },
+      combinedRemaining: 3,
+    });
+  });
+
   it("summarizes checks with names, timing, and detail links", () => {
     const summary = summarizeChecks([
       {
@@ -2830,7 +2930,7 @@ describe("App shell", () => {
     const diffViewer = screen.getByLabelText("Diff viewer");
     expect(within(diffViewer).getByText("src/review/queue.ts")).toBeInTheDocument();
     expect(screen.getByText("@monalisa")).toBeInTheDocument();
-    expect(screen.getByText("Review Path 2 of 3")).toBeInTheDocument();
+    expect(screen.getByText("Review Thread 2 of 3")).toBeInTheDocument();
   });
 
   it("opens a searchable Review Threads dialog with the T shortcut", async () => {
@@ -2873,16 +2973,19 @@ describe("App shell", () => {
     const threadActionClient = createThreadActionClient();
     render(<App threadActionClient={threadActionClient} />);
 
-    expect(screen.getByText("Previous")).toBeInTheDocument();
+    expect(screen.getByText("Previous target")).toBeInTheDocument();
     expect(screen.getAllByText("Threads").length).toBeGreaterThan(0);
     expect(screen.getByText("Open file")).toBeInTheDocument();
     expect(screen.getAllByText("Focus").length).toBeGreaterThan(0);
+    const graph = screen.getByLabelText("Review target graph");
+    await waitFor(() => expect(graph).toHaveAttribute("data-focused-target-id", expect.stringMatching(/^target:/)));
+    const firstFocusedTargetId = graph.getAttribute("data-focused-target-id");
 
     await user.keyboard("k");
-    expect(within(screen.getByLabelText("Diff viewer")).getByText("src/review/queue.ts")).toBeInTheDocument();
+    await waitFor(() => expect(graph.getAttribute("data-focused-target-id")).not.toBe(firstFocusedTargetId));
 
     await user.keyboard("j");
-    expect(within(screen.getByLabelText("Diff viewer")).getByText("src/auth/session.ts")).toBeInTheDocument();
+    await waitFor(() => expect(graph.getAttribute("data-focused-target-id")).toBe(firstFocusedTargetId));
 
     await user.keyboard("r");
     expect(await within(screen.getByLabelText("Inspector")).findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
@@ -2943,7 +3046,10 @@ describe("App shell", () => {
     });
     await waitFor(() => expect(screen.getByLabelText("Review queue summary")).toHaveTextContent("2 matching filters"));
 
-    await user.keyboard("k");
+    const queueSummary = screen.getByLabelText("Review queue summary");
+    await user.click(within(queueSummary).getByRole("button", { name: /browse threads/i }));
+    const threadDialog = await screen.findByRole("dialog", { name: /review threads/i });
+    await user.click(within(threadDialog).getByRole("button", { name: /src\/review\/queue\.ts/i }));
 
     await waitFor(() => {
       const savedSnapshot = vi.mocked(reviewSessionClient.saveSession).mock.calls.at(-1)?.[2];
