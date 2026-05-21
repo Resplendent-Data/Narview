@@ -229,6 +229,31 @@ pub struct ReviewCloneStatusResponse {
     last_checked_epoch_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PullRequestAnalysisInputState {
+    Ready,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestAnalysisInputResponse {
+    repository: WorkspaceRepository,
+    pull_request_number: u64,
+    state: PullRequestAnalysisInputState,
+    review_clone: ReviewCloneStatusResponse,
+    base_ref: Option<String>,
+    head_ref: Option<String>,
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    merge_base_sha: Option<String>,
+    comparison_ref: Option<String>,
+    checkout_mode: Option<String>,
+    message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceFile {
@@ -352,6 +377,55 @@ pub async fn ensure_review_clone(
         WorkspaceCommandError::new(
             "review-clone-task-error",
             format!("Could not initialize the Review Clone task: {error}"),
+        )
+    })?
+}
+
+#[tauri::command]
+pub async fn prepare_pull_request_review_clone(
+    app: AppHandle,
+    auth_state: State<'_, AuthState>,
+    workspace_state: State<'_, WorkspaceState>,
+    repository: String,
+    number: u64,
+) -> Result<PullRequestAnalysisInputResponse, WorkspaceCommandError> {
+    let repository = parse_repository_slug(&repository)?;
+    let token = match auth_state.github_token() {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            return Err(WorkspaceCommandError::new(
+                "github-session-required",
+                "Sign in to prepare a Pull Request Review Clone.",
+            ))
+        }
+        Err(error) => {
+            return Err(WorkspaceCommandError::new(
+                "github-session-error",
+                github_session_failure_message(&error),
+            ))
+        }
+    };
+    let root = review_clones_root_path(&app)?;
+    let detail =
+        fetch_pull_request_detail(&workspace_state.http, &token, &repository, number).await?;
+    let remote_url = review_clone_remote_url(&repository);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        prepare_pull_request_review_clone_at(
+            &repository,
+            &root,
+            number,
+            &remote_url,
+            &detail,
+            Some(token.as_str()),
+            true,
+        )
+    })
+    .await
+    .map_err(|error| {
+        WorkspaceCommandError::new(
+            "review-clone-task-error",
+            format!("Could not prepare the Pull Request Review Clone task: {error}"),
         )
     })?
 }
@@ -644,8 +718,13 @@ struct PullRequestDetail {
     description: Option<String>,
     author_login: Option<String>,
     base_branch: Option<String>,
+    base_sha: String,
+    base_repo_clone_url: Option<String>,
+    base_repo_full_name: Option<String>,
     head_branch: Option<String>,
     head_sha: String,
+    head_repo_clone_url: Option<String>,
+    head_repo_full_name: Option<String>,
     mergeable: Option<String>,
     merge_state_status: Option<String>,
     review_decision: Option<String>,
@@ -684,8 +763,13 @@ async fn fetch_pull_request_detail(
         description: detail.body,
         author_login: detail.user.map(|user| user.login),
         base_branch: Some(detail.base.git_ref),
+        base_sha: detail.base.sha,
+        base_repo_clone_url: detail.base.repo.as_ref().map(|repo| repo.clone_url.clone()),
+        base_repo_full_name: detail.base.repo.as_ref().map(|repo| repo.full_name.clone()),
         head_branch: Some(detail.head.git_ref),
         head_sha: detail.head.sha,
+        head_repo_clone_url: detail.head.repo.as_ref().map(|repo| repo.clone_url.clone()),
+        head_repo_full_name: detail.head.repo.as_ref().map(|repo| repo.full_name.clone()),
         mergeable: detail.mergeable.map(|mergeable| {
             if mergeable {
                 "MERGEABLE".to_string()
@@ -1004,6 +1088,8 @@ struct GithubPullRequestDetail {
 struct GithubBranchRef {
     #[serde(rename = "ref")]
     git_ref: String,
+    sha: String,
+    repo: Option<GithubRepositoryRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1011,6 +1097,13 @@ struct GithubHeadRef {
     #[serde(rename = "ref")]
     git_ref: String,
     sha: String,
+    repo: Option<GithubRepositoryRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRepositoryRef {
+    full_name: String,
+    clone_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1394,6 +1487,273 @@ fn ensure_review_clone_at(
     ))
 }
 
+fn prepare_pull_request_review_clone_at(
+    repository: &WorkspaceRepository,
+    root: &Path,
+    number: u64,
+    base_remote_url: &str,
+    detail: &PullRequestDetail,
+    token: Option<&str>,
+    write_permission: bool,
+) -> Result<PullRequestAnalysisInputResponse, WorkspaceCommandError> {
+    let clone_status =
+        ensure_review_clone_at(repository, root, base_remote_url, token, write_permission)?;
+    if clone_status.state != ReviewCloneHealthState::Ready {
+        let state = match clone_status.state {
+            ReviewCloneHealthState::Unavailable => PullRequestAnalysisInputState::Unavailable,
+            _ => PullRequestAnalysisInputState::Failed,
+        };
+        return Ok(pull_request_analysis_response(
+            repository,
+            number,
+            state,
+            clone_status,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("Review Clone is not ready for Pull Request head preparation.".to_string()),
+        ));
+    }
+
+    let clone_path = PathBuf::from(&clone_status.storage_path);
+    let Some(base_branch) = detail.base_branch.as_ref() else {
+        return Ok(failed_pull_request_analysis_response(
+            repository,
+            number,
+            clone_status,
+            "GitHub did not return a base branch for this Pull Request.",
+        ));
+    };
+    let Some(head_branch) = detail.head_branch.as_ref() else {
+        return Ok(failed_pull_request_analysis_response(
+            repository,
+            number,
+            clone_status,
+            "GitHub did not return a head branch for this Pull Request.",
+        ));
+    };
+
+    let base_ref = format!("refs/narview/pr/{number}/base");
+    let head_ref = format!("refs/narview/pr/{number}/head");
+    let base_fetch_refspec = format!("+refs/heads/{base_branch}:{base_ref}");
+    let head_fetch_refspec = format!("+refs/heads/{head_branch}:{head_ref}");
+    let base_fetch_remote = detail
+        .base_repo_clone_url
+        .as_deref()
+        .unwrap_or(base_remote_url);
+    let head_fetch_remote = detail
+        .head_repo_clone_url
+        .as_deref()
+        .unwrap_or(base_remote_url);
+
+    if let Err(error) = run_git_in_clone(
+        &clone_path,
+        &[
+            "fetch".to_string(),
+            "--no-tags".to_string(),
+            base_fetch_remote.to_string(),
+            base_fetch_refspec,
+        ],
+        token,
+    ) {
+        return Ok(failed_pull_request_analysis_response(
+            repository,
+            number,
+            clone_status,
+            &format!(
+                "Could not fetch the Pull Request base ref: {}",
+                error.message
+            ),
+        ));
+    }
+
+    let mut head_fetch_message = None;
+    let head_fetch_result = run_git_in_clone(
+        &clone_path,
+        &[
+            "fetch".to_string(),
+            "--no-tags".to_string(),
+            head_fetch_remote.to_string(),
+            head_fetch_refspec,
+        ],
+        token,
+    );
+    if let Err(error) = head_fetch_result {
+        let pull_refspec = format!("+refs/pull/{number}/head:{head_ref}");
+        let fallback_result = run_git_in_clone(
+            &clone_path,
+            &[
+                "fetch".to_string(),
+                "--no-tags".to_string(),
+                base_remote_url.to_string(),
+                pull_refspec,
+            ],
+            token,
+        );
+
+        if let Err(fallback_error) = fallback_result {
+            return Ok(failed_pull_request_analysis_response(
+                repository,
+                number,
+                clone_status,
+                &format!(
+                    "Could not fetch the Pull Request head ref from the head repository or GitHub pull ref. Head fetch: {}; fallback: {}",
+                    error.message, fallback_error.message
+                ),
+            ));
+        }
+        head_fetch_message =
+            Some("Fetched the Pull Request head from GitHub's pull ref fallback.".to_string());
+    }
+
+    let resolved_base_sha = match run_git_in_clone(
+        &clone_path,
+        &["rev-parse".to_string(), base_ref.clone()],
+        token,
+    ) {
+        Ok(sha) => sha,
+        Err(error) => {
+            return Ok(failed_pull_request_analysis_response(
+                repository,
+                number,
+                clone_status,
+                &format!("Could not resolve the prepared base ref: {}", error.message),
+            ))
+        }
+    };
+    let resolved_head_sha = match run_git_in_clone(
+        &clone_path,
+        &["rev-parse".to_string(), head_ref.clone()],
+        token,
+    ) {
+        Ok(sha) => sha,
+        Err(error) => {
+            return Ok(failed_pull_request_analysis_response(
+                repository,
+                number,
+                clone_status,
+                &format!("Could not resolve the prepared head ref: {}", error.message),
+            ))
+        }
+    };
+
+    let merge_base_sha = run_git_in_clone(
+        &clone_path,
+        &["merge-base".to_string(), base_ref.clone(), head_ref.clone()],
+        token,
+    )
+    .ok();
+    let comparison_ref = merge_base_sha
+        .clone()
+        .unwrap_or_else(|| resolved_base_sha.clone());
+
+    if let Err(error) = run_git_in_clone(
+        &clone_path,
+        &[
+            "checkout".to_string(),
+            "--detach".to_string(),
+            head_ref.clone(),
+        ],
+        token,
+    ) {
+        return Ok(failed_pull_request_analysis_response(
+            repository,
+            number,
+            clone_status,
+            &format!(
+                "Could not check out the Pull Request head for analysis: {}",
+                error.message
+            ),
+        ));
+    }
+
+    let mut messages = Vec::new();
+    if let Some(message) = head_fetch_message {
+        messages.push(message);
+    }
+    if detail
+        .head_repo_full_name
+        .as_ref()
+        .zip(detail.base_repo_full_name.as_ref())
+        .is_some_and(|(head, base)| head.to_ascii_lowercase() != base.to_ascii_lowercase())
+    {
+        messages.push("Prepared a fetchable fork Pull Request head.".to_string());
+    } else {
+        messages.push("Prepared a same-repository Pull Request head.".to_string());
+    }
+
+    Ok(pull_request_analysis_response(
+        repository,
+        number,
+        PullRequestAnalysisInputState::Ready,
+        clone_status,
+        Some(base_ref),
+        Some(head_ref),
+        Some(detail.base_sha.clone()).or(Some(resolved_base_sha)),
+        Some(detail.head_sha.clone()).or(Some(resolved_head_sha)),
+        merge_base_sha,
+        Some(comparison_ref),
+        Some("detached-head".to_string()),
+        Some(messages.join(" ")),
+    ))
+}
+
+fn failed_pull_request_analysis_response(
+    repository: &WorkspaceRepository,
+    number: u64,
+    clone_status: ReviewCloneStatusResponse,
+    message: &str,
+) -> PullRequestAnalysisInputResponse {
+    pull_request_analysis_response(
+        repository,
+        number,
+        PullRequestAnalysisInputState::Failed,
+        clone_status,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(message.to_string()),
+    )
+}
+
+fn pull_request_analysis_response(
+    repository: &WorkspaceRepository,
+    number: u64,
+    state: PullRequestAnalysisInputState,
+    clone_status: ReviewCloneStatusResponse,
+    base_ref: Option<String>,
+    head_ref: Option<String>,
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    merge_base_sha: Option<String>,
+    comparison_ref: Option<String>,
+    checkout_mode: Option<String>,
+    message: Option<String>,
+) -> PullRequestAnalysisInputResponse {
+    PullRequestAnalysisInputResponse {
+        repository: repository.clone(),
+        pull_request_number: number,
+        state,
+        review_clone: clone_status,
+        base_ref,
+        head_ref,
+        base_sha,
+        head_sha,
+        merge_base_sha,
+        comparison_ref,
+        checkout_mode,
+        message,
+    }
+}
+
 fn run_git_clone(
     remote_url: &str,
     clone_path: &Path,
@@ -1408,15 +1768,7 @@ fn run_git_clone(
         .arg(clone_path)
         .env("GIT_TERMINAL_PROMPT", "0");
 
-    if let Some(token) = token.filter(|value| !value.is_empty()) {
-        command
-            .env("GIT_CONFIG_COUNT", "1")
-            .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader")
-            .env(
-                "GIT_CONFIG_VALUE_0",
-                format!("AUTHORIZATION: bearer {token}"),
-            );
-    }
+    apply_git_auth_env(&mut command, token);
 
     let output = command.output().map_err(|error| {
         WorkspaceCommandError::new(
@@ -1439,6 +1791,54 @@ fn run_git_clone(
     }
 
     Ok(())
+}
+
+fn run_git_in_clone(
+    clone_path: &Path,
+    args: &[String],
+    token: Option<&str>,
+) -> Result<String, WorkspaceCommandError> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(clone_path)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    apply_git_auth_env(&mut command, token);
+
+    let output = command.output().map_err(|error| {
+        WorkspaceCommandError::new(
+            "review-clone-git-unavailable",
+            format!("Could not run git in Review Clone: {error}"),
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            format!("git {} failed without a diagnostic.", args.join(" "))
+        } else {
+            stderr
+        };
+        return Err(WorkspaceCommandError::new(
+            "review-clone-git-error",
+            message,
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn apply_git_auth_env(command: &mut Command, token: Option<&str>) {
+    if let Some(token) = token.filter(|value| !value.is_empty()) {
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader")
+            .env(
+                "GIT_CONFIG_VALUE_0",
+                format!("AUTHORIZATION: bearer {token}"),
+            );
+    }
 }
 
 fn git_available() -> bool {
@@ -1628,6 +2028,125 @@ mod tests {
         std::env::temp_dir().join(format!("narview-review-clones-{}", uuid::Uuid::new_v4()))
     }
 
+    fn run_test_git(args: &[&str], cwd: Option<&Path>) -> String {
+        let mut command = Command::new("git");
+        command.args(args);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn write_test_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+
+    struct TestPullRequestRepos {
+        root: PathBuf,
+        base_remote: String,
+        fork_remote: String,
+        base_sha: String,
+        head_sha: String,
+    }
+
+    fn create_test_pull_request_repos(push_head_to_base: bool) -> TestPullRequestRepos {
+        let root = test_review_clone_root();
+        let work = root.join("work");
+        let base_remote = root.join("base.git");
+        let fork_remote = root.join("fork.git");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&work).unwrap();
+
+        run_test_git(&["init"], Some(&work));
+        run_test_git(&["checkout", "-B", "main"], Some(&work));
+        run_test_git(
+            &["config", "user.email", "reviewer@example.com"],
+            Some(&work),
+        );
+        run_test_git(&["config", "user.name", "Narview Reviewer"], Some(&work));
+        write_test_file(&work.join("README.md"), "base\n");
+        run_test_git(&["add", "README.md"], Some(&work));
+        run_test_git(&["commit", "-m", "base"], Some(&work));
+        let base_sha = run_test_git(&["rev-parse", "HEAD"], Some(&work));
+        run_test_git(
+            &[
+                "clone",
+                "--bare",
+                work.to_str().unwrap(),
+                base_remote.to_str().unwrap(),
+            ],
+            None,
+        );
+
+        run_test_git(&["checkout", "-B", "feature"], Some(&work));
+        write_test_file(&work.join("README.md"), "base\nhead\n");
+        run_test_git(&["commit", "-am", "head"], Some(&work));
+        let head_sha = run_test_git(&["rev-parse", "HEAD"], Some(&work));
+
+        if push_head_to_base {
+            run_test_git(
+                &["remote", "add", "origin", base_remote.to_str().unwrap()],
+                Some(&work),
+            );
+            run_test_git(&["push", "origin", "feature"], Some(&work));
+        }
+        run_test_git(
+            &[
+                "clone",
+                "--bare",
+                work.to_str().unwrap(),
+                fork_remote.to_str().unwrap(),
+            ],
+            None,
+        );
+
+        TestPullRequestRepos {
+            root,
+            base_remote: base_remote.to_string_lossy().to_string(),
+            fork_remote: fork_remote.to_string_lossy().to_string(),
+            base_sha,
+            head_sha,
+        }
+    }
+
+    fn test_pull_request_detail(
+        repos: &TestPullRequestRepos,
+        head_remote: &str,
+        head_full_name: &str,
+    ) -> PullRequestDetail {
+        PullRequestDetail {
+            title: "Test PR".to_string(),
+            description: None,
+            author_login: Some("octocat".to_string()),
+            base_branch: Some("main".to_string()),
+            base_sha: repos.base_sha.clone(),
+            base_repo_clone_url: Some(repos.base_remote.clone()),
+            base_repo_full_name: Some("acme/api".to_string()),
+            head_branch: Some("feature".to_string()),
+            head_sha: repos.head_sha.clone(),
+            head_repo_clone_url: Some(head_remote.to_string()),
+            head_repo_full_name: Some(head_full_name.to_string()),
+            mergeable: Some("MERGEABLE".to_string()),
+            merge_state_status: Some("CLEAN".to_string()),
+            review_decision: None,
+            url: "https://github.com/acme/api/pull/42".to_string(),
+            is_draft: false,
+            updated_at: "2026-05-21T12:00:00Z".to_string(),
+            rate_limit_remaining: None,
+            rate_limit_reset_epoch_seconds: None,
+        }
+    }
+
     #[test]
     fn saves_normalized_repositories_without_duplicates() {
         let path = test_workspace_path();
@@ -1768,6 +2287,117 @@ mod tests {
         assert!(!clone_path.join("analysis-index").exists());
 
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn prepares_same_repo_pull_request_head_without_synthetic_merge() {
+        if !git_available() {
+            return;
+        }
+
+        let repos = create_test_pull_request_repos(true);
+        let analysis_root = repos.root.join("analysis");
+        let repository = WorkspaceRepository::new("acme", "api");
+        let detail = test_pull_request_detail(&repos, &repos.base_remote, "acme/api");
+
+        let prepared = prepare_pull_request_review_clone_at(
+            &repository,
+            &analysis_root,
+            42,
+            &repos.base_remote,
+            &detail,
+            None,
+            true,
+        )
+        .unwrap();
+        let clone_path = review_clone_repository_path(&analysis_root, &repository);
+        let checked_out_sha = run_test_git(&["rev-parse", "HEAD"], Some(&clone_path));
+
+        assert_eq!(prepared.state, PullRequestAnalysisInputState::Ready);
+        assert_eq!(prepared.checkout_mode.as_deref(), Some("detached-head"));
+        assert_eq!(prepared.head_sha.as_deref(), Some(repos.head_sha.as_str()));
+        assert_eq!(
+            prepared.merge_base_sha.as_deref(),
+            Some(repos.base_sha.as_str())
+        );
+        assert_eq!(
+            prepared.comparison_ref.as_deref(),
+            Some(repos.base_sha.as_str())
+        );
+        assert_eq!(checked_out_sha, repos.head_sha);
+        assert!(!prepared
+            .comparison_ref
+            .as_deref()
+            .unwrap_or_default()
+            .contains("merge"));
+
+        fs::remove_dir_all(repos.root).ok();
+    }
+
+    #[test]
+    fn prepares_fetchable_fork_pull_request_head() {
+        if !git_available() {
+            return;
+        }
+
+        let repos = create_test_pull_request_repos(false);
+        let analysis_root = repos.root.join("analysis");
+        let repository = WorkspaceRepository::new("acme", "api");
+        let detail = test_pull_request_detail(&repos, &repos.fork_remote, "octocat/api");
+
+        let prepared = prepare_pull_request_review_clone_at(
+            &repository,
+            &analysis_root,
+            42,
+            &repos.base_remote,
+            &detail,
+            None,
+            true,
+        )
+        .unwrap();
+        let clone_path = review_clone_repository_path(&analysis_root, &repository);
+        let checked_out_sha = run_test_git(&["rev-parse", "HEAD"], Some(&clone_path));
+
+        assert_eq!(prepared.state, PullRequestAnalysisInputState::Ready);
+        assert_eq!(prepared.head_sha.as_deref(), Some(repos.head_sha.as_str()));
+        assert_eq!(checked_out_sha, repos.head_sha);
+        assert!(prepared.message.unwrap_or_default().contains("fork"));
+
+        fs::remove_dir_all(repos.root).ok();
+    }
+
+    #[test]
+    fn reports_unfetchable_head_without_blocking_clone_status() {
+        if !git_available() {
+            return;
+        }
+
+        let repos = create_test_pull_request_repos(false);
+        let analysis_root = repos.root.join("analysis");
+        let repository = WorkspaceRepository::new("acme", "api");
+        let missing_remote = repos.root.join("missing.git").to_string_lossy().to_string();
+        let mut detail = test_pull_request_detail(&repos, &missing_remote, "octocat/api");
+        detail.head_branch = Some("deleted-branch".to_string());
+
+        let prepared = prepare_pull_request_review_clone_at(
+            &repository,
+            &analysis_root,
+            42,
+            &repos.base_remote,
+            &detail,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.state, PullRequestAnalysisInputState::Failed);
+        assert_eq!(prepared.review_clone.state, ReviewCloneHealthState::Ready);
+        assert!(prepared
+            .message
+            .unwrap_or_default()
+            .contains("Could not fetch the Pull Request head ref"));
+
+        fs::remove_dir_all(repos.root).ok();
     }
 
     #[test]

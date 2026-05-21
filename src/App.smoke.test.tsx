@@ -71,7 +71,13 @@ import {
   validateReplyBody,
   type ThreadActionClient,
 } from "./lib/thread-actions";
-import type { PullRequestSummary, ReviewCloneStatus, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
+import type {
+  PullRequestAnalysisInput,
+  PullRequestSummary,
+  ReviewCloneStatus,
+  WorkspaceClient,
+  WorkspaceRepository,
+} from "./lib/workspace";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openUrl: vi.fn().mockResolvedValue(undefined),
@@ -120,6 +126,21 @@ const notClonedReviewCloneStatus: ReviewCloneStatus = {
   state: "not-cloned",
   message: "No app-managed Review Clone exists for this repository yet.",
   writePermission: false,
+};
+
+const readyAnalysisInput: PullRequestAnalysisInput = {
+  repository: narviewRepository,
+  pullRequestNumber: 12,
+  state: "ready",
+  reviewClone: readyReviewCloneStatus,
+  baseRef: "refs/narview/pr/12/base",
+  headRef: "refs/narview/pr/12/head",
+  baseSha: "1111111111111111111111111111111111111111",
+  headSha: "2222222222222222222222222222222222222222",
+  mergeBaseSha: "1111111111111111111111111111111111111111",
+  comparisonRef: "1111111111111111111111111111111111111111",
+  checkoutMode: "detached-head",
+  message: "Prepared a same-repository Pull Request head.",
 };
 
 const readyPullRequest: PullRequestSummary = {
@@ -198,6 +219,7 @@ function createWorkspaceClient(overrides: Partial<WorkspaceClient> = {}): Worksp
     removeRepository: vi.fn().mockResolvedValue({ repositories: [] }),
     getReviewCloneStatus: vi.fn().mockResolvedValue(notClonedReviewCloneStatus),
     ensureReviewClone: vi.fn().mockResolvedValue(readyReviewCloneStatus),
+    preparePullRequestReviewClone: vi.fn().mockResolvedValue(readyAnalysisInput),
     refreshPullRequests: vi.fn().mockResolvedValue({
       repositories: [narviewRepository],
       pullRequests: [readyPullRequest],
@@ -824,6 +846,53 @@ describe("App shell", () => {
 
     const cloneHealth = await screen.findByLabelText("Review clone health");
     await waitFor(() => expect(cloneHealth).toHaveTextContent("Read-Only Mode"));
+  });
+
+  it("prepares the Pull Request head as the Review Clone analysis input when a PR opens", async () => {
+    const workspaceClient = createWorkspaceClient({
+      listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+      getReviewCloneStatus: vi.fn().mockResolvedValue(readyReviewCloneStatus),
+      preparePullRequestReviewClone: vi.fn().mockResolvedValue(readyAnalysisInput),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    await waitFor(() => expect(workspaceClient.preparePullRequestReviewClone).toHaveBeenCalledWith(readyPullRequest));
+    const analysisInput = await screen.findByLabelText("Pull Request analysis input");
+    expect(analysisInput).toHaveTextContent("Prepared");
+    expect(analysisInput).toHaveTextContent("Head 2222222");
+    expect(analysisInput).toHaveTextContent("Compare 1111111");
+  });
+
+  it("keeps GitHub review data visible when Pull Request head preparation is unavailable", async () => {
+    const unavailableInput: PullRequestAnalysisInput = {
+      ...readyAnalysisInput,
+      state: "unavailable",
+      headSha: null,
+      mergeBaseSha: null,
+      comparisonRef: null,
+      message: "Could not fetch the Pull Request head ref.",
+    };
+    const workspaceClient = createWorkspaceClient({
+      listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+      preparePullRequestReviewClone: vi.fn().mockResolvedValue(unavailableInput),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    expect((await screen.findAllByText("Add checkout guard")).length).toBeGreaterThan(0);
+    const analysisInput = await screen.findByLabelText("Pull Request analysis input");
+    await waitFor(() => expect(analysisInput).toHaveTextContent("Unavailable"));
   });
 
   it("loads non-draft Pull Requests by default and includes drafts when filtered", async () => {

@@ -19,6 +19,7 @@ export interface PullRequestSummary {
 
 export type RefreshState = "idle" | "loading" | "fresh" | "stale" | "failed" | "rate-limited";
 export type ReviewCloneHealthState = "not-cloned" | "cloning" | "ready" | "stale" | "failed" | "unavailable";
+export type PullRequestAnalysisInputState = "ready" | "failed" | "unavailable";
 
 export interface RefreshStatus {
   state: RefreshState;
@@ -59,12 +60,28 @@ export interface ReviewCloneStatus {
   lastCheckedEpochMs: number;
 }
 
+export interface PullRequestAnalysisInput {
+  repository: WorkspaceRepository;
+  pullRequestNumber: number;
+  state: PullRequestAnalysisInputState;
+  reviewClone: ReviewCloneStatus;
+  baseRef: string | null;
+  headRef: string | null;
+  baseSha: string | null;
+  headSha: string | null;
+  mergeBaseSha: string | null;
+  comparisonRef: string | null;
+  checkoutMode: string | null;
+  message: string | null;
+}
+
 export interface WorkspaceClient {
   listRepositories: () => Promise<WorkspaceRepositoriesResponse>;
   saveRepository: (slug: string) => Promise<WorkspaceRepositoriesResponse>;
   removeRepository: (owner: string, name: string) => Promise<WorkspaceRepositoriesResponse>;
   getReviewCloneStatus: (repository: string) => Promise<ReviewCloneStatus>;
   ensureReviewClone: (repository: string) => Promise<ReviewCloneStatus>;
+  preparePullRequestReviewClone: (pullRequest: PullRequestSummary) => Promise<PullRequestAnalysisInput>;
   refreshPullRequests: (includeDrafts: boolean) => Promise<PullRequestRefreshResponse>;
   fetchPullRequestData: (pullRequest: PullRequestSummary) => Promise<CachedPullRequestData>;
   fetchPullRequestChecks: (pullRequest: PullRequestSummary) => Promise<PullRequestChecksResponse>;
@@ -84,6 +101,10 @@ function messageFromError(error: unknown): string {
     return String((error as { message: unknown }).message);
   }
   return String(error);
+}
+
+function isDesktopRuntimeUnavailable(message: string) {
+  return message.includes("command") || message.includes("invoke") || message.includes("__TAURI__");
 }
 
 function readLocalRepositories(): WorkspaceRepository[] {
@@ -147,6 +168,26 @@ export function createUnavailableReviewCloneStatus(repositorySlug: string, messa
   };
 }
 
+export function createUnavailablePullRequestAnalysisInput(
+  pullRequest: PullRequestSummary,
+  message: string,
+): PullRequestAnalysisInput {
+  return {
+    repository: parseSlug(pullRequest.repository),
+    pullRequestNumber: pullRequest.number,
+    state: "unavailable",
+    reviewClone: createUnavailableReviewCloneStatus(pullRequest.repository, message),
+    baseRef: null,
+    headRef: null,
+    baseSha: null,
+    headSha: null,
+    mergeBaseSha: null,
+    comparisonRef: null,
+    checkoutMode: null,
+    message,
+  };
+}
+
 const localWorkspaceClient: WorkspaceClient = {
   async listRepositories() {
     return { repositories: readLocalRepositories() };
@@ -178,6 +219,13 @@ const localWorkspaceClient: WorkspaceClient = {
 
   async ensureReviewClone(repository) {
     return createUnavailableReviewCloneStatus(repository, "Desktop runtime required to initialize a managed Review Clone.");
+  },
+
+  async preparePullRequestReviewClone(pullRequest) {
+    return createUnavailablePullRequestAnalysisInput(
+      pullRequest,
+      "Desktop runtime required to prepare a Pull Request Review Clone.",
+    );
   },
 
   async refreshPullRequests() {
@@ -215,7 +263,7 @@ export const tauriWorkspaceClient: WorkspaceClient = {
     try {
       return await invoke<WorkspaceRepositoriesResponse>("save_workspace_repository", { slug });
     } catch (error) {
-      if (messageFromError(error).includes("command")) {
+      if (isDesktopRuntimeUnavailable(messageFromError(error))) {
         return localWorkspaceClient.saveRepository(slug);
       }
       throw new Error(messageFromError(error));
@@ -226,7 +274,7 @@ export const tauriWorkspaceClient: WorkspaceClient = {
     try {
       return await invoke<WorkspaceRepositoriesResponse>("remove_workspace_repository", { owner, name });
     } catch (error) {
-      if (messageFromError(error).includes("command")) {
+      if (isDesktopRuntimeUnavailable(messageFromError(error))) {
         return localWorkspaceClient.removeRepository(owner, name);
       }
       throw new Error(messageFromError(error));
@@ -237,7 +285,7 @@ export const tauriWorkspaceClient: WorkspaceClient = {
     try {
       return await invoke<ReviewCloneStatus>("get_review_clone_status", { repository });
     } catch (error) {
-      if (messageFromError(error).includes("command")) {
+      if (isDesktopRuntimeUnavailable(messageFromError(error))) {
         return localWorkspaceClient.getReviewCloneStatus(repository);
       }
       throw new Error(messageFromError(error));
@@ -248,8 +296,22 @@ export const tauriWorkspaceClient: WorkspaceClient = {
     try {
       return await invoke<ReviewCloneStatus>("ensure_review_clone", { repository });
     } catch (error) {
-      if (messageFromError(error).includes("command")) {
+      if (isDesktopRuntimeUnavailable(messageFromError(error))) {
         return localWorkspaceClient.ensureReviewClone(repository);
+      }
+      throw new Error(messageFromError(error));
+    }
+  },
+
+  async preparePullRequestReviewClone(pullRequest) {
+    try {
+      return await invoke<PullRequestAnalysisInput>("prepare_pull_request_review_clone", {
+        repository: pullRequest.repository,
+        number: pullRequest.number,
+      });
+    } catch (error) {
+      if (isDesktopRuntimeUnavailable(messageFromError(error))) {
+        return localWorkspaceClient.preparePullRequestReviewClone(pullRequest);
       }
       throw new Error(messageFromError(error));
     }
@@ -259,7 +321,7 @@ export const tauriWorkspaceClient: WorkspaceClient = {
     try {
       return await invoke<PullRequestRefreshResponse>("refresh_pull_requests", { includeDrafts });
     } catch (error) {
-      if (messageFromError(error).includes("command")) {
+      if (isDesktopRuntimeUnavailable(messageFromError(error))) {
         return localWorkspaceClient.refreshPullRequests(includeDrafts);
       }
       throw new Error(messageFromError(error));

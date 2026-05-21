@@ -118,7 +118,10 @@ import {
 import { cn } from "./lib/utils";
 import {
   idleRefreshStatus,
+  createUnavailablePullRequestAnalysisInput,
   createUnavailableReviewCloneStatus,
+  type PullRequestAnalysisInput,
+  type PullRequestAnalysisInputState,
   type PullRequestSummary,
   type RefreshStatus,
   type ReviewCloneHealthState,
@@ -306,6 +309,19 @@ function getReviewCloneActionLabel(state: ReviewCloneHealthState) {
     return "Cloning...";
   }
   return "Initialize clone";
+}
+
+function getAnalysisInputBadge(state: PullRequestAnalysisInputState | "preparing") {
+  if (state === "ready") {
+    return { label: "Prepared", variant: "success" as const };
+  }
+  if (state === "preparing") {
+    return { label: "Preparing", variant: "info" as const };
+  }
+  if (state === "failed") {
+    return { label: "Failed", variant: "danger" as const };
+  }
+  return { label: "Unavailable", variant: "warning" as const };
 }
 
 function getReadinessBadge(state: "ready" | "attention" | "blocked") {
@@ -1012,6 +1028,8 @@ export function App({
   const [reviewCloneStatuses, setReviewCloneStatuses] = useState<Record<string, ReviewCloneStatus>>({});
   const [reviewCloneBusyKey, setReviewCloneBusyKey] = useState<string | null>(null);
   const [reviewCloneMessage, setReviewCloneMessage] = useState<string | null>(null);
+  const [analysisInputStatuses, setAnalysisInputStatuses] = useState<Record<string, PullRequestAnalysisInput>>({});
+  const [analysisInputBusyKey, setAnalysisInputBusyKey] = useState<string | null>(null);
   const [includeDrafts, setIncludeDrafts] = useState(false);
   const [pullRequests, setPullRequests] = useState<PullRequestSummary[]>([]);
   const [quickOpenedPullRequest, setQuickOpenedPullRequest] = useState<PullRequestSummary | null>(null);
@@ -1118,6 +1136,17 @@ export function App({
   const selectedPullRequestDisplay = `${selectedPullRequest.repository} #${selectedPullRequest.number}`;
   const selectedPullRequestTitle = selectedPullRequest.title.trim() || "Untitled Pull Request";
   const activePullRequestKey = routedPullRequests.length > 0 ? getPullRequestKey(selectedPullRequest) : null;
+  const selectedAnalysisInputStatus =
+    activePullRequestKey && analysisInputStatuses[activePullRequestKey]
+      ? analysisInputStatuses[activePullRequestKey]
+      : createUnavailablePullRequestAnalysisInput(
+          selectedPullRequest,
+          "Pull Request head has not been prepared in the Review Clone yet.",
+        );
+  const selectedAnalysisInputBusy = activePullRequestKey !== null && analysisInputBusyKey === activePullRequestKey;
+  const analysisInputBadge = getAnalysisInputBadge(
+    selectedAnalysisInputBusy ? "preparing" : selectedAnalysisInputStatus.state,
+  );
   const selectedCacheEntry = activePullRequestKey ? readCacheStore().entries[activePullRequestKey] : null;
   const selectedPullRequestPinned = selectedCacheEntry?.pinned ?? false;
   const selectedPullRequestLoadingData =
@@ -1577,6 +1606,63 @@ export function App({
     activePullRequestKey,
     authSession.state,
     currentUserKey,
+    routedPullRequests.length,
+    selectedPullRequest,
+    workspaceClient,
+  ]);
+
+  useEffect(() => {
+    if (!activePullRequestKey || routedPullRequests.length === 0 || authSession.state !== "signed-in") {
+      return;
+    }
+    if (analysisInputStatuses[activePullRequestKey]?.state === "ready") {
+      return;
+    }
+
+    let active = true;
+    setAnalysisInputBusyKey(activePullRequestKey);
+
+    workspaceClient
+      .preparePullRequestReviewClone(selectedPullRequest)
+      .then((status) => {
+        if (!active) {
+          return;
+        }
+
+        setAnalysisInputStatuses((current) => ({
+          ...current,
+          [getPullRequestKey(selectedPullRequest)]: status,
+        }));
+        setReviewCloneStatuses((current) => ({
+          ...current,
+          [status.reviewClone.repository.slug.toLowerCase()]: status.reviewClone,
+        }));
+        setReviewCloneMessage(status.message);
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        setAnalysisInputStatuses((current) => ({
+          ...current,
+          [activePullRequestKey]: createUnavailablePullRequestAnalysisInput(selectedPullRequest, message),
+        }));
+        setReviewCloneMessage(message);
+      })
+      .finally(() => {
+        if (active) {
+          setAnalysisInputBusyKey((current) => (current === activePullRequestKey ? null : current));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    activePullRequestKey,
+    authSession.state,
     routedPullRequests.length,
     selectedPullRequest,
     workspaceClient,
@@ -3240,6 +3326,23 @@ export function App({
                   <div className="rounded-md bg-muted p-2">
                     <p className="text-muted-foreground">GitHub writes</p>
                     <Badge variant={reviewCloneWriteBadge.variant}>{reviewCloneWriteBadge.label}</Badge>
+                  </div>
+                </div>
+                <div className="mt-2 rounded-md border border-border bg-background/70 p-2 text-xs" aria-label="Pull Request analysis input">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">PR head input</span>
+                    <Badge variant={analysisInputBadge.variant}>{analysisInputBadge.label}</Badge>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-muted-foreground">
+                    <p className="truncate">
+                      Head {selectedAnalysisInputStatus.headSha ? selectedAnalysisInputStatus.headSha.slice(0, 7) : "pending"}
+                    </p>
+                    <p className="truncate">
+                      Compare{" "}
+                      {selectedAnalysisInputStatus.mergeBaseSha
+                        ? selectedAnalysisInputStatus.mergeBaseSha.slice(0, 7)
+                        : selectedAnalysisInputStatus.comparisonRef ?? "pending"}
+                    </p>
                   </div>
                 </div>
                 {(selectedReviewCloneStatus.message || reviewCloneMessage) && (
