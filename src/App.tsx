@@ -102,6 +102,7 @@ import {
   type FileKind,
 } from "./lib/file-changes";
 import { buildReviewOverview, type HotspotScore, type RepositoryHotspotOverride } from "./lib/review-overview";
+import { buildReviewTargetInspectorModel, type ReviewTargetInspectorModel } from "./lib/review-target-inspector";
 import { buildReviewPathItems, buildReviewWorkProgress, moveReviewPathSelection, type ReviewPathItem } from "./lib/review-path";
 import { buildReviewTargets } from "./lib/review-targets";
 import {
@@ -842,6 +843,211 @@ function DiffCodeLine({ line, muted = false }: { line: DiffLine; muted?: boolean
   );
 }
 
+function ReviewTargetInspector({
+  baseComparisonOpen,
+  model,
+  onOpenFile,
+  onToggleBaseComparison,
+  onToggleReviewed,
+  reviewed,
+}: {
+  baseComparisonOpen: boolean;
+  model: ReviewTargetInspectorModel | null;
+  onOpenFile: (path: string) => void;
+  onToggleBaseComparison: () => void;
+  onToggleReviewed: () => void;
+  reviewed: boolean;
+}) {
+  return (
+    <section className="border-b border-border p-3" aria-label="Review Target Inspector">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+          <FileCode2 className="h-4 w-4" aria-hidden="true" />
+          <span>Review Target</span>
+        </div>
+        <Badge variant={model ? "info" : "muted"}>{model ? "Selected" : "None"}</Badge>
+      </div>
+
+      {!model ? (
+        <p className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
+          Select a Review Target from the map or Review Path.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          <div className="space-y-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">{model.target.title}</p>
+                <p className="mt-1 truncate text-xs text-muted-foreground">{model.target.paths.join(", ")}</p>
+              </div>
+              <Badge variant={reviewed ? "success" : model.target.priority === "high" ? "warning" : "muted"}>
+                {reviewed ? "Reviewed" : model.target.priority}
+              </Badge>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="rounded-md bg-muted p-2">
+                <p className="text-muted-foreground">Files</p>
+                <p className="mt-1 font-semibold">{model.target.size.files}</p>
+              </div>
+              <div className="rounded-md bg-muted p-2">
+                <p className="text-muted-foreground">Nodes</p>
+                <p className="mt-1 font-semibold">{model.target.size.nodes}</p>
+              </div>
+              <div className="rounded-md bg-muted p-2">
+                <p className="text-muted-foreground">Threads</p>
+                <p className="mt-1 font-semibold">{model.reviewThreads.length}</p>
+              </div>
+            </div>
+            <Button className="w-full justify-between" size="sm" variant="outline" onClick={onToggleReviewed}>
+              {reviewed ? "Mark target active" : "Mark target reviewed"}
+              <Kbd>Path</Kbd>
+            </Button>
+          </div>
+
+          <div className="space-y-2" aria-label="Review Target changed context">
+            <h3 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Changed Context</h3>
+            {model.changedContexts.length > 0 ? (
+              model.changedContexts.slice(0, 3).map((context) => (
+                <div className="overflow-hidden rounded-md border border-border bg-background" key={context.id}>
+                  <div className="border-b border-border px-2 py-1">
+                    <p className="truncate font-mono text-xs text-muted-foreground">{context.title}</p>
+                  </div>
+                  <div className="diff-code-grid max-h-52 overflow-auto font-mono text-xs">
+                    {context.lines.slice(0, 18).map((line, index) => (
+                      <div
+                        className={cn("diff-row grid grid-cols-[42px_18px_minmax(0,1fr)] border-t first:border-t-0", getDiffLineClass(line.kind))}
+                        key={`${context.id}:${index}`}
+                      >
+                        <div className="px-1 py-1 text-right text-muted-foreground">{line.newLine ?? line.oldLine ?? ""}</div>
+                        <div className="diff-marker px-1 py-1 text-center">{getDiffPrefix(line.kind)}</div>
+                        <div className="diff-code-cell min-w-0 py-1 pl-2 pr-3">
+                          <DiffCodeLine line={line} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">
+                No changed hunk context is available for this target.
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-2" aria-label="Review Target head version">
+            <h3 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Head Version</h3>
+            {model.headContexts.slice(0, 3).map((context) => (
+              <div className="overflow-hidden rounded-md border border-border bg-background" key={context.id}>
+                <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1">
+                  <p className="min-w-0 truncate font-mono text-xs text-muted-foreground">{context.title}</p>
+                  <Badge variant={context.source === "head-symbol" ? "success" : "warning"}>
+                    {context.source === "head-symbol" ? "Head" : "Fallback"}
+                  </Badge>
+                </div>
+                {context.lines.length > 0 ? (
+                  <div className="max-h-52 overflow-auto font-mono text-xs">
+                    {context.lines.slice(0, 24).map((line) => (
+                      <div className="grid grid-cols-[42px_minmax(0,1fr)] border-t first:border-t-0" key={`${context.id}:${line.lineNumber}`}>
+                        <div className="bg-muted/60 px-1 py-1 text-right text-muted-foreground">{line.lineNumber}</div>
+                        <pre className="min-w-0 overflow-x-auto px-2 py-1 text-foreground">{line.content || " "}</pre>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="p-2 text-xs text-muted-foreground">{context.message}</p>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="space-y-2">
+            <Button className="w-full justify-between" size="sm" variant="outline" onClick={onToggleBaseComparison}>
+              {baseComparisonOpen ? "Hide base comparison" : "Show base comparison"}
+              <Columns2 className="h-3.5 w-3.5" aria-hidden="true" />
+            </Button>
+            {baseComparisonOpen && (
+              <div className="space-y-2" aria-label="Review Target base comparison">
+                {model.baseComparisons.length > 0 ? (
+                  model.baseComparisons.slice(0, 3).map((comparison) => (
+                    <div className="overflow-hidden rounded-md border border-border bg-background" key={comparison.id}>
+                      <p className="truncate border-b border-border px-2 py-1 font-mono text-xs text-muted-foreground">{comparison.title}</p>
+                      <div className="diff-code-grid max-h-48 overflow-auto font-mono text-xs">
+                        {comparison.lines.slice(0, 18).map((line, index) => (
+                          <div
+                            className={cn("diff-row grid grid-cols-[42px_18px_minmax(0,1fr)] border-t first:border-t-0", getDiffLineClass(line.kind))}
+                            key={`${comparison.id}:${index}`}
+                          >
+                            <div className="px-1 py-1 text-right text-muted-foreground">{line.oldLine ?? line.newLine ?? ""}</div>
+                            <div className="diff-marker px-1 py-1 text-center">{getDiffPrefix(line.kind)}</div>
+                            <div className="diff-code-cell min-w-0 py-1 pl-2 pr-3">
+                              <DiffCodeLine line={line} />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">
+                    No base-side comparison is available.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-2" aria-label="Review Target related context">
+            <h3 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Related Context</h3>
+            <div className="rounded-md border border-border p-2 text-xs">
+              <p className="font-medium">Context nodes</p>
+              <div className="mt-1 space-y-1 text-muted-foreground">
+                {[...model.nodes, ...model.relatedNodes].slice(0, 6).map((node) => (
+                  <button
+                    className="block w-full truncate rounded px-1 py-0.5 text-left hover:bg-accent"
+                    key={node.id}
+                    onClick={() => onOpenFile(node.filePath)}
+                    type="button"
+                  >
+                    {node.label} · {node.filePath}
+                  </button>
+                ))}
+                {model.nodes.length + model.relatedNodes.length === 0 && <p>No related nodes.</p>}
+              </div>
+            </div>
+            <div className="rounded-md border border-border p-2 text-xs">
+              <p className="font-medium">Edges</p>
+              <div className="mt-1 space-y-1 text-muted-foreground">
+                {model.relatedEdges.slice(0, 5).map((edge) => (
+                  <p key={edge.id}>{edge.reason}</p>
+                ))}
+                {model.relatedEdges.length === 0 && <p>No related edges.</p>}
+              </div>
+            </div>
+            <div className="rounded-md border border-border p-2 text-xs">
+              <p className="font-medium">Tests</p>
+              <div className="mt-1 space-y-1 text-muted-foreground">
+                {model.relatedTests.map((edge) => (
+                  <p key={edge.id}>{edge.reason}</p>
+                ))}
+                {model.relatedTests.length === 0 && <p>No related tests.</p>}
+              </div>
+            </div>
+            <div className="rounded-md border border-border p-2 text-xs">
+              <p className="font-medium">Reasons</p>
+              <ul className="mt-1 list-disc space-y-1 pl-4 text-muted-foreground">
+                {model.reasons.slice(0, 6).map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function InlineReviewThread({
   anchorRef,
   pathCount,
@@ -1217,6 +1423,7 @@ export function App({
   const [selectedPullRequestKey, setSelectedPullRequestKey] = useState<string | null>(null);
   const [selectedReviewThreadId, setSelectedReviewThreadId] = useState<string | null>(null);
   const [selectedReviewTargetId, setSelectedReviewTargetId] = useState<string | null>(null);
+  const [targetBaseComparisonOpen, setTargetBaseComparisonOpen] = useState(false);
   const [reviewedTargetIdsByPullRequest, setReviewedTargetIdsByPullRequest] = useState<Record<string, string[]>>({});
   const [reviewQueueFilters, setReviewQueueFilters] = useState<ReviewQueueFilters>(defaultReviewQueueFilters);
   const [reviewQueueRevision, setReviewQueueRevision] = useState(0);
@@ -1383,6 +1590,25 @@ export function App({
     [reviewOverview.hotspots, reviewTargets],
   );
   const selectedReviewPathItem = reviewPathItems.find((item) => item.id === selectedReviewTargetId) ?? null;
+  const selectedReviewTargetInspector = useMemo(
+    () =>
+      buildReviewTargetInspectorModel({
+        target: selectedReviewPathItem?.target ?? null,
+        analysisIndex,
+        pullRequest: selectedPullRequest,
+        files: reviewOverviewCache.fileSummaries,
+        fileContents: selectedAnalysisFileContents?.files ?? [],
+        reviewThreads: reviewOverviewCache.reviewThreads,
+      }),
+    [
+      analysisIndex,
+      reviewOverviewCache.fileSummaries,
+      reviewOverviewCache.reviewThreads,
+      selectedAnalysisFileContents,
+      selectedPullRequest,
+      selectedReviewPathItem,
+    ],
+  );
   const activeReviewPathItems = reviewPathItems.filter((item) => !reviewedTargetIds.has(item.id));
   const reviewedReviewPathItems = reviewPathItems.filter((item) => reviewedTargetIds.has(item.id));
   const readinessBadge = getReadinessBadge(reviewOverview.readiness.state);
@@ -1477,6 +1703,11 @@ export function App({
 
     setSelectedReviewTargetId(activeReviewPathItems[0]?.id ?? reviewPathItems[0].id);
   }, [activeReviewPathItemSignature, reviewPathItemSignature, reviewPathItems, selectedReviewTargetId]);
+
+  useEffect(() => {
+    setTargetBaseComparisonOpen(false);
+  }, [selectedReviewTargetId]);
+
   const reviewQueueCounts = buildReviewQueueCounts(reviewThreadViews);
   const fileChangeViews = buildFileChangeViews(
     currentUserKey,
@@ -2523,11 +2754,17 @@ export function App({
     setReviewQueueFilters(filters);
   };
 
-  const openThreadFileInDiff = (threadId: string) => {
-    const thread = reviewThreadViews.find((view) => view.id === threadId)?.thread;
-    const fileView = thread ? fileChangeViews.find((view) => view.file.path === thread.filePath) : null;
+  const selectFilePathInDiff = (path: string) => {
+    const fileView = fileChangeViews.find((view) => view.file.path === path);
     if (fileView) {
       setSelectedFileChangeId(fileView.id);
+    }
+  };
+
+  const openThreadFileInDiff = (threadId: string) => {
+    const thread = reviewThreadViews.find((view) => view.id === threadId)?.thread;
+    if (thread) {
+      selectFilePathInDiff(thread.filePath);
     }
   };
 
@@ -2540,9 +2777,8 @@ export function App({
     setSelectedReviewTargetId(targetId);
     const target = reviewPathItems.find((item) => item.id === targetId)?.target;
     const firstFilePath = target?.paths[0];
-    const fileView = firstFilePath ? fileChangeViews.find((view) => view.file.path === firstFilePath) : null;
-    if (fileView) {
-      setSelectedFileChangeId(fileView.id);
+    if (firstFilePath) {
+      selectFilePathInDiff(firstFilePath);
     }
   };
 
@@ -4152,6 +4388,18 @@ export function App({
 
         {!focusMode && (
           <aside aria-label="Inspector" className="pane-scroll-y border-l border-border bg-card/40">
+            <ReviewTargetInspector
+              baseComparisonOpen={targetBaseComparisonOpen}
+              model={selectedReviewTargetInspector}
+              onOpenFile={selectFilePathInDiff}
+              onToggleBaseComparison={() => setTargetBaseComparisonOpen((open) => !open)}
+              onToggleReviewed={() => {
+                if (selectedReviewPathItem) {
+                  setReviewTargetReviewed(selectedReviewPathItem.id, !reviewedTargetIds.has(selectedReviewPathItem.id));
+                }
+              }}
+              reviewed={selectedReviewPathItem ? reviewedTargetIds.has(selectedReviewPathItem.id) : false}
+            />
             <div className="border-b border-border p-3">
               <div className="mb-3 flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">

@@ -65,6 +65,7 @@ import {
 } from "./lib/pr-cache";
 import { buildReviewOverview, getMergeReadiness, scoreHotspots, summarizeChecks } from "./lib/review-overview";
 import { buildReviewPathItems, buildReviewWorkProgress, moveReviewPathSelection } from "./lib/review-path";
+import { buildReviewTargetInspectorModel } from "./lib/review-target-inspector";
 import { buildReviewTargets, type ReviewTarget } from "./lib/review-targets";
 import {
   buildReviewThreadViews,
@@ -1392,6 +1393,29 @@ describe("App shell", () => {
     expect(within(reviewPath).getByLabelText("Review Work")).toHaveTextContent("1/5");
   });
 
+  it("updates a persistent Review Target inspector without hiding the map or path", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    const inspector = screen.getByLabelText("Review Target Inspector");
+    await waitFor(() => expect(within(inspector).getByLabelText("Review Target head version")).toHaveTextContent("nextSession"));
+    expect(screen.getByLabelText("Review target graph")).toBeInTheDocument();
+    expect(screen.getByLabelText("Review Path")).toBeInTheDocument();
+    expect(within(inspector).queryByLabelText("Review Target base comparison")).not.toBeInTheDocument();
+
+    await user.click(within(inspector).getByRole("button", { name: /show base comparison/i }));
+
+    expect(within(inspector).getByLabelText("Review Target base comparison")).toHaveTextContent("previousSession");
+
+    await user.click(within(screen.getByLabelText("Review Path")).getByRole("button", { name: /src\/review\/queue\.ts/i }));
+
+    await waitFor(() => expect(within(inspector).getByLabelText("Review Target head version")).toHaveTextContent("Fallback"));
+    expect(within(inspector).getByLabelText("Review Target changed context")).toHaveTextContent("nextQueue");
+    expect(screen.getByLabelText("Review target graph")).toBeInTheDocument();
+    expect(screen.getByLabelText("Review Path")).toBeInTheDocument();
+  });
+
   it("loads non-draft Pull Requests by default and includes drafts when filtered", async () => {
     const user = userEvent.setup();
     const workspaceClient = createWorkspaceClient({
@@ -2508,6 +2532,88 @@ describe("App shell", () => {
       threads: { total: 2, reviewed: 1, remaining: 1 },
       combinedRemaining: 3,
     });
+  });
+
+  it("builds Review Target inspector content from head symbols, base diff, related tests, and fallback hunks", () => {
+    const currentData: CachedPullRequestData = {
+      ...createOverviewFixture(),
+      fileSummaries: [
+        {
+          path: "src/auth/session.ts",
+          additions: 1,
+          deletions: 1,
+          status: "modified",
+          patch: "@@ -1,3 +1,3 @@\n export function rotateSession() {\n-  return previousToken();\n+  return refreshToken();\n }",
+        },
+        {
+          path: "src/auth/session.test.ts",
+          additions: 3,
+          deletions: 0,
+          status: "modified",
+          patch:
+            "@@ -1,2 +1,5 @@\n import { rotateSession } from './session';\n+export function sessionSpec() {\n+  rotateSession();\n+}\n",
+        },
+        {
+          path: "docs/readme.md",
+          additions: 1,
+          deletions: 0,
+          status: "modified",
+          patch: "@@ -1,2 +1,3 @@\n # Narview\n+Review inspector fallback.",
+        },
+      ],
+    };
+    const fileContents = [
+      {
+        path: "src/auth/session.ts",
+        state: "loaded" as const,
+        content: "export function rotateSession() {\n  return refreshToken();\n}\n\nfunction refreshToken() {\n  return 'next';\n}\n",
+        message: null,
+      },
+      {
+        path: "src/auth/session.test.ts",
+        state: "loaded" as const,
+        content: "import { rotateSession } from './session';\nexport function sessionSpec() {\n  rotateSession();\n}\n",
+        message: null,
+      },
+    ];
+    const analysisIndex = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files: currentData.fileSummaries,
+      analysisInput: readyAnalysisInput,
+      fileContents,
+    });
+    const targets = buildReviewTargets({
+      analysisIndex,
+      attentionMap: buildAttentionMapPresentation(analysisIndex, currentData),
+      currentData,
+    });
+    const sessionTarget = targets.find((target) => target.paths.includes("src/auth/session.ts")) ?? null;
+    const fallbackTarget = targets.find((target) => target.paths.includes("docs/readme.md")) ?? null;
+
+    const sessionModel = buildReviewTargetInspectorModel({
+      target: sessionTarget,
+      analysisIndex,
+      pullRequest: readyPullRequest,
+      files: currentData.fileSummaries,
+      fileContents,
+      reviewThreads: currentData.reviewThreads,
+    });
+    const fallbackModel = buildReviewTargetInspectorModel({
+      target: fallbackTarget,
+      analysisIndex,
+      pullRequest: readyPullRequest,
+      files: currentData.fileSummaries,
+      fileContents,
+      reviewThreads: currentData.reviewThreads,
+    });
+
+    expect(sessionModel?.headContexts.flatMap((context) => context.lines.map((line) => line.content))).toContain("  return refreshToken();");
+    expect(sessionModel?.baseComparisons.flatMap((comparison) => comparison.lines.map((line) => line.content))).toContain("  return previousToken();");
+    expect(sessionModel?.relatedTests.map((edge) => edge.reason).join(" ")).toContain("appears to cover src/auth/session.ts");
+    expect(sessionModel?.reasons.join(" ")).toContain("Uses parsed symbol context.");
+    expect(fallbackModel?.fallback).toBe(true);
+    expect(fallbackModel?.headContexts[0]).toMatchObject({ source: "fallback-hunk" });
+    expect(fallbackModel?.changedContexts[0].lines.map((line) => line.content)).toContain("Review inspector fallback.");
   });
 
   it("summarizes checks with names, timing, and detail links", () => {
