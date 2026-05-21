@@ -239,7 +239,6 @@ const repositoryHotspotOverrides: Record<string, RepositoryHotspotOverride> = {
     weights: {
       unresolvedThreads: 0.45,
     },
-    criticalPathPatterns: ["auth", "session", "migration", "schema", "payment", "billing"],
   },
 };
 
@@ -1190,6 +1189,7 @@ export function App({
   const reviewOverview = buildReviewOverview(
     reviewOverviewCache,
     repositoryHotspotOverrides[selectedPullRequest.repository],
+    analysisIndex,
   );
   const readinessBadge = getReadinessBadge(reviewOverview.readiness.state);
   const selectedPullRequestRefreshingChecks =
@@ -3490,7 +3490,7 @@ export function App({
                     {attentionMapPresentation.nodes.length} nodes
                   </Badge>
                 </div>
-                <div className="mt-3 grid grid-cols-6 gap-2 text-xs">
+                <div className="mt-3 grid grid-cols-3 gap-2 text-xs lg:grid-cols-7">
                   <div className="rounded-md bg-muted p-2">
                     <p className="text-muted-foreground">Files</p>
                     <p className="mt-1 font-semibold">{attentionMapPresentation.summary.files}</p>
@@ -3510,6 +3510,10 @@ export function App({
                   <div className="rounded-md bg-muted p-2">
                     <p className="text-muted-foreground">Fallbacks</p>
                     <p className="mt-1 font-semibold">{attentionMapPresentation.summary.fallbackNodes}</p>
+                  </div>
+                  <div className="rounded-md bg-muted p-2">
+                    <p className="text-muted-foreground">Clusters</p>
+                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.generatedClusters}</p>
                   </div>
                   <div className="rounded-md bg-muted p-2">
                     <p className="text-muted-foreground">Edges</p>
@@ -4296,13 +4300,23 @@ export function App({
                     <button
                       className="rounded-md border border-border p-3 text-left hover:bg-accent"
                       key={hotspot.path}
-                      onClick={() => selectHotspotFile(hotspot.path)}
+                      onClick={() => selectHotspotFile(hotspot.paths?.[0] ?? hotspot.path)}
                       type="button"
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="truncate font-mono text-sm font-semibold">{hotspot.path}</p>
+                          <p className="truncate font-mono text-sm font-semibold">
+                            {hotspot.kind === "generated-cluster" && hotspot.fileCount
+                              ? `${hotspot.path} (${hotspot.fileCount} files)`
+                              : hotspot.path}
+                          </p>
                           <p className="mt-1 truncate text-xs text-muted-foreground">{hotspot.reasons.join(", ")}</p>
+                          {hotspot.kind === "generated-cluster" && hotspot.paths && (
+                            <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                              {hotspot.paths.slice(0, 4).join(", ")}
+                              {hotspot.paths.length > 4 ? `, +${hotspot.paths.length - 4} more` : ""}
+                            </p>
+                          )}
                         </div>
                         <Badge variant={hotspot.score > 80 ? "danger" : "warning"}>{hotspot.score}</Badge>
                       </div>

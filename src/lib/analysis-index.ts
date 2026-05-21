@@ -7,6 +7,7 @@ import {
   type DeepAnalysisResult,
 } from "./deep-analysis";
 import { getFileKind, type FileKind } from "./file-changes";
+import { isGeneratedOrLowSignalPath } from "./generated-files";
 import type { CachedFileSummary, CachedPullRequestData } from "./pr-cache";
 import { getPullRequestKey } from "./review-session";
 import type { PullRequestAnalysisInput, PullRequestSummary } from "./workspace";
@@ -104,10 +105,13 @@ export interface AttentionMapNode {
   id: string;
   label: string;
   filePath: string;
-  kind: AttentionNodeKind;
-  reason: AttentionNodeReason;
+  kind: AttentionNodeKind | "generated-cluster";
+  reason: AttentionNodeReason | "generated-cluster";
   threadCount: number;
   changedLines: number;
+  collapsed?: boolean;
+  fileCount?: number;
+  paths?: string[];
 }
 
 export interface AttentionMapEdge {
@@ -129,6 +133,7 @@ export interface AttentionMapPresentation {
     fallbackNodes: number;
     reviewThreads: number;
     relationships: number;
+    generatedClusters: number;
   };
 }
 
@@ -249,11 +254,45 @@ export function buildAttentionMapPresentation(index: AnalysisIndex, currentData:
     threadCountByPath.set(thread.filePath, (threadCountByPath.get(thread.filePath) ?? 0) + 1);
   }
 
+  const representedFilePaths = new Set(index.nodes.map((node) => node.filePath));
+  const collapsedGeneratedFiles = currentData.fileSummaries
+    .filter(
+      (file) =>
+        representedFilePaths.has(file.path) &&
+        isGeneratedOrLowSignalPath(file.path) &&
+        (threadCountByPath.get(file.path) ?? 0) === 0,
+    )
+    .sort((left, right) => left.path.localeCompare(right.path));
+  const collapsedGeneratedPaths = new Set(collapsedGeneratedFiles.map((file) => file.path));
+  const generatedClusterNodeId = "cluster:generated-low-signal";
   const fileNodeIds = new Map<string, string>();
   const nodes: AttentionMapNode[] = [];
   const edges: AttentionMapEdge[] = [];
 
+  if (collapsedGeneratedFiles.length > 0) {
+    for (const file of collapsedGeneratedFiles) {
+      fileNodeIds.set(file.path, generatedClusterNodeId);
+    }
+
+    nodes.push({
+      id: generatedClusterNodeId,
+      label: "Generated Cluster",
+      filePath: "Generated Cluster",
+      kind: "generated-cluster",
+      reason: "generated-cluster",
+      threadCount: 0,
+      changedLines: collapsedGeneratedFiles.reduce((total, file) => total + file.additions + file.deletions, 0),
+      collapsed: true,
+      fileCount: collapsedGeneratedFiles.length,
+      paths: collapsedGeneratedFiles.map((file) => file.path),
+    });
+  }
+
   for (const node of index.nodes) {
+    if (collapsedGeneratedPaths.has(node.filePath)) {
+      continue;
+    }
+
     const fileNodeId = `file:${node.filePath}`;
     if (!fileNodeIds.has(node.filePath)) {
       fileNodeIds.set(node.filePath, fileNodeId);
@@ -332,6 +371,7 @@ export function buildAttentionMapPresentation(index: AnalysisIndex, currentData:
       fallbackNodes: index.nodes.filter((node) => node.kind === "file-fallback").length,
       reviewThreads: currentData.reviewThreads.length,
       relationships: index.relationships.length,
+      generatedClusters: collapsedGeneratedFiles.length > 0 ? 1 : 0,
     },
   };
 }

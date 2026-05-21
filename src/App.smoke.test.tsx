@@ -1935,7 +1935,8 @@ describe("App shell", () => {
     const hotspots = scoreHotspots(createOverviewFixture().fileSummaries, createOverviewFixture().reviewThreads);
 
     expect(hotspots[0].path).toBe("src/auth/session.ts");
-    expect(hotspots[0].reasons).toEqual(expect.arrayContaining(["215 changed lines", "1 unresolved thread", "critical path"]));
+    expect(hotspots[0].reasons).toEqual(expect.arrayContaining(["215 changed lines", "1 unresolved thread"]));
+    expect(hotspots[0].reasons).not.toContain("critical path");
     expect(hotspots[0].score).toBeGreaterThan(hotspots[1].score);
   });
 
@@ -1949,14 +1950,160 @@ describe("App shell", () => {
       {
         weights: {
           changedLines: 0,
-          criticalPath: 1,
+          fileStatus: 0,
+          configuredPath: 1,
         },
-        criticalPathPatterns: ["infra"],
+        configuredPathPatterns: ["infra"],
       },
     );
 
     expect(hotspots[0].path).toBe("infra/provider.ts");
-    expect(hotspots[0].reasons).toContain("critical path");
+    expect(hotspots[0].reasons).toContain("configured path pattern");
+  });
+
+  it("does not use domain keywords as default hotspot inputs", () => {
+    const hotspots = scoreHotspots(
+      [
+        { path: "src/auth/login.ts", additions: 1, deletions: 0, status: "modified" },
+        { path: "src/plain/large.ts", additions: 80, deletions: 0, status: "modified" },
+      ],
+      [],
+    );
+
+    expect(hotspots[0].path).toBe("src/plain/large.ts");
+    expect(hotspots.find((hotspot) => hotspot.path === "src/auth/login.ts")?.reasons).not.toContain("critical path");
+  });
+
+  it("ranks structural hotspots from graph, control-flow, tests, checks, and change size", () => {
+    const files: CachedPullRequestData["fileSummaries"] = [
+      {
+        path: "src/review/orchestrator.ts",
+        additions: 2,
+        deletions: 1,
+        status: "modified",
+        patch:
+          "@@ -1,7 +1,8 @@\n export function orchestrateReview() {\n-  if (oldFlag()) return buildPlan();\n+  if (newFlag()) return buildPlan();\n+  return auditPlan();\n }\n function buildPlan() { return 'plan'; }\n function auditPlan() { return buildPlan(); }",
+      },
+      {
+        path: "src/review/orchestrator.test.ts",
+        additions: 1,
+        deletions: 0,
+        status: "modified",
+        patch: "@@ -1,2 +1,3 @@\n import { orchestrateReview } from './orchestrator';\n+orchestrateReview();",
+      },
+      { path: "src/plain/large.ts", additions: 90, deletions: 0, status: "modified" },
+    ];
+    const analysisIndex = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files,
+      analysisInput: readyAnalysisInput,
+      fileContents: [
+        {
+          path: "src/review/orchestrator.ts",
+          state: "loaded",
+          content:
+            "export function orchestrateReview() {\n  if (newFlag()) return buildPlan();\n  return auditPlan();\n}\nfunction buildPlan() { return 'plan'; }\nfunction auditPlan() { return buildPlan(); }\nfunction newFlag() { return true; }\n",
+          message: null,
+        },
+        {
+          path: "src/review/orchestrator.test.ts",
+          state: "loaded",
+          content: "import { orchestrateReview } from './orchestrator';\norchestrateReview();\n",
+          message: null,
+        },
+      ],
+    });
+    const hotspots = scoreHotspots(files, [], {}, analysisIndex, [
+      { name: "src/review/orchestrator.ts tests", status: "completed", conclusion: "failure", url: null },
+    ]);
+
+    expect(hotspots[0].path).toBe("src/review/orchestrator.ts");
+    expect(hotspots[0].reasons).toEqual(
+      expect.arrayContaining([
+        "1 changed symbol node",
+        expect.stringMatching(/graph edge/),
+        "3 control-flow changes",
+        "1 related test change",
+        "1 failing check",
+      ]),
+    );
+  });
+
+  it("collapses generated hotspots while preserving expansion paths", () => {
+    const hotspots = scoreHotspots(
+      [
+        { path: "src/generated/client.ts", additions: 500, deletions: 0, status: "modified" },
+        { path: "dist/bundle.min.js", additions: 300, deletions: 40, status: "modified" },
+        { path: "vendor/sdk.ts", additions: 120, deletions: 0, status: "modified" },
+        { path: "src/review/logic.ts", additions: 30, deletions: 0, status: "modified" },
+      ],
+      [
+        {
+          id: "logic-thread",
+          authorLogin: "monalisa",
+          filePath: "src/review/logic.ts",
+          line: 3,
+          state: "unresolved",
+          body: "Please verify this branch.",
+          updatedAt: "2026-05-18T12:00:00Z",
+        },
+      ],
+    );
+    const cluster = hotspots.find((hotspot) => hotspot.kind === "generated-cluster");
+
+    expect(cluster).toMatchObject({
+      path: "Generated Cluster",
+      collapsed: true,
+      fileCount: 3,
+      changedLines: 960,
+      paths: ["dist/bundle.min.js", "src/generated/client.ts", "vendor/sdk.ts"],
+    });
+    expect(cluster?.score).toBeLessThan(hotspots.find((hotspot) => hotspot.path === "src/review/logic.ts")?.score ?? 0);
+    expect(cluster?.reasons).toEqual(expect.arrayContaining(["3 generated/vendor/build files", "960 changed lines collapsed"]));
+  });
+
+  it("keeps generated files with review threads visible in the Attention Map while clustering lower-signal generated files", () => {
+    const currentData: CachedPullRequestData = {
+      ...createOverviewFixture(),
+      fileSummaries: [
+        { path: "src/generated/client.ts", additions: 50, deletions: 0, status: "modified" },
+        { path: "dist/bundle.min.js", additions: 60, deletions: 0, status: "modified" },
+        { path: "src/generated/threaded.ts", additions: 10, deletions: 0, status: "modified" },
+      ],
+      reviewThreads: [
+        {
+          id: "thread-generated",
+          authorLogin: "monalisa",
+          filePath: "src/generated/threaded.ts",
+          line: 1,
+          state: "unresolved",
+          body: "This generated output has a real reviewer note.",
+          updatedAt: "2026-05-18T12:00:00Z",
+        },
+      ],
+    };
+    const index = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files: currentData.fileSummaries,
+      analysisInput: readyAnalysisInput,
+    });
+    const presentation = buildAttentionMapPresentation(index, currentData);
+
+    expect(presentation.summary.generatedClusters).toBe(1);
+    expect(presentation.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "generated-cluster",
+          collapsed: true,
+          fileCount: 2,
+          paths: ["dist/bundle.min.js", "src/generated/client.ts"],
+        }),
+        expect.objectContaining({
+          filePath: "src/generated/threaded.ts",
+        }),
+      ]),
+    );
+    expect(presentation.nodes.some((node) => node.filePath === "src/generated/client.ts")).toBe(false);
   });
 
   it("summarizes checks with names, timing, and detail links", () => {
