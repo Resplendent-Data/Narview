@@ -13,6 +13,7 @@ Build the ordered Review Path rail beside the Attention Map. The path should be 
 
 ## Acceptance criteria
 
+- [ ] The Attention Map graph is rendered with React Flow rather than a custom canvas renderer.
 - [ ] The Review Path lists generated Review Targets in deterministic order.
 - [ ] Review Path order is independent from visual map layout.
 - [ ] The first target is the Hotspot that deserves earliest inspection.

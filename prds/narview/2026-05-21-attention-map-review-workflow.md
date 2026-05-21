@@ -89,6 +89,7 @@ Narview remains LLM-free for ranking and analysis. It optimizes developer attent
 ## Implementation Decisions
 
 - The Attention Map becomes the primary Review Overview and the first screen for a Pull Request.
+- The node graph system uses React Flow for graph rendering, viewport controls, selection, and map focus behavior.
 - The Guided Review Workspace is the single primary review surface; the separate thread-only Review Queue concept is retired.
 - Thread filters may exist as supporting UI, but Review Path, Review Targets, and Review Threads are the core review concepts.
 - Narview requires a managed Review Clone for the full Attention Map experience.
@@ -167,6 +168,7 @@ Narview remains LLM-free for ranking and analysis. It optimizes developer attent
 - Parser tests should cover TypeScript, JavaScript, and Python symbol detection, hunk-to-symbol mapping, imports/exports, same-file calls, and fallback behavior.
 - Hunk fallback tests should cover unsupported languages, parser failures, binary/non-text files, and file-level fallback targets.
 - Attention Map tests should verify node creation, Context Node caps, Generated Cluster behavior, edge explainability, progressive disclosure, and cluster expansion.
+- React Flow UI tests should verify visible node labels, edge rendering, viewport focus behavior, and keyboard-driven selection without depending on internal layout coordinates.
 - Review Path tests should verify generated ordering, independence from visual layout, highest-attention target ordering, remaining/reviewed grouping, and no manual reordering.
 - Review Target tests should cover grouping, splitting, explicit Reviewed action, no-feedback Reviewed action, and target-to-thread attachment.
 - Target Fingerprint tests should verify unchanged targets preserve Reviewed state, changed targets become Needs Re-Review, and unrelated Context Node changes do not invalidate a target.
