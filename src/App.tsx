@@ -105,10 +105,13 @@ import { buildReviewOverview, type HotspotScore, type RepositoryHotspotOverride 
 import { buildReviewTargetInspectorModel, type ReviewTargetInspectorModel } from "./lib/review-target-inspector";
 import { buildReviewPathItems, buildReviewWorkProgress, moveReviewPathSelection, type ReviewPathItem } from "./lib/review-path";
 import {
+  buildNeedsReReviewTargetIdSet,
   buildReviewedTargetIdSet,
+  buildReviewTargetReviewStates,
   readReviewTargetStateStore,
   setReviewTargetReviewed as setStoredReviewTargetReviewed,
   syncReviewTargets,
+  type ReviewTargetReviewState,
 } from "./lib/review-target-state";
 import { buildReviewTargets } from "./lib/review-targets";
 import {
@@ -487,11 +490,12 @@ interface ReviewTargetFlowProps {
   items: ReviewPathItem[];
   selectedTargetId: string | null;
   reviewedTargetIds: Set<string>;
+  needsReReviewTargetIds: Set<string>;
   onSelectTarget: (targetId: string) => void;
 }
 
-function ReviewTargetFlow({ items, selectedTargetId, reviewedTargetIds, onSelectTarget }: ReviewTargetFlowProps) {
-  const { nodes, edges } = buildReviewTargetFlowElements(items, selectedTargetId, reviewedTargetIds);
+function ReviewTargetFlow({ items, selectedTargetId, reviewedTargetIds, needsReReviewTargetIds, onSelectTarget }: ReviewTargetFlowProps) {
+  const { nodes, edges } = buildReviewTargetFlowElements(items, selectedTargetId, reviewedTargetIds, needsReReviewTargetIds);
 
   return (
     <ReactFlowProvider>
@@ -563,6 +567,7 @@ function buildReviewTargetFlowElements(
   items: ReviewPathItem[],
   selectedTargetId: string | null,
   reviewedTargetIds: Set<string>,
+  needsReReviewTargetIds: Set<string>,
 ): { nodes: Node[]; edges: Edge[] } {
   const visualItems = [...items].sort(
     (left, right) =>
@@ -574,6 +579,7 @@ function buildReviewTargetFlowElements(
   const nodes = visualItems.map((item, index) => {
     const selected = item.id === selectedTargetId;
     const reviewed = reviewedTargetIds.has(item.id);
+    const needsReReview = needsReReviewTargetIds.has(item.id);
     const row = Math.floor(index / columns);
     const column = index % columns;
 
@@ -589,10 +595,10 @@ function buildReviewTargetFlowElements(
       selected,
       style: {
         width: 210,
-        border: selected ? "2px solid hsl(var(--primary))" : "1px solid hsl(var(--border))",
+        border: selected ? "2px solid hsl(var(--primary))" : needsReReview ? "2px solid hsl(38 92% 50%)" : "1px solid hsl(var(--border))",
         borderRadius: 8,
         color: "hsl(var(--foreground))",
-        background: reviewed ? "hsl(var(--muted))" : "hsl(var(--card))",
+        background: reviewed ? "hsl(var(--muted))" : needsReReview ? "hsl(38 92% 50% / 0.12)" : "hsl(var(--card))",
         opacity: reviewed ? 0.58 : 1,
         fontSize: 12,
         lineHeight: 1.35,
@@ -855,15 +861,18 @@ function ReviewTargetInspector({
   onOpenFile,
   onToggleBaseComparison,
   onToggleReviewed,
-  reviewed,
+  reviewState,
 }: {
   baseComparisonOpen: boolean;
   model: ReviewTargetInspectorModel | null;
   onOpenFile: (path: string) => void;
   onToggleBaseComparison: () => void;
   onToggleReviewed: () => void;
-  reviewed: boolean;
+  reviewState: ReviewTargetReviewState;
 }) {
+  const reviewed = reviewState === "reviewed";
+  const needsReReview = reviewState === "needs-re-review";
+
   return (
     <section className="border-b border-border p-3" aria-label="Review Target Inspector">
       <div className="mb-3 flex items-center justify-between gap-2">
@@ -886,8 +895,8 @@ function ReviewTargetInspector({
                 <p className="truncate text-sm font-semibold">{model.target.title}</p>
                 <p className="mt-1 truncate text-xs text-muted-foreground">{model.target.paths.join(", ")}</p>
               </div>
-              <Badge variant={reviewed ? "success" : model.target.priority === "high" ? "warning" : "muted"}>
-                {reviewed ? "Reviewed" : model.target.priority}
+              <Badge variant={reviewed ? "success" : needsReReview ? "warning" : model.target.priority === "high" ? "warning" : "muted"}>
+                {reviewed ? "Reviewed" : needsReReview ? "Needs re-review" : model.target.priority}
               </Badge>
             </div>
             <div className="grid grid-cols-3 gap-2 text-xs">
@@ -1588,8 +1597,16 @@ export function App({
     [analysisIndex, attentionMapPresentation, reviewOverview.hotspots, reviewOverviewCache],
   );
   const reviewTargetStore = useMemo(() => readReviewTargetStateStore(), [reviewTargetRevision]);
+  const reviewTargetReviewStates = useMemo(
+    () => buildReviewTargetReviewStates(currentUserKey, reviewTargets, reviewTargetStore),
+    [currentUserKey, reviewTargetStore, reviewTargets],
+  );
   const reviewedTargetIds = useMemo(
     () => buildReviewedTargetIdSet(currentUserKey, reviewTargets, reviewTargetStore),
+    [currentUserKey, reviewTargetStore, reviewTargets],
+  );
+  const needsReReviewTargetIds = useMemo(
+    () => buildNeedsReReviewTargetIdSet(currentUserKey, reviewTargets, reviewTargetStore),
     [currentUserKey, reviewTargetStore, reviewTargets],
   );
   const reviewPathItems = useMemo(
@@ -4010,6 +4027,7 @@ export function App({
                 <div className="mt-3 grid min-h-[320px] grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]">
                   <ReviewTargetFlow
                     items={reviewPathItems}
+                    needsReReviewTargetIds={needsReReviewTargetIds}
                     onSelectTarget={selectReviewTarget}
                     reviewedTargetIds={reviewedTargetIds}
                     selectedTargetId={selectedReviewTargetId}
@@ -4046,8 +4064,16 @@ export function App({
                       <div className="mt-3 rounded-md border border-border p-2 text-xs" aria-label="Selected Review Target">
                         <div className="flex items-start justify-between gap-2">
                           <p className="min-w-0 truncate font-semibold">{selectedReviewPathItem.target.title}</p>
-                          <Badge variant={reviewedTargetIds.has(selectedReviewPathItem.id) ? "success" : "muted"}>
-                            #{selectedReviewPathItem.order}
+                          <Badge
+                            variant={
+                              reviewedTargetIds.has(selectedReviewPathItem.id)
+                                ? "success"
+                                : needsReReviewTargetIds.has(selectedReviewPathItem.id)
+                                  ? "warning"
+                                  : "muted"
+                            }
+                          >
+                            {needsReReviewTargetIds.has(selectedReviewPathItem.id) ? "Needs re-review" : `#${selectedReviewPathItem.order}`}
                           </Badge>
                         </div>
                         <p className="mt-1 truncate text-muted-foreground">{selectedReviewPathItem.orderingReasons.join(", ")}</p>
@@ -4080,6 +4106,7 @@ export function App({
                             <Badge variant={item.hotspotScore > 0 ? "warning" : "muted"}>{item.hotspotScore}</Badge>
                           </div>
                           <p className="mt-1 truncate text-muted-foreground">{item.orderingReasons.join(", ")}</p>
+                          {needsReReviewTargetIds.has(item.id) && <Badge variant="warning">Needs re-review</Badge>}
                         </button>
                       ))}
                       {activeReviewPathItems.length === 0 && (
@@ -4403,7 +4430,7 @@ export function App({
                   setReviewTargetReviewed(selectedReviewPathItem.id, !reviewedTargetIds.has(selectedReviewPathItem.id));
                 }
               }}
-              reviewed={selectedReviewPathItem ? reviewedTargetIds.has(selectedReviewPathItem.id) : false}
+              reviewState={selectedReviewPathItem ? (reviewTargetReviewStates[selectedReviewPathItem.id] ?? "unreviewed") : "unreviewed"}
             />
             <div className="border-b border-border p-3">
               <div className="mb-3 flex items-center justify-between gap-2">

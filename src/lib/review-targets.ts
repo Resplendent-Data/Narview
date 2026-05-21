@@ -14,6 +14,7 @@ export type ReviewTargetPriority = "high" | "normal" | "low";
 export interface ReviewTarget {
   id: string;
   stableKey: string;
+  fingerprint: string;
   kind: ReviewTargetKind;
   title: string;
   priority: ReviewTargetPriority;
@@ -224,6 +225,7 @@ function createNodeGroupTarget(
   return {
     id: `target:${stableHash(stableKey)}`,
     stableKey,
+    fingerprint: buildNodeGroupFingerprint(stableKey, sortedNodes, edgeReasons),
     kind: "node-group",
     title: getTargetTitle(sortedNodes, paths),
     priority: reviewThreads > 0 ? "high" : fallback ? "normal" : "normal",
@@ -265,6 +267,15 @@ function buildGeneratedClusterTargets(attentionMap: AttentionMapPresentation, ho
       {
         id: `target:${stableHash(stableKey)}`,
         stableKey,
+        fingerprint: stableHash(
+          JSON.stringify({
+            stableKey,
+            paths,
+            changedLines: node.changedLines,
+            fileCount: node.fileCount ?? paths.length,
+            reasons: hotspot.reasons.slice().sort(),
+          }),
+        ),
         kind: "generated-cluster" as const,
         title: `${node.label} (${node.fileCount ?? paths.length} files)`,
         priority: "low" as const,
@@ -371,6 +382,38 @@ function getCommonDirectory(paths: string[]) {
 
 function generatedClusterIsJustified(hotspot: HotspotScore) {
   return hotspot.unresolvedThreads > 0 || hotspot.reasons.some((reason) => reason.includes("failing check"));
+}
+
+function buildNodeGroupFingerprint(stableKey: string, nodes: AttentionNode[], edges: GroupEdge[]) {
+  return stableHash(
+    JSON.stringify({
+      stableKey,
+      nodes: nodes.map((node) => ({
+        id: node.id,
+        kind: node.kind,
+        reason: node.reason,
+        filePath: node.filePath,
+        status: node.status,
+        hunkId: node.hunkId,
+        label: node.label,
+        lineStart: node.lineStart,
+        lineEnd: node.lineEnd,
+        additions: node.additions,
+        deletions: node.deletions,
+        symbolName: node.symbolName,
+        symbolKind: node.symbolKind,
+        language: node.language,
+        reasons: node.reasons?.slice().sort() ?? [],
+      })),
+      edges: edges.map((edge) => ({
+        id: edge.id,
+        from: edge.from,
+        to: edge.to,
+        reason: edge.reason,
+        strength: edge.strength,
+      })),
+    }),
+  );
 }
 
 function samePathSet(left: string[], right: string[]) {

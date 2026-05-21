@@ -68,6 +68,7 @@ import { buildReviewPathItems, buildReviewWorkProgress, moveReviewPathSelection 
 import { buildReviewTargetInspectorModel } from "./lib/review-target-inspector";
 import {
   buildReviewedTargetIdSet,
+  buildReviewTargetReviewStates,
   clearReviewTargetStateStore,
   readReviewTargetStateStore,
   reviewTargetStorageKey,
@@ -417,6 +418,7 @@ function createSyntheticAttentionNode(overrides: Partial<AttentionNode> & Pick<A
 function createReviewTarget(overrides: Partial<ReviewTarget> & Pick<ReviewTarget, "id" | "title" | "paths">): ReviewTarget {
   return {
     stableKey: overrides.id,
+    fingerprint: `${overrides.id}:fingerprint`,
     kind: "node-group",
     priority: "normal",
     nodeIds: [overrides.id],
@@ -1436,6 +1438,32 @@ describe("App shell", () => {
     expect(within(screen.getByLabelText("Review Path")).getByRole("button", { name: /mark target reviewed/i })).toBeInTheDocument();
     expect(within(screen.getByLabelText("Review Work")).getByText("0/5")).toBeInTheDocument();
     expect(within(screen.getByLabelText("Review Work")).getByText("1/3")).toBeInTheDocument();
+  });
+
+  it("shows Needs re-review distinctly when a reviewed target fingerprint changes", async () => {
+    const firstRender = render(<App />);
+
+    await waitFor(() => expect(window.localStorage.getItem(reviewTargetStorageKey)).toContain("src/auth/session.ts grouped review"));
+
+    const store = JSON.parse(window.localStorage.getItem(reviewTargetStorageKey) ?? "{}") as ReturnType<typeof readReviewTargetStateStore>;
+    const userKey = Object.keys(store.users)[0];
+    const targetId = Object.keys(store.users[userKey])[0];
+    store.users[userKey][targetId] = {
+      ...store.users[userKey][targetId],
+      reviewed: true,
+      reviewedAtEpochMs: 1_800_000_000_000,
+      reviewedFingerprint: "stale-fingerprint",
+      needsReReview: false,
+    };
+    window.localStorage.setItem(reviewTargetStorageKey, JSON.stringify(store));
+    firstRender.unmount();
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByLabelText("Review Path")).toHaveTextContent("Needs re-review"));
+    await userEvent.click(within(screen.getByLabelText("Review Path")).getByRole("button", { name: /src\/auth\/session\.ts/i }));
+    expect(screen.getByLabelText("Review Target Inspector")).toHaveTextContent("Needs re-review");
+    expect(within(screen.getByLabelText("Review Work")).getByText("0/5")).toBeInTheDocument();
   });
 
   it("loads non-draft Pull Requests by default and includes drafts when filtered", async () => {
@@ -2622,6 +2650,68 @@ describe("App shell", () => {
 
     clearReviewTargetStateStore();
     expect(buildReviewedTargetIdSet("octocat", targets, readReviewTargetStateStore()).size).toBe(0);
+  });
+
+  it("preserves reviewed targets by fingerprint and marks changed target content as needs re-review", () => {
+    const pullRequestKey = "Resplendent-Data/Narview#12";
+    const unchanged = createReviewTarget({
+      id: "target-session",
+      title: "Session target",
+      paths: ["src/auth/session.ts"],
+      fingerprint: "fingerprint-a",
+    });
+    const changed = createReviewTarget({
+      id: "target-session",
+      title: "Session target",
+      paths: ["src/auth/session.ts"],
+      fingerprint: "fingerprint-b",
+    });
+    const unrelatedContextChange = createReviewTarget({
+      id: "target-queue",
+      title: "Queue target",
+      paths: ["src/review/queue.ts"],
+      fingerprint: "queue-fingerprint-a",
+    });
+    const unrelatedContextChanged = createReviewTarget({
+      id: "target-queue",
+      title: "Queue target",
+      paths: ["src/review/queue.ts"],
+      fingerprint: "queue-fingerprint-b",
+    });
+
+    syncReviewTargets("octocat", pullRequestKey, [unchanged, unrelatedContextChange]);
+    setReviewTargetReviewed("octocat", unchanged.id, true, 1_800_000_000_000);
+
+    syncReviewTargets("octocat", pullRequestKey, [unchanged, unrelatedContextChanged]);
+    expect(buildReviewTargetReviewStates("octocat", [unchanged, unrelatedContextChanged], readReviewTargetStateStore())).toMatchObject({
+      [unchanged.id]: "reviewed",
+      [unrelatedContextChanged.id]: "unreviewed",
+    });
+
+    syncReviewTargets("octocat", pullRequestKey, [changed, unrelatedContextChanged]);
+    expect(buildReviewTargetReviewStates("octocat", [changed, unrelatedContextChanged], readReviewTargetStateStore())).toMatchObject({
+      [changed.id]: "needs-re-review",
+      [unrelatedContextChanged.id]: "unreviewed",
+    });
+    syncReviewTargets("octocat", pullRequestKey, [changed, unrelatedContextChanged]);
+    expect(buildReviewTargetReviewStates("octocat", [changed], readReviewTargetStateStore())).toMatchObject({
+      [changed.id]: "needs-re-review",
+    });
+    expect(
+      buildReviewWorkProgress(
+        buildReviewPathItems([changed, unrelatedContextChanged], []),
+        buildReviewedTargetIdSet("octocat", [changed, unrelatedContextChanged], readReviewTargetStateStore()),
+        [],
+      ),
+    ).toMatchObject({
+      targets: { total: 2, reviewed: 0, remaining: 2 },
+      combinedRemaining: 2,
+    });
+
+    setReviewTargetReviewed("octocat", changed.id, true, 1_800_000_000_001);
+    expect(buildReviewTargetReviewStates("octocat", [changed], readReviewTargetStateStore())).toMatchObject({
+      [changed.id]: "reviewed",
+    });
   });
 
   it("builds Review Target inspector content from head symbols, base diff, related tests, and fallback hunks", () => {
