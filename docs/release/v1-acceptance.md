@@ -1,6 +1,6 @@
 # Narview V1 Acceptance
 
-Status: Pass for V1 implementation readiness. Public distribution can ship unsigned installers for now; real auto-installing updates still need Tauri updater signatures because Tauri does not allow unsigned update installation.
+Status: Pass for V1 implementation readiness. Public distribution can ship ad-hoc signed macOS installers for now, and auto-installing updates require signed Tauri updater metadata because Tauri does not allow unsigned update installation.
 
 ## Evidence
 
@@ -12,7 +12,7 @@ Status: Pass for V1 implementation readiness. Public distribution can ship unsig
 | Session continuity | Pass | Smoke tests cover restoring the last active Pull Request after app restart and updating Review Session state while navigating threads. |
 | Handoff, keyboard, privacy, and diagnostics | Pass | Smoke tests cover Handoff Packets, command palette, visible Keyboard Flow cues, theme switching, diagnostics export, redaction, no telemetry sinks, and local review history reset confirmation. |
 | Large Pull Request usability | Pass | Synthetic large Pull Request tests cover generated/vendor suppression, bounded render windows, lazy diff usability, and performance thresholds before full diff content loads. |
-| Release pipeline readiness | Pass | `test:release-config` validates SemVer tag flow, runtime updater config, Apple Silicon macOS and Linux installer jobs, Linux AppImage output, and the deferred signing path. |
+| Release pipeline readiness | Pass | `test:release-config` validates SemVer tag flow, runtime updater config, Apple Silicon macOS and Linux installer jobs, Linux AppImage output, and signed updater metadata publishing. |
 | Scope audit | Pass | The implemented app remains inside V1 boundaries and avoids unsupported product surfaces listed below. |
 
 ## Validation Run
@@ -29,7 +29,7 @@ Status: Pass for V1 implementation readiness. Public distribution can ship unsig
 - macOS local package: `Narview.app` and `Narview_0.1.0_aarch64.dmg` build successfully in debug packaging.
 - macOS public release: GitHub Actions builds Apple Silicon installers. Apple signing and notarization are deferred.
 - Linux public release: GitHub Actions builds on `ubuntu-22.04`, installs WebKitGTK 4.1 dependencies, and keeps AppImage enabled as the V1 Linux format.
-- Auto-update runtime path: the desktop app registers Tauri's updater plugin, checks the Narview GitHub Releases `latest.json` endpoint, downloads available updates, installs them, and relaunches. Signing metadata generation is deferred.
+- Auto-update runtime path: the desktop app registers Tauri's updater plugin, checks the Narview GitHub Releases `latest.json` endpoint, downloads available updates, verifies signed updater metadata, installs them, and relaunches.
 
 ## Scope Audit
 
@@ -53,4 +53,4 @@ Status: Pass for V1 implementation readiness. Public distribution can ship unsig
 
 ## Release Gate
 
-Before publishing a public tag, confirm the installer jobs pass and publish a matching SemVer tag such as `v0.1.0`. Before relying on automatic installation, enable the updater signing steps documented in [auto-updates.md](./auto-updates.md).
+Before publishing a public tag, confirm the installer jobs pass, updater signing secrets are configured, and the tag matches project versions such as `v0.1.0`. Keep the updater signing key stable across releases.

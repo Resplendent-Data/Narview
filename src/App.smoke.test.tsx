@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
-import { lastUpdateCheckStorageKey, type AppUpdateClient } from "./lib/app-updater";
+import { appReleaseDownloadUrl, lastUpdateCheckStorageKey, type AppUpdateClient } from "./lib/app-updater";
 import type { AuthClient, AuthSession } from "./lib/auth";
 import {
   buildLazyDiffState,
@@ -1316,6 +1316,26 @@ describe("App shell", () => {
     await waitFor(() => expect(updaterClient.checkForUpdate).toHaveBeenCalledTimes(1));
     expect(within(updates).getByText("You're up to date")).toBeInTheDocument();
     expect(window.localStorage.getItem(lastUpdateCheckStorageKey)).toMatch(/^\d+$/);
+
+    vi.mocked(openUrl).mockClear();
+    await user.click(within(updates).getByRole("button", { name: /open releases/i }));
+    expect(openUrl).toHaveBeenCalledWith(appReleaseDownloadUrl);
+  });
+
+  it("explains when desktop updater metadata has not been published", async () => {
+    const user = userEvent.setup();
+    const updaterClient = createUpdaterClient({
+      checkForUpdate: vi.fn().mockRejectedValue(new Error("404 not found")),
+    });
+    render(<App updaterClient={updaterClient} />);
+
+    const settings = await openSettingsDialog(user);
+    const updates = within(settings).getByLabelText("App updates");
+    await user.click(within(updates).getByRole("button", { name: /check updates/i }));
+
+    await waitFor(() => expect(updaterClient.checkForUpdate).toHaveBeenCalledTimes(1));
+    expect(within(updates).getByText("Signed update metadata unavailable")).toBeInTheDocument();
+    expect(within(updates).getByText(/Install the latest Narview release manually/i)).toBeInTheDocument();
   });
 
   it("does not queue GitHub writes while offline", () => {

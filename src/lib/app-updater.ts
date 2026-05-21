@@ -33,9 +33,14 @@ export type AppUpdaterState = {
 };
 
 export const lastUpdateCheckStorageKey = "narview:last-update-check-at";
+export const appReleaseDownloadUrl = "https://github.com/Resplendent-Data/Narview/releases";
 
 const autoUpdateCooldownMs = 24 * 60 * 60 * 1000;
 const fallbackVersion = "0.1.0";
+const manualInstallMessage =
+  "Signed updater metadata is not available for this build. Install the latest Narview release manually, then in-app updates can resume from signed builds.";
+const signatureFailureMessage =
+  "This Narview build cannot verify the published update signature. Install the latest signed release manually to rejoin automatic updates.";
 
 function isTauriRuntime() {
   if (typeof window === "undefined") {
@@ -73,7 +78,11 @@ function getUpdateErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
 
   if (/valid release json|not found|404/i.test(message)) {
-    return { status: "No update metadata published yet.", error: null };
+    return { status: "Signed update metadata unavailable", error: manualInstallMessage };
+  }
+
+  if (/signature|\\.sig|minisign|verify/i.test(message)) {
+    return { status: "Update signature could not be verified", error: signatureFailureMessage };
   }
 
   return { status: "Update check failed", error: message };

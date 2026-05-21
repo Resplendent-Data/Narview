@@ -10,12 +10,13 @@ const outputPath =
     : resolve("src-tauri/tauri.release.generated.conf.json");
 const dryRun = args.has("--dry-run");
 
-const publicKey = process.env.NARVIEW_UPDATER_PUBLIC_KEY;
+const baseConfig = JSON.parse(await readFile(resolve("src-tauri/tauri.conf.json"), "utf8"));
+const publicKey = process.env.NARVIEW_UPDATER_PUBLIC_KEY || baseConfig.plugins?.updater?.pubkey;
 const endpoint =
   process.env.NARVIEW_UPDATER_ENDPOINT ??
   (process.env.GITHUB_REPOSITORY
     ? `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/latest/download/latest.json`
-    : undefined);
+    : baseConfig.plugins?.updater?.endpoints?.[0]);
 
 const missing = [
   ["NARVIEW_UPDATER_PUBLIC_KEY", publicKey],

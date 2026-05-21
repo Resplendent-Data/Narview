@@ -40,7 +40,18 @@ assert(workflow.includes("ubuntu-22.04"), "Release workflow must build Linux App
 assert(workflow.includes("macos-latest"), "Release workflow must build macOS artifacts.");
 assert(workflow.includes("aarch64-apple-darwin"), "Release workflow must build Apple Silicon macOS artifacts.");
 assert(!workflow.includes("x86_64-apple-darwin"), "Release workflow should not build Intel macOS artifacts for v1.");
-assert(!workflow.includes("TAURI_SIGNING_PRIVATE_KEY"), "Release workflow must not require updater signing secrets yet.");
+assert(workflow.includes("TAURI_SIGNING_PRIVATE_KEY"), "Release workflow must require updater signing secrets.");
+assert(workflow.includes("TAURI_SIGNING_PRIVATE_KEY_PASSWORD"), "Release workflow must provide the updater signing key password.");
+assert(workflow.includes("uploadUpdaterJson: true"), "Release workflow must upload signed updater metadata.");
+assert(
+  workflow.includes("--config src-tauri/tauri.release.generated.conf.json"),
+  "Release workflow must build with generated updater release config.",
+);
+assert(
+  workflow.includes("scripts/verify-release-artifacts.mjs"),
+  "Release workflow must verify signed updater artifacts before finishing.",
+);
+assert(workflow.includes("prerelease: false"), "Release workflow must publish latest-compatible GitHub releases for the updater endpoint.");
 assert(!workflow.includes("APPLE_CERTIFICATE"), "Release workflow must not require macOS signing secrets yet.");
 assert(!workflow.includes("APPLE_API_KEY_PATH"), "Release workflow must not require macOS notarization secrets yet.");
 assert(workflow.includes("npm run test:release-config"), "Release workflow must run release dry-run checks.");
@@ -79,7 +90,8 @@ assert(
   ),
   "Default Tauri config must point update checks at the Narview GitHub Release latest.json.",
 );
-assert(releaseDocs.includes("Signing deferred"), "Release docs must state that signing is deferred.");
+assert(releaseDocs.includes("TAURI_SIGNING_PRIVATE_KEY"), "Release docs must describe updater signing secrets.");
+assert(releaseDocs.includes("GitHub's latest release endpoint ignores prereleases"), "Release docs must explain latest-compatible RC publishing.");
 assert(releaseDocs.includes("v0.1.0"), "Release docs must show the SemVer tag shape.");
 
 console.log("Release configuration dry-run checks passed.");

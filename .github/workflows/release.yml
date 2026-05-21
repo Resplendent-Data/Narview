@@ -29,15 +29,18 @@ jobs:
         include:
           - label: macOS Apple Silicon
             platform: macos-latest
-            args: "--target aarch64-apple-darwin"
+            args: "--target aarch64-apple-darwin --config src-tauri/tauri.release.generated.conf.json"
             artifactPlatform: macos
           - label: Linux x64 AppImage
             platform: ubuntu-22.04
-            args: ""
+            args: "--config src-tauri/tauri.release.generated.conf.json"
             artifactPlatform: linux
 
     env:
       TAG_NAME: ${{ inputs.tag || github.ref_name }}
+      NARVIEW_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
     steps:
       - name: Checkout release tag
@@ -58,6 +61,13 @@ jobs:
 
           APP_VERSION="${TAG_NAME#v}"
           node -e "const fs=require('node:fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const tauri=JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json','utf8')); if (pkg.version !== '$APP_VERSION' || tauri.version !== '$APP_VERSION') { throw new Error('Tag $TAG_NAME must match package.json and tauri.conf.json version ' + pkg.version); }"
+
+          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "$name must be configured before publishing signed updater artifacts."
+              exit 1
+            fi
+          done
 
       - name: Install Linux Tauri dependencies
         if: matrix.artifactPlatform == 'linux'
@@ -93,16 +103,21 @@ jobs:
       - name: Build web assets
         run: npm run build
 
-      - name: Build and publish Tauri artifacts
+      - name: Prepare Tauri release config
+        run: node scripts/prepare-tauri-release-config.mjs --output src-tauri/tauri.release.generated.conf.json
+
+      - name: Build, sign, and publish Tauri artifacts
         id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ env.TAG_NAME }}
           releaseName: Narview ${{ env.TAG_NAME }}
           releaseBody: |
-            Installers for Narview ${{ env.TAG_NAME }}.
+            Installers and signed updater metadata for Narview ${{ env.TAG_NAME }}.
 
             ## macOS
 
@@ -128,5 +143,9 @@ jobs:
             ./Narview_*_amd64.AppImage
             ```
           releaseDraft: false
-          prerelease: ${{ contains(env.TAG_NAME, '-') }}
+          prerelease: false
+          uploadUpdaterJson: true
           args: ${{ matrix.args }}
+
+      - name: Verify release artifact paths
+        run: node scripts/verify-release-artifacts.mjs --platform "${{ matrix.artifactPlatform }}" --artifact-paths '${{ steps.tauri.outputs.artifactPaths }}'

@@ -35,7 +35,7 @@ import { MarkdownContent } from "./components/markdown-content";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Kbd } from "./components/ui/kbd";
-import { type AppUpdateClient, useAppUpdater } from "./lib/app-updater";
+import { appReleaseDownloadUrl, type AppUpdateClient, useAppUpdater } from "./lib/app-updater";
 import { type AuthClient, type AuthSession, type OAuthStartResponse, tauriAuthClient } from "./lib/auth";
 import {
   buildLazyDiffState,
@@ -3940,6 +3940,15 @@ export function App({
                       disabled={updater.isChecking || updater.isUpdating}
                     >
                       {updater.isChecking ? "Checking..." : updater.isUpdating ? "Updating..." : "Check updates"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="w-full justify-between"
+                      onClick={() => void openUrl(appReleaseDownloadUrl)}
+                    >
+                      Open releases
+                      <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
                     </Button>
                   </div>
                 </section>
