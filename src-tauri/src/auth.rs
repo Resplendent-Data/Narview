@@ -1066,8 +1066,10 @@ mod tests {
 
     #[test]
     fn oauth_config_detects_review_thread_write_scope() {
-        let private_repo_config = OAuthConfig::from_values(None, None, Some("read:user repo".to_string()));
-        let public_repo_config = OAuthConfig::from_values(None, None, Some("public_repo read:user".to_string()));
+        let private_repo_config =
+            OAuthConfig::from_values(None, None, Some("read:user repo".to_string()));
+        let public_repo_config =
+            OAuthConfig::from_values(None, None, Some("public_repo read:user".to_string()));
         let read_only_config = OAuthConfig::from_values(None, None, Some("read:user".to_string()));
 
         assert!(private_repo_config.can_write_review_threads());

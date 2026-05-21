@@ -1,7 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
-import { networkRequiredFailure } from "./pr-cache";
+import { networkRequiredFailure, type CachedReviewThread } from "./pr-cache";
+import type { ReviewThreadAnchorSide } from "./review-thread-anchors";
 
-export type ThreadWriteAction = "reply" | "resolve" | "unresolve";
+export type ThreadWriteAction = "reply" | "resolve" | "unresolve" | "create-line" | "create-file";
+
+export interface StartLineReviewThreadInput {
+  repository: string;
+  pullRequestNumber: number;
+  path: string;
+  line: number;
+  side: ReviewThreadAnchorSide;
+  body: string;
+}
+
+export interface StartFileReviewThreadInput {
+  repository: string;
+  pullRequestNumber: number;
+  path: string;
+  body: string;
+}
 
 export interface ThreadActionSuccess {
   ok: true;
@@ -9,6 +26,7 @@ export interface ThreadActionSuccess {
   threadId: string;
   message: string;
   replyUrl: string | null;
+  createdThread?: CachedReviewThread | null;
 }
 
 export interface ThreadActionFailure {
@@ -26,6 +44,8 @@ export interface ThreadActionClient {
   reply: (threadId: string, body: string) => Promise<ThreadActionResult>;
   resolve: (threadId: string) => Promise<ThreadActionResult>;
   unresolve: (threadId: string) => Promise<ThreadActionResult>;
+  startLineThread: (input: StartLineReviewThreadInput) => Promise<ThreadActionResult>;
+  startFileThread: (input: StartFileReviewThreadInput) => Promise<ThreadActionResult>;
 }
 
 interface BackendThreadActionResponse {
@@ -33,10 +53,15 @@ interface BackendThreadActionResponse {
   threadId: string;
   message: string;
   replyUrl: string | null;
+  createdThread?: CachedReviewThread | null;
 }
 
 export function validateReplyBody(body: string): string | null {
   return body.trim().length === 0 ? "Reply body is required." : null;
+}
+
+export function validateNewThreadBody(body: string): string | null {
+  return body.trim().length === 0 ? "Review Thread body is required." : null;
 }
 
 export function createThreadActionFailure(
@@ -102,6 +127,52 @@ export const tauriThreadActionClient: ThreadActionClient = {
       return classifyThreadActionError("unresolve", threadId, error);
     }
   },
+
+  async startLineThread(input) {
+    const validationError = validateNewThreadBody(input.body);
+    if (validationError) {
+      return createThreadActionFailure("create-line", `${input.path}:${input.line}`, "github-thread-validation-error", validationError);
+    }
+
+    try {
+      return toSuccess(
+        await invoke<BackendThreadActionResponse>("start_review_thread", {
+          repository: input.repository,
+          pullRequestNumber: input.pullRequestNumber,
+          path: input.path,
+          body: input.body,
+          line: input.line,
+          side: input.side,
+          subjectType: "LINE",
+        }),
+      );
+    } catch (error) {
+      return classifyThreadActionError("create-line", `${input.path}:${input.line}`, error);
+    }
+  },
+
+  async startFileThread(input) {
+    const validationError = validateNewThreadBody(input.body);
+    if (validationError) {
+      return createThreadActionFailure("create-file", input.path, "github-thread-validation-error", validationError);
+    }
+
+    try {
+      return toSuccess(
+        await invoke<BackendThreadActionResponse>("start_review_thread", {
+          repository: input.repository,
+          pullRequestNumber: input.pullRequestNumber,
+          path: input.path,
+          body: input.body,
+          line: null,
+          side: null,
+          subjectType: "FILE",
+        }),
+      );
+    } catch (error) {
+      return classifyThreadActionError("create-file", input.path, error);
+    }
+  },
 };
 
 export const offlineThreadActionClient: ThreadActionClient = {
@@ -118,6 +189,20 @@ export const offlineThreadActionClient: ThreadActionClient = {
   async unresolve(threadId) {
     return networkRequiredThreadActionFailure("unresolve", threadId);
   },
+  async startLineThread(input) {
+    const validationError = validateNewThreadBody(input.body);
+    if (validationError) {
+      return createThreadActionFailure("create-line", `${input.path}:${input.line}`, "github-thread-validation-error", validationError);
+    }
+    return networkRequiredThreadActionFailure("create-line", `${input.path}:${input.line}`);
+  },
+  async startFileThread(input) {
+    const validationError = validateNewThreadBody(input.body);
+    if (validationError) {
+      return createThreadActionFailure("create-file", input.path, "github-thread-validation-error", validationError);
+    }
+    return networkRequiredThreadActionFailure("create-file", input.path);
+  },
 };
 
 function toSuccess(response: BackendThreadActionResponse): ThreadActionSuccess {
@@ -127,6 +212,7 @@ function toSuccess(response: BackendThreadActionResponse): ThreadActionSuccess {
     threadId: response.threadId,
     message: response.message,
     replyUrl: response.replyUrl,
+    createdThread: response.createdThread ?? null,
   };
 }
 
@@ -140,6 +226,12 @@ function getActionLabel(action: ThreadWriteAction) {
   }
   if (action === "resolve") {
     return "Resolve";
+  }
+  if (action === "create-line") {
+    return "Start line-level";
+  }
+  if (action === "create-file") {
+    return "Start file-level";
   }
   return "Unresolve";
 }

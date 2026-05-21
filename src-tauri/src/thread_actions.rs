@@ -31,6 +31,30 @@ pub struct ThreadActionResponse {
     thread_id: String,
     message: String,
     reply_url: Option<String>,
+    created_thread: Option<CreatedReviewThread>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedReviewThread {
+    id: String,
+    author_login: Option<String>,
+    file_path: String,
+    line: Option<u64>,
+    state: String,
+    body: String,
+    updated_at: String,
+    comments: Vec<CreatedReviewThreadComment>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedReviewThreadComment {
+    id: String,
+    author_login: Option<String>,
+    body: String,
+    updated_at: String,
+    url: Option<String>,
 }
 
 #[tauri::command]
@@ -72,6 +96,7 @@ pub async fn reply_review_thread(
         thread_id: requested_thread_id,
         message: "Reply added to GitHub Review Thread.".to_string(),
         reply_url,
+        created_thread: None,
     })
 }
 
@@ -100,6 +125,7 @@ pub async fn resolve_review_thread(
         thread_id: requested_thread_id,
         message: "Review Thread resolved on GitHub.".to_string(),
         reply_url: None,
+        created_thread: None,
     })
 }
 
@@ -128,6 +154,120 @@ pub async fn unresolve_review_thread(
         thread_id: requested_thread_id,
         message: "Review Thread unresolved on GitHub.".to_string(),
         reply_url: None,
+        created_thread: None,
+    })
+}
+
+#[tauri::command]
+pub async fn start_review_thread(
+    auth_state: State<'_, AuthState>,
+    workspace_state: State<'_, WorkspaceState>,
+    repository: String,
+    pull_request_number: u64,
+    path: String,
+    body: String,
+    line: Option<u64>,
+    side: Option<String>,
+    subject_type: String,
+) -> Result<ThreadActionResponse, ThreadActionError> {
+    let trimmed_body = body.trim();
+    if trimmed_body.is_empty() {
+        return Err(ThreadActionError::new(
+            "github-thread-validation-error",
+            "Review Thread body is required.",
+        ));
+    }
+    if path.trim().is_empty() {
+        return Err(ThreadActionError::new(
+            "github-thread-validation-error",
+            "Review Thread path is required.",
+        ));
+    }
+
+    let (owner, name) = parse_repository_slug(&repository)?;
+    let subject = subject_type.trim().to_ascii_uppercase();
+    let action = if subject == "FILE" {
+        "create-file"
+    } else if subject == "LINE" {
+        "create-line"
+    } else {
+        return Err(ThreadActionError::new(
+            "github-thread-validation-error",
+            "Review Thread subject type must be LINE or FILE.",
+        ));
+    };
+
+    let mut input = serde_json::Map::new();
+    input.insert("body".to_string(), json!(trimmed_body));
+    input.insert("path".to_string(), json!(path.trim()));
+    input.insert("subjectType".to_string(), json!(subject));
+
+    if action == "create-line" {
+        let line = line.ok_or_else(|| {
+            ThreadActionError::new(
+                "github-thread-validation-error",
+                "Line-level Review Threads require a changed line anchor.",
+            )
+        })?;
+        let side = side
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| value == "LEFT" || value == "RIGHT")
+            .ok_or_else(|| {
+                ThreadActionError::new(
+                    "github-thread-validation-error",
+                    "Line-level Review Threads require a LEFT or RIGHT diff side.",
+                )
+            })?;
+
+        input.insert("line".to_string(), json!(line));
+        input.insert("side".to_string(), json!(side));
+    }
+
+    let token = github_token(&auth_state)?;
+    let pull_request_id = fetch_pull_request_id(
+        &workspace_state.http,
+        &token,
+        &owner,
+        &name,
+        pull_request_number,
+    )
+    .await?;
+    input.insert("pullRequestId".to_string(), json!(pull_request_id));
+
+    let data = send_graphql(
+        &workspace_state.http,
+        &token,
+        action,
+        json!({
+            "query": "mutation StartReviewThread($input: AddPullRequestReviewThreadInput!) { addPullRequestReviewThread(input: $input) { thread { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { id author { login } body updatedAt url } } } } }",
+            "variables": {
+                "input": Value::Object(input),
+            }
+        }),
+    )
+    .await?;
+
+    let thread_value = data
+        .pointer("/addPullRequestReviewThread/thread")
+        .ok_or_else(|| {
+            ThreadActionError::new(
+                "github-thread-response-error",
+                "GitHub returned no newly created Review Thread.",
+            )
+        })?;
+    let created_thread = created_review_thread_from_value(thread_value)?;
+    let reply_url = created_thread
+        .comments
+        .first()
+        .and_then(|comment| comment.url.clone());
+    let thread_id = created_thread.id.clone();
+
+    Ok(ThreadActionResponse {
+        action: action.to_string(),
+        thread_id,
+        message: "Review Thread published to GitHub.".to_string(),
+        reply_url,
+        created_thread: Some(created_thread),
     })
 }
 
@@ -153,6 +293,149 @@ fn github_token(auth_state: &AuthState) -> Result<String, ThreadActionError> {
     }
 
     Ok(token)
+}
+
+async fn fetch_pull_request_id(
+    http: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u64,
+) -> Result<String, ThreadActionError> {
+    let data = send_graphql(
+        http,
+        token,
+        "load Pull Request for Review Thread",
+        json!({
+            "query": "query NarviewReviewThreadPullRequest($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } } }",
+            "variables": {
+                "owner": owner,
+                "name": name,
+                "number": number as i64,
+            }
+        }),
+    )
+    .await?;
+
+    data.pointer("/repository/pullRequest/id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            ThreadActionError::new(
+                "github-thread-response-error",
+                "GitHub returned no Pull Request id for this Review Thread.",
+            )
+        })
+}
+
+fn parse_repository_slug(repository: &str) -> Result<(String, String), ThreadActionError> {
+    let normalized = repository
+        .trim()
+        .trim_start_matches("https://github.com/")
+        .trim_start_matches("http://github.com/")
+        .trim_start_matches("github.com/")
+        .trim_end_matches(".git")
+        .trim_end_matches('/');
+    let mut parts = normalized.split('/').filter(|part| !part.is_empty());
+    let owner = parts.next();
+    let name = parts.next();
+
+    match (owner, name, parts.next()) {
+        (Some(owner), Some(name), None) => Ok((owner.to_string(), name.to_string())),
+        _ => Err(ThreadActionError::new(
+            "github-thread-validation-error",
+            "Repository must be in owner/name format.",
+        )),
+    }
+}
+
+fn created_review_thread_from_value(
+    value: &Value,
+) -> Result<CreatedReviewThread, ThreadActionError> {
+    let comments = value
+        .pointer("/comments/nodes")
+        .and_then(Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .map(created_review_thread_comment_from_value)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let first_comment = comments.first();
+
+    Ok(CreatedReviewThread {
+        id: required_string(value, "/id", "Review Thread id")?,
+        author_login: first_comment.and_then(|comment| comment.author_login.clone()),
+        file_path: required_string(value, "/path", "Review Thread path")?,
+        line: value
+            .pointer("/line")
+            .or_else(|| value.pointer("/originalLine"))
+            .and_then(Value::as_u64),
+        state: if value
+            .pointer("/isResolved")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "resolved".to_string()
+        } else if value
+            .pointer("/isOutdated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "outdated".to_string()
+        } else {
+            "unresolved".to_string()
+        },
+        body: first_comment
+            .map(|comment| comment.body.clone())
+            .unwrap_or_else(|| "Review thread has no visible comment body.".to_string()),
+        updated_at: first_comment
+            .map(|comment| comment.updated_at.clone())
+            .unwrap_or_default(),
+        comments,
+    })
+}
+
+fn created_review_thread_comment_from_value(value: &Value) -> CreatedReviewThreadComment {
+    CreatedReviewThreadComment {
+        id: value
+            .pointer("/id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown-review-thread-comment")
+            .to_string(),
+        author_login: value
+            .pointer("/author/login")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        body: value
+            .pointer("/body")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        updated_at: value
+            .pointer("/updatedAt")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        url: value
+            .pointer("/url")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    }
+}
+
+fn required_string(value: &Value, pointer: &str, label: &str) -> Result<String, ThreadActionError> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            ThreadActionError::new(
+                "github-thread-response-error",
+                format!("GitHub returned no {label}."),
+            )
+        })
 }
 
 async fn send_graphql(

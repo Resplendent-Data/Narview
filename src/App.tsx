@@ -105,6 +105,12 @@ import { buildReviewOverview, type HotspotScore, type RepositoryHotspotOverride 
 import { buildReviewTargetInspectorModel, type ReviewTargetInspectorModel } from "./lib/review-target-inspector";
 import { buildReviewPathItems, buildReviewWorkProgress, moveReviewPathSelection, type ReviewPathItem } from "./lib/review-path";
 import {
+  getReviewThreadFileAnchorState,
+  getReviewThreadLineAnchorState,
+  type ReviewThreadFileAnchor,
+  type ReviewThreadLineAnchor,
+} from "./lib/review-thread-anchors";
+import {
   buildNeedsReReviewTargetIdSet,
   buildReviewedTargetIdSet,
   buildReviewTargetReviewStates,
@@ -1113,6 +1119,161 @@ function ReviewTargetInspector({
   );
 }
 
+function StartReviewThreadPanel({
+  body,
+  fileAnchor,
+  fileDisabledReason,
+  lineAnchors,
+  lineDisabledReason,
+  mode,
+  onBodyChange,
+  onMarkOriginReviewed,
+  onModeChange,
+  onSelectLineAnchor,
+  onStartFileThread,
+  onStartLineThread,
+  result,
+  selectedLineAnchorId,
+  targetTitle,
+  threadActionBusy,
+  canMarkOriginReviewed,
+}: {
+  body: string;
+  fileAnchor: ReviewThreadFileAnchor | null;
+  fileDisabledReason: string | null;
+  lineAnchors: ReviewThreadLineAnchor[];
+  lineDisabledReason: string | null;
+  mode: "line" | "file";
+  onBodyChange: (body: string) => void;
+  onMarkOriginReviewed: () => void;
+  onModeChange: (mode: "line" | "file") => void;
+  onSelectLineAnchor: (anchorId: string) => void;
+  onStartFileThread: () => void;
+  onStartLineThread: () => void;
+  result: ThreadActionResult | null;
+  selectedLineAnchorId: string;
+  targetTitle: string | null;
+  threadActionBusy: ThreadWriteAction | null;
+  canMarkOriginReviewed: boolean;
+}) {
+  const activeDisabledReason = mode === "line" ? lineDisabledReason : fileDisabledReason;
+  const activeBusy = mode === "line" ? threadActionBusy === "create-line" : threadActionBusy === "create-file";
+  const bodyMissing = body.trim().length === 0;
+  const canStart =
+    !activeDisabledReason &&
+    !bodyMissing &&
+    threadActionBusy === null &&
+    (mode === "line" ? lineAnchors.length > 0 : Boolean(fileAnchor));
+
+  return (
+    <div className="space-y-3 border-b border-border p-3" aria-label="Start Review Thread">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+          <Plus className="h-4 w-4" aria-hidden="true" />
+          <span>Start Review Thread</span>
+        </div>
+        <Badge variant={targetTitle ? "info" : "muted"}>{targetTitle ? "Target" : "None"}</Badge>
+      </div>
+
+      <div className="grid grid-cols-2 gap-1 rounded-md bg-muted p-1" role="tablist" aria-label="Review Thread anchor type">
+        <button
+          aria-selected={mode === "line"}
+          className={cn(
+            "rounded px-2 py-1 text-xs font-medium",
+            mode === "line" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+          )}
+          onClick={() => onModeChange("line")}
+          role="tab"
+          type="button"
+        >
+          Line
+        </button>
+        <button
+          aria-selected={mode === "file"}
+          className={cn(
+            "rounded px-2 py-1 text-xs font-medium",
+            mode === "file" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+          )}
+          onClick={() => onModeChange("file")}
+          role="tab"
+          type="button"
+        >
+          File
+        </button>
+      </div>
+
+      {mode === "line" ? (
+        <label className="space-y-1 text-xs">
+          <span className="font-medium text-muted-foreground">Changed line anchor</span>
+          <select
+            aria-label="Changed line anchor"
+            className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            disabled={Boolean(lineDisabledReason) || threadActionBusy !== null}
+            onChange={(event) => onSelectLineAnchor(event.target.value)}
+            value={selectedLineAnchorId}
+          >
+            {lineAnchors.map((anchor) => (
+              <option key={anchor.id} value={anchor.id}>
+                {anchor.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <div className="rounded-md border border-border p-2 text-xs">
+          <p className="font-medium text-muted-foreground">File anchor</p>
+          <p className="mt-1 truncate font-mono">{fileAnchor?.path ?? "Unavailable"}</p>
+        </div>
+      )}
+
+      {activeDisabledReason && (
+        <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300" role="status">
+          {activeDisabledReason}
+        </p>
+      )}
+
+      <textarea
+        aria-label="New Review Thread body"
+        className="min-h-20 w-full resize-none rounded-md border border-input bg-background p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        disabled={Boolean(activeDisabledReason) || threadActionBusy !== null}
+        onChange={(event) => onBodyChange(event.target.value)}
+        placeholder="Write Review Thread feedback"
+        value={body}
+      />
+      <Button
+        className="w-full justify-between"
+        disabled={!canStart}
+        onClick={mode === "line" ? onStartLineThread : onStartFileThread}
+        title={activeDisabledReason ?? (bodyMissing ? "Review Thread body is required." : undefined)}
+      >
+        {activeBusy ? "Publishing..." : mode === "line" ? "Start line thread" : "Start file thread"}
+        <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
+      </Button>
+
+      {result && (
+        <div
+          className={cn(
+            "space-y-2 rounded-md p-2 text-xs",
+            result.ok
+              ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+              : result.retryable
+                ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                : "bg-destructive/10 text-destructive",
+          )}
+          role="status"
+        >
+          <p>{result.message}</p>
+          {result.ok && canMarkOriginReviewed && (
+            <Button size="sm" variant="outline" onClick={onMarkOriginReviewed}>
+              Mark originating target reviewed
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function InlineReviewThread({
   anchorRef,
   pathCount,
@@ -1504,6 +1665,11 @@ export function App({
   const [handoffCopyMessage, setHandoffCopyMessage] = useState<string | null>(null);
   const [threadStateOverrides, setThreadStateOverrides] = useState<Record<string, CachedReviewThread["state"]>>({});
   const [replyDraft, setReplyDraft] = useState("");
+  const [newThreadMode, setNewThreadMode] = useState<"line" | "file">("line");
+  const [newThreadBody, setNewThreadBody] = useState("");
+  const [selectedNewThreadLineAnchorId, setSelectedNewThreadLineAnchorId] = useState("");
+  const [newThreadResult, setNewThreadResult] = useState<ThreadActionResult | null>(null);
+  const [newThreadOriginTargetId, setNewThreadOriginTargetId] = useState<string | null>(null);
   const [threadActionBusy, setThreadActionBusy] = useState<ThreadWriteAction | null>(null);
   const [threadActionResult, setThreadActionResult] = useState<ThreadActionResult | null>(null);
   const [selectedBulkThreadIds, setSelectedBulkThreadIds] = useState<string[]>([]);
@@ -1688,6 +1854,20 @@ export function App({
       selectedReviewPathItem,
     ],
   );
+  const lineThreadAnchorState = useMemo(
+    () => getReviewThreadLineAnchorState(selectedReviewTargetInspector),
+    [selectedReviewTargetInspector],
+  );
+  const fileThreadAnchorState = useMemo(
+    () => getReviewThreadFileAnchorState(selectedReviewTargetInspector),
+    [selectedReviewTargetInspector],
+  );
+  const selectedNewThreadLineAnchor =
+    lineThreadAnchorState.anchors.find((anchor) => anchor.id === selectedNewThreadLineAnchorId) ??
+    lineThreadAnchorState.anchors[0] ??
+    null;
+  const lineThreadDisabledReason = reviewThreadWriteDisabledReason ?? lineThreadAnchorState.disabled?.reason ?? null;
+  const fileThreadDisabledReason = reviewThreadWriteDisabledReason ?? fileThreadAnchorState.disabled?.reason ?? null;
   const activeReviewPathItems = reviewPathItems.filter((item) => !reviewedTargetIds.has(item.id));
   const reviewedReviewPathItems = reviewPathItems.filter((item) => reviewedTargetIds.has(item.id));
   const readinessBadge = getReadinessBadge(reviewOverview.readiness.state);
@@ -1793,7 +1973,25 @@ export function App({
 
   useEffect(() => {
     setTargetBaseComparisonOpen(false);
+    setNewThreadBody("");
+    setNewThreadResult(null);
+    setNewThreadOriginTargetId(null);
   }, [selectedReviewTargetId]);
+
+  useEffect(() => {
+    if (lineThreadAnchorState.anchors.length === 0) {
+      if (selectedNewThreadLineAnchorId) {
+        setSelectedNewThreadLineAnchorId("");
+      }
+      return;
+    }
+
+    if (lineThreadAnchorState.anchors.some((anchor) => anchor.id === selectedNewThreadLineAnchorId)) {
+      return;
+    }
+
+    setSelectedNewThreadLineAnchorId(lineThreadAnchorState.anchors[0].id);
+  }, [lineThreadAnchorState.anchors, selectedNewThreadLineAnchorId]);
 
   const reviewQueueCounts = buildReviewQueueCounts(reviewThreadViews);
   const fileChangeViews = buildFileChangeViews(
@@ -2973,6 +3171,93 @@ export function App({
     upsertCachedPullRequest(selectedPullRequest, { reviewThreads });
     setCacheSummary(cacheStats());
     setReviewQueueRevision((current) => current + 1);
+  };
+
+  const mergeCreatedThreadIntoCache = (thread: CachedReviewThread) => {
+    const reviewThreads = [
+      thread,
+      ...reviewOverviewCache.reviewThreads.filter((existingThread) => existingThread.id !== thread.id),
+    ];
+
+    upsertCachedPullRequest(selectedPullRequest, { reviewThreads });
+    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewThreads);
+    setSelectedReviewThreadId(thread.id);
+    setCacheSummary(cacheStats());
+    setReviewQueueRevision((current) => current + 1);
+    setReviewTargetRevision((current) => current + 1);
+  };
+
+  const runStartReviewThread = async (mode: "line" | "file") => {
+    if (threadActionBusy !== null || !selectedReviewPathItem) {
+      return;
+    }
+
+    const action: ThreadWriteAction = mode === "line" ? "create-line" : "create-file";
+    const disabledReason = mode === "line" ? lineThreadDisabledReason : fileThreadDisabledReason;
+    if (disabledReason) {
+      setNewThreadResult(
+        createThreadActionFailure(
+          action,
+          selectedReviewPathItem.id,
+          disabledReason === reviewThreadWriteDisabledReason ? "github-thread-read-only" : "github-thread-anchor-unavailable",
+          disabledReason,
+        ),
+      );
+      return;
+    }
+
+    const body = newThreadBody.trim();
+    if (!body) {
+      setNewThreadResult(
+        createThreadActionFailure(action, selectedReviewPathItem.id, "github-thread-validation-error", "Review Thread body is required."),
+      );
+      return;
+    }
+
+    setThreadActionBusy(action);
+    setNewThreadResult(null);
+
+    try {
+      const result =
+        mode === "line"
+          ? selectedNewThreadLineAnchor
+            ? await threadActionClient.startLineThread({
+                repository: selectedPullRequest.repository,
+                pullRequestNumber: selectedPullRequest.number,
+                path: selectedNewThreadLineAnchor.path,
+                line: selectedNewThreadLineAnchor.line,
+                side: selectedNewThreadLineAnchor.side,
+                body,
+              })
+            : createThreadActionFailure(
+                "create-line",
+                selectedReviewPathItem.id,
+                "github-thread-anchor-unavailable",
+                "Line-level Review Threads need an added or removed changed line inside this Review Target.",
+              )
+          : fileThreadAnchorState.anchor
+            ? await threadActionClient.startFileThread({
+                repository: selectedPullRequest.repository,
+                pullRequestNumber: selectedPullRequest.number,
+                path: fileThreadAnchorState.anchor.path,
+                body,
+              })
+            : createThreadActionFailure(
+                "create-file",
+                selectedReviewPathItem.id,
+                "github-thread-anchor-unavailable",
+                "File Review Threads require a single-file Review Target.",
+              );
+
+      setNewThreadResult(result);
+      if (result.ok && result.createdThread) {
+        mergeCreatedThreadIntoCache(result.createdThread);
+        setNewThreadBody("");
+        setNewThreadOriginTargetId(selectedReviewPathItem.id);
+      }
+    } finally {
+      setThreadActionBusy(null);
+    }
   };
 
   const runThreadAction = async (action: ThreadWriteAction) => {
@@ -4542,6 +4827,33 @@ export function App({
                 }
               }}
               reviewState={selectedReviewPathItem ? (reviewTargetReviewStates[selectedReviewPathItem.id] ?? "unreviewed") : "unreviewed"}
+            />
+            <StartReviewThreadPanel
+              body={newThreadBody}
+              fileAnchor={fileThreadAnchorState.anchor}
+              fileDisabledReason={fileThreadDisabledReason}
+              lineAnchors={lineThreadAnchorState.anchors}
+              lineDisabledReason={lineThreadDisabledReason}
+              mode={newThreadMode}
+              onBodyChange={setNewThreadBody}
+              onMarkOriginReviewed={() => {
+                if (newThreadOriginTargetId) {
+                  setReviewTargetReviewed(newThreadOriginTargetId, true);
+                }
+              }}
+              onModeChange={setNewThreadMode}
+              onSelectLineAnchor={setSelectedNewThreadLineAnchorId}
+              onStartFileThread={() => void runStartReviewThread("file")}
+              onStartLineThread={() => void runStartReviewThread("line")}
+              result={newThreadResult}
+              selectedLineAnchorId={selectedNewThreadLineAnchor?.id ?? ""}
+              targetTitle={selectedReviewTargetInspector?.target.title ?? null}
+              threadActionBusy={threadActionBusy}
+              canMarkOriginReviewed={Boolean(
+                newThreadOriginTargetId &&
+                  newThreadOriginTargetId === selectedReviewPathItem?.id &&
+                  !reviewedTargetIds.has(newThreadOriginTargetId),
+              )}
             />
             <div className="border-b border-border p-3">
               <div className="mb-3 flex items-center justify-between gap-2">

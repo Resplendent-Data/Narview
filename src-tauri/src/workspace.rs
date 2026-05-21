@@ -368,8 +368,8 @@ pub fn get_review_clone_status(
     repository: String,
 ) -> Result<ReviewCloneStatusResponse, WorkspaceCommandError> {
     let repository = parse_repository_slug(&repository)?;
-    let write_permission =
-        auth_state.github_token().ok().flatten().is_some() && configured_github_review_thread_write_permission();
+    let write_permission = auth_state.github_token().ok().flatten().is_some()
+        && configured_github_review_thread_write_permission();
     let root = review_clones_root_path(&app)?;
 
     Ok(inspect_review_clone_at(
@@ -2564,7 +2564,10 @@ mod tests {
         assert_eq!(contents.head_sha.as_deref(), Some(repos.head_sha.as_str()));
         assert_eq!(contents.files[0].state, AnalysisFileContentState::Loaded);
         assert_eq!(contents.files[0].content.as_deref(), Some("base\nhead\n"));
-        assert_eq!(contents.files[1].state, AnalysisFileContentState::Unavailable);
+        assert_eq!(
+            contents.files[1].state,
+            AnalysisFileContentState::Unavailable
+        );
         assert!(contents.files[1]
             .message
             .as_deref()

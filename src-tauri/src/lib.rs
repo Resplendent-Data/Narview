@@ -37,6 +37,7 @@ pub fn run() {
             workspace::refresh_pull_requests,
             workspace::fetch_pull_request_data,
             workspace::fetch_pull_request_checks,
+            thread_actions::start_review_thread,
             thread_actions::reply_review_thread,
             thread_actions::resolve_review_thread,
             thread_actions::unresolve_review_thread,

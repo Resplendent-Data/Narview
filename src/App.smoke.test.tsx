@@ -66,6 +66,7 @@ import {
 import { buildReviewOverview, getMergeReadiness, scoreHotspots, summarizeChecks } from "./lib/review-overview";
 import { buildReviewPathItems, buildReviewWorkProgress, moveReviewPathSelection } from "./lib/review-path";
 import { buildReviewTargetInspectorModel } from "./lib/review-target-inspector";
+import { getReviewThreadLineAnchorState } from "./lib/review-thread-anchors";
 import {
   buildReviewedTargetIdSet,
   buildReviewTargetReviewStates,
@@ -93,7 +94,10 @@ import {
 import {
   createThreadActionFailure,
   networkRequiredThreadActionFailure,
+  validateNewThreadBody,
   validateReplyBody,
+  type StartFileReviewThreadInput,
+  type StartLineReviewThreadInput,
   type ThreadActionClient,
 } from "./lib/thread-actions";
 import type {
@@ -310,6 +314,56 @@ function createThreadActionClient(overrides: Partial<ThreadActionClient> = {}): 
       threadId,
       message: "Review Thread unresolved on GitHub.",
       replyUrl: null,
+    })),
+    startLineThread: vi.fn().mockImplementation(async (input: StartLineReviewThreadInput) => ({
+      ok: true,
+      action: "create-line",
+      threadId: "thread-created-line",
+      message: "Review Thread published to GitHub.",
+      replyUrl: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r_created_line",
+      createdThread: {
+        id: "thread-created-line",
+        authorLogin: "octocat",
+        filePath: input.path,
+        line: input.line,
+        state: "unresolved",
+        body: input.body,
+        updatedAt: "2026-05-18T12:10:00Z",
+        comments: [
+          {
+            id: "comment-created-line",
+            authorLogin: "octocat",
+            body: input.body,
+            updatedAt: "2026-05-18T12:10:00Z",
+            url: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r_created_line",
+          },
+        ],
+      },
+    })),
+    startFileThread: vi.fn().mockImplementation(async (input: StartFileReviewThreadInput) => ({
+      ok: true,
+      action: "create-file",
+      threadId: "thread-created-file",
+      message: "Review Thread published to GitHub.",
+      replyUrl: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r_created_file",
+      createdThread: {
+        id: "thread-created-file",
+        authorLogin: "octocat",
+        filePath: input.path,
+        line: null,
+        state: "unresolved",
+        body: input.body,
+        updatedAt: "2026-05-18T12:11:00Z",
+        comments: [
+          {
+            id: "comment-created-file",
+            authorLogin: "octocat",
+            body: input.body,
+            updatedAt: "2026-05-18T12:11:00Z",
+            url: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r_created_file",
+          },
+        ],
+      },
     })),
     ...overrides,
   };
@@ -971,6 +1025,8 @@ describe("App shell", () => {
     expect(screen.getByLabelText("Reply body")).toBeDisabled();
     expect(screen.getByRole("button", { name: /submit reply/i })).toBeDisabled();
     expect(within(screen.getByLabelText("Inspector")).getByRole("button", { name: /^resolve/i })).toBeDisabled();
+    expect(within(screen.getByLabelText("Start Review Thread")).getByLabelText("New Review Thread body")).toBeDisabled();
+    expect(within(screen.getByLabelText("Start Review Thread")).getByRole("button", { name: /start line thread/i })).toBeDisabled();
 
     const threadReviewedButton = within(screen.getByLabelText("Inspector")).getByRole("button", { name: /^mark reviewed/i });
     expect(threadReviewedButton).toBeEnabled();
@@ -1001,6 +1057,123 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: /submit reply/i })).toBeEnabled();
     expect(within(screen.getByLabelText("Inspector")).getByRole("button", { name: /^resolve/i })).toBeEnabled();
     expect(screen.queryByText(/write access is needed to publish line-level and file-level Review Threads/i)).not.toBeInTheDocument();
+  });
+
+  it("starts a line-level Review Thread from a changed-line anchor and syncs it into Narview", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+    const workspaceClient = createWorkspaceClient({
+      fetchPullRequestData: vi.fn().mockResolvedValue(createOverviewFixture()),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        threadActionClient={threadActionClient}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    const dialog = await openPullRequestsDialog(user);
+    await user.type(within(dialog).getByLabelText("Pull Request URL"), readyPullRequest.url);
+    await user.click(within(dialog).getByRole("button", { name: /^open$/i }));
+    await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalled());
+
+    const panel = await screen.findByLabelText("Start Review Thread");
+    await user.type(within(panel).getByLabelText("New Review Thread body"), "Line anchor feedback from Narview.");
+    await user.click(within(panel).getByRole("button", { name: /start line thread/i }));
+
+    await waitFor(() => expect(threadActionClient.startLineThread).toHaveBeenCalled());
+    expect(threadActionClient.startLineThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repository: "Resplendent-Data/Narview",
+        pullRequestNumber: 12,
+        body: "Line anchor feedback from Narview.",
+        line: expect.any(Number),
+        side: expect.stringMatching(/LEFT|RIGHT/),
+      }),
+    );
+    expect(await within(panel).findByText("Review Thread published to GitHub.")).toBeInTheDocument();
+    expect(within(panel).getByLabelText("New Review Thread body")).toHaveValue("");
+    expect(await screen.findAllByText("Line anchor feedback from Narview.")).not.toHaveLength(0);
+    expect(window.localStorage.getItem(prCacheStorageKey)).toContain("thread-created-line");
+
+    await user.click(within(panel).getByRole("button", { name: /mark originating target reviewed/i }));
+    expect(window.localStorage.getItem(reviewTargetStorageKey)).toContain('"reviewed":true');
+  });
+
+  it("starts a File Review Thread from a single-file Review Target", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+
+    render(<App threadActionClient={threadActionClient} />);
+
+    const panel = await screen.findByLabelText("Start Review Thread");
+    await user.click(within(panel).getByRole("tab", { name: /^file$/i }));
+    await user.type(within(panel).getByLabelText("New Review Thread body"), "File-level feedback from Narview.");
+    await user.click(within(panel).getByRole("button", { name: /start file thread/i }));
+
+    await waitFor(() => expect(threadActionClient.startFileThread).toHaveBeenCalled());
+    expect(threadActionClient.startFileThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repository: expect.any(String),
+        pullRequestNumber: expect.any(Number),
+        body: "File-level feedback from Narview.",
+        path: expect.any(String),
+      }),
+    );
+    expect(await within(panel).findByText("Review Thread published to GitHub.")).toBeInTheDocument();
+    const cache = JSON.parse(window.localStorage.getItem(prCacheStorageKey) ?? "{}");
+    const entry = Object.values(cache.entries)[0] as { reviewThreads: Array<{ id: string; line: number | null; body: string }> };
+    expect(entry.reviewThreads.find((thread: { id: string }) => thread.id === "thread-created-file")).toMatchObject({
+      line: null,
+      body: "File-level feedback from Narview.",
+    });
+  });
+
+  it("disables line-level Review Thread creation when no changed-line anchor is available", () => {
+    const binaryNode = createSyntheticAttentionNode({
+      id: "assets/logo.png:attention-file-fallback",
+      filePath: "assets/logo.png",
+      label: "assets/logo.png",
+      kind: "file-fallback",
+      fileKind: "binary",
+      hunkId: null,
+      lineStart: null,
+      lineEnd: null,
+    });
+    const target = createReviewTarget({
+      id: "target-binary",
+      title: "Binary asset review",
+      paths: ["assets/logo.png"],
+      nodeIds: [binaryNode.id],
+      filePath: "assets/logo.png",
+      fallback: true,
+    });
+    const model = buildReviewTargetInspectorModel({
+      target,
+      analysisIndex: createReviewTargetIndex([binaryNode]),
+      pullRequest: readyPullRequest,
+      files: [{ path: "assets/logo.png", additions: 1, deletions: 0, status: "binary", patch: null }],
+      fileContents: [],
+      reviewThreads: [],
+    });
+
+    const state = getReviewThreadLineAnchorState(model);
+
+    expect(state.anchors).toEqual([]);
+    expect(state.disabled?.reason).toMatch(/added or removed changed line/i);
+    expect(validateNewThreadBody("   ")).toBe("Review Thread body is required.");
+  });
+
+  it("does not expose Pull Request comment or review submission controls", async () => {
+    render(<App threadActionClient={createThreadActionClient()} />);
+
+    expect(await screen.findByLabelText("Start Review Thread")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /pull request comment/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^approve$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /request changes/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /submit review/i })).not.toBeInTheDocument();
   });
 
   it("prepares the Pull Request head as the Review Clone analysis input when a PR opens", async () => {
