@@ -22,7 +22,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 | 16 | Large PR Performance Hardening | AFK | done | 06-review-overview-with-hotspots-and-readiness.md, 11-lazy-diff-viewer-with-context-expansion.md, 12-thread-centered-guided-review-flow.md | 7, 10, 11, 33, 35, 46, 48, 52 | [16-large-pr-performance-hardening.md](./16-large-pr-performance-hardening.md) |
 | 17 | Auto-Update Release Pipeline | HITL | done | 01-launchable-guided-review-shell.md | 56, 57, 58 | [17-auto-update-release-pipeline.md](./17-auto-update-release-pipeline.md) |
 | 18 | V1 End-To-End Acceptance Pass | AFK | done | 09-confirmed-bulk-review-actions.md, 13-handoff-packets.md, 14-command-palette-and-keyboard-flow-completion.md, 15-privacy-diagnostics-and-data-controls.md, 16-large-pr-performance-hardening.md, 17-auto-update-release-pipeline.md | 1-58 | [18-v1-end-to-end-acceptance-pass.md](./18-v1-end-to-end-acceptance-pass.md) |
-| 19 | Managed Review Clone Setup And Health | AFK | ready | None | 2, 3, 8, 45, 46 | [19-managed-review-clone-setup-and-health.md](./19-managed-review-clone-setup-and-health.md) |
+| 19 | Managed Review Clone Setup And Health | AFK | done | None | 2, 3, 8, 45, 46 | [19-managed-review-clone-setup-and-health.md](./19-managed-review-clone-setup-and-health.md) |
 | 20 | PR Head Checkout And Clone Fallbacks | AFK | ready | 19-managed-review-clone-setup-and-health.md | 4, 5, 6, 7 | [20-pr-head-checkout-and-clone-fallbacks.md](./20-pr-head-checkout-and-clone-fallbacks.md) |
 | 21 | Analysis Index And Hunk Map MVP | AFK | ready | 20-pr-head-checkout-and-clone-fallbacks.md | 1, 9, 10, 11, 13, 15 | [21-analysis-index-and-hunk-map-mvp.md](./21-analysis-index-and-hunk-map-mvp.md) |
 | 22 | Deep Analysis For TypeScript JavaScript And Python | AFK | ready | 21-analysis-index-and-hunk-map-mvp.md | 12, 14, 18 | [22-deep-analysis-for-typescript-javascript-and-python.md](./22-deep-analysis-for-typescript-javascript-and-python.md) |
@@ -43,7 +43,6 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 ## Ready
 
-- [Managed Review Clone Setup And Health](./19-managed-review-clone-setup-and-health.md)
 - [PR Head Checkout And Clone Fallbacks](./20-pr-head-checkout-and-clone-fallbacks.md)
 - [Analysis Index And Hunk Map MVP](./21-analysis-index-and-hunk-map-mvp.md)
 - [Deep Analysis For TypeScript JavaScript And Python](./22-deep-analysis-for-typescript-javascript-and-python.md)
@@ -86,3 +85,4 @@ None
 - [Large PR Performance Hardening](./16-large-pr-performance-hardening.md)
 - [Auto-Update Release Pipeline](./17-auto-update-release-pipeline.md)
 - [V1 End-To-End Acceptance Pass](./18-v1-end-to-end-acceptance-pass.md)
+- [Managed Review Clone Setup And Health](./19-managed-review-clone-setup-and-health.md)

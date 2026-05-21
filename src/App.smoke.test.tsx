@@ -71,7 +71,7 @@ import {
   validateReplyBody,
   type ThreadActionClient,
 } from "./lib/thread-actions";
-import type { PullRequestSummary, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
+import type { PullRequestSummary, ReviewCloneStatus, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openUrl: vi.fn().mockResolvedValue(undefined),
@@ -101,6 +101,25 @@ const narviewRepository: WorkspaceRepository = {
   owner: "Resplendent-Data",
   name: "Narview",
   slug: "Resplendent-Data/Narview",
+};
+
+const readyReviewCloneStatus: ReviewCloneStatus = {
+  repository: narviewRepository,
+  state: "ready",
+  storagePath: "/Users/octocat/Library/Application Support/com.resplendent-data.narview/review-clones/repositories/resplendent-data/narview",
+  storageRoot: "/Users/octocat/Library/Application Support/com.resplendent-data.narview/review-clones",
+  remoteUrl: "https://github.com/Resplendent-Data/Narview.git",
+  message: "Review Clone is ready for read-only analysis.",
+  readOnly: true,
+  writePermission: true,
+  lastCheckedEpochMs: 1_800_000_000_000,
+};
+
+const notClonedReviewCloneStatus: ReviewCloneStatus = {
+  ...readyReviewCloneStatus,
+  state: "not-cloned",
+  message: "No app-managed Review Clone exists for this repository yet.",
+  writePermission: false,
 };
 
 const readyPullRequest: PullRequestSummary = {
@@ -177,6 +196,8 @@ function createWorkspaceClient(overrides: Partial<WorkspaceClient> = {}): Worksp
     listRepositories: vi.fn().mockResolvedValue({ repositories: [] }),
     saveRepository: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
     removeRepository: vi.fn().mockResolvedValue({ repositories: [] }),
+    getReviewCloneStatus: vi.fn().mockResolvedValue(notClonedReviewCloneStatus),
+    ensureReviewClone: vi.fn().mockResolvedValue(readyReviewCloneStatus),
     refreshPullRequests: vi.fn().mockResolvedValue({
       repositories: [narviewRepository],
       pullRequests: [readyPullRequest],
@@ -764,6 +785,45 @@ describe("App shell", () => {
 
     expect(workspaceClient.removeRepository).toHaveBeenCalledWith("Resplendent-Data", "Narview");
     expect(await within(dialog).findByText("No saved repositories.")).toBeInTheDocument();
+  });
+
+  it("initializes and reuses a managed Review Clone from a saved repository", async () => {
+    const user = userEvent.setup();
+    const workspaceClient = createWorkspaceClient({
+      listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+      getReviewCloneStatus: vi.fn().mockResolvedValue(notClonedReviewCloneStatus),
+      ensureReviewClone: vi.fn().mockResolvedValue(readyReviewCloneStatus),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    await waitFor(() => expect(workspaceClient.getReviewCloneStatus).toHaveBeenCalledWith("Resplendent-Data/Narview"));
+    const dialog = await openPullRequestsDialog(user);
+    await user.click(within(dialog).getByLabelText("Initialize Review Clone for Resplendent-Data/Narview"));
+
+    expect(workspaceClient.ensureReviewClone).toHaveBeenCalledWith("Resplendent-Data/Narview");
+    const cloneHealth = await screen.findByLabelText("Review clone health");
+    await waitFor(() => expect(within(cloneHealth).getByText("Ready")).toBeInTheDocument());
+    expect(cloneHealth).toHaveTextContent("App-managed");
+    expect(cloneHealth).toHaveTextContent("Read-only analysis");
+    expect(cloneHealth).toHaveTextContent("GitHub writes available");
+  });
+
+  it("shows Read-Only Mode when GitHub write permission is unavailable", async () => {
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedOutSession) })}
+        workspaceClient={createWorkspaceClient()}
+      />,
+    );
+
+    const cloneHealth = await screen.findByLabelText("Review clone health");
+    await waitFor(() => expect(cloneHealth).toHaveTextContent("Read-Only Mode"));
   });
 
   it("loads non-draft Pull Requests by default and includes drafts when filtered", async () => {

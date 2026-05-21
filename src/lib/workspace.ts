@@ -18,6 +18,7 @@ export interface PullRequestSummary {
 }
 
 export type RefreshState = "idle" | "loading" | "fresh" | "stale" | "failed" | "rate-limited";
+export type ReviewCloneHealthState = "not-cloned" | "cloning" | "ready" | "stale" | "failed" | "unavailable";
 
 export interface RefreshStatus {
   state: RefreshState;
@@ -46,10 +47,24 @@ export interface PullRequestChecksResponse {
   fetchedAtEpochMs: number;
 }
 
+export interface ReviewCloneStatus {
+  repository: WorkspaceRepository;
+  state: ReviewCloneHealthState;
+  storagePath: string;
+  storageRoot: string;
+  remoteUrl: string;
+  message: string | null;
+  readOnly: boolean;
+  writePermission: boolean;
+  lastCheckedEpochMs: number;
+}
+
 export interface WorkspaceClient {
   listRepositories: () => Promise<WorkspaceRepositoriesResponse>;
   saveRepository: (slug: string) => Promise<WorkspaceRepositoriesResponse>;
   removeRepository: (owner: string, name: string) => Promise<WorkspaceRepositoriesResponse>;
+  getReviewCloneStatus: (repository: string) => Promise<ReviewCloneStatus>;
+  ensureReviewClone: (repository: string) => Promise<ReviewCloneStatus>;
   refreshPullRequests: (includeDrafts: boolean) => Promise<PullRequestRefreshResponse>;
   fetchPullRequestData: (pullRequest: PullRequestSummary) => Promise<CachedPullRequestData>;
   fetchPullRequestChecks: (pullRequest: PullRequestSummary) => Promise<PullRequestChecksResponse>;
@@ -115,6 +130,23 @@ function parseSlug(value: string): WorkspaceRepository {
   };
 }
 
+export function createUnavailableReviewCloneStatus(repositorySlug: string, message: string): ReviewCloneStatus {
+  const repository = parseSlug(repositorySlug);
+  const normalizedPath = `${repository.owner.toLowerCase()}/${repository.name.toLowerCase()}`;
+
+  return {
+    repository,
+    state: "unavailable",
+    storagePath: `Narview app data/review-clones/repositories/${normalizedPath}`,
+    storageRoot: "Narview app data/review-clones",
+    remoteUrl: `https://github.com/${repository.owner}/${repository.name}.git`,
+    message,
+    readOnly: true,
+    writePermission: false,
+    lastCheckedEpochMs: Date.now(),
+  };
+}
+
 const localWorkspaceClient: WorkspaceClient = {
   async listRepositories() {
     return { repositories: readLocalRepositories() };
@@ -138,6 +170,14 @@ const localWorkspaceClient: WorkspaceClient = {
     writeLocalRepositories(repositories);
 
     return { repositories };
+  },
+
+  async getReviewCloneStatus(repository) {
+    return createUnavailableReviewCloneStatus(repository, "Desktop runtime unavailable for managed Review Clones.");
+  },
+
+  async ensureReviewClone(repository) {
+    return createUnavailableReviewCloneStatus(repository, "Desktop runtime required to initialize a managed Review Clone.");
   },
 
   async refreshPullRequests() {
@@ -188,6 +228,28 @@ export const tauriWorkspaceClient: WorkspaceClient = {
     } catch (error) {
       if (messageFromError(error).includes("command")) {
         return localWorkspaceClient.removeRepository(owner, name);
+      }
+      throw new Error(messageFromError(error));
+    }
+  },
+
+  async getReviewCloneStatus(repository) {
+    try {
+      return await invoke<ReviewCloneStatus>("get_review_clone_status", { repository });
+    } catch (error) {
+      if (messageFromError(error).includes("command")) {
+        return localWorkspaceClient.getReviewCloneStatus(repository);
+      }
+      throw new Error(messageFromError(error));
+    }
+  },
+
+  async ensureReviewClone(repository) {
+    try {
+      return await invoke<ReviewCloneStatus>("ensure_review_clone", { repository });
+    } catch (error) {
+      if (messageFromError(error).includes("command")) {
+        return localWorkspaceClient.ensureReviewClone(repository);
       }
       throw new Error(messageFromError(error));
     }

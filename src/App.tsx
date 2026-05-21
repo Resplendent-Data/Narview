@@ -118,8 +118,11 @@ import {
 import { cn } from "./lib/utils";
 import {
   idleRefreshStatus,
+  createUnavailableReviewCloneStatus,
   type PullRequestSummary,
   type RefreshStatus,
+  type ReviewCloneHealthState,
+  type ReviewCloneStatus,
   type WorkspaceClient,
   type WorkspaceRepository,
   tauriWorkspaceClient,
@@ -268,6 +271,41 @@ function getRefreshBadge(status: RefreshStatus) {
     return { label: "Failed", variant: "danger" as const };
   }
   return { label: "Idle", variant: "muted" as const };
+}
+
+function getReviewCloneBadge(state: ReviewCloneHealthState) {
+  if (state === "ready") {
+    return { label: "Ready", variant: "success" as const };
+  }
+  if (state === "cloning") {
+    return { label: "Cloning", variant: "info" as const };
+  }
+  if (state === "stale") {
+    return { label: "Stale", variant: "warning" as const };
+  }
+  if (state === "failed") {
+    return { label: "Failed", variant: "danger" as const };
+  }
+  if (state === "unavailable") {
+    return { label: "Unavailable", variant: "warning" as const };
+  }
+  return { label: "Not cloned", variant: "muted" as const };
+}
+
+function getReviewCloneActionLabel(state: ReviewCloneHealthState) {
+  if (state === "ready") {
+    return "Check clone";
+  }
+  if (state === "stale") {
+    return "Repair clone";
+  }
+  if (state === "failed") {
+    return "Retry clone";
+  }
+  if (state === "cloning") {
+    return "Cloning...";
+  }
+  return "Initialize clone";
 }
 
 function getReadinessBadge(state: "ready" | "attention" | "blocked") {
@@ -971,6 +1009,9 @@ export function App({
   const [repositoryInput, setRepositoryInput] = useState("");
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [reviewCloneStatuses, setReviewCloneStatuses] = useState<Record<string, ReviewCloneStatus>>({});
+  const [reviewCloneBusyKey, setReviewCloneBusyKey] = useState<string | null>(null);
+  const [reviewCloneMessage, setReviewCloneMessage] = useState<string | null>(null);
   const [includeDrafts, setIncludeDrafts] = useState(false);
   const [pullRequests, setPullRequests] = useState<PullRequestSummary[]>([]);
   const [quickOpenedPullRequest, setQuickOpenedPullRequest] = useState<PullRequestSummary | null>(null);
@@ -1058,6 +1099,22 @@ export function App({
     routedPullRequests.find((pullRequest) => getPullRequestKey(pullRequest) === selectedPullRequestKey) ??
     routedPullRequests[0] ??
     fallbackPullRequest;
+  const selectedRepositoryKey = selectedPullRequest.repository.toLowerCase();
+  const reviewCloneRepositorySlugs = useMemo(
+    () => Array.from(new Set([...repositories.map((repository) => repository.slug), selectedPullRequest.repository])).sort(),
+    [repositories, selectedPullRequest.repository],
+  );
+  const selectedReviewCloneStatus =
+    reviewCloneStatuses[selectedRepositoryKey] ??
+    createUnavailableReviewCloneStatus(
+      selectedPullRequest.repository,
+      "Review Clone status has not been checked yet.",
+    );
+  const selectedReviewCloneBusy = reviewCloneBusyKey === selectedRepositoryKey || selectedReviewCloneStatus.state === "cloning";
+  const reviewCloneBadge = getReviewCloneBadge(selectedReviewCloneStatus.state);
+  const reviewCloneWriteBadge = selectedReviewCloneStatus.writePermission
+    ? ({ label: "GitHub writes available", variant: "success" as const })
+    : ({ label: "Read-Only Mode", variant: "warning" as const });
   const selectedPullRequestDisplay = `${selectedPullRequest.repository} #${selectedPullRequest.number}`;
   const selectedPullRequestTitle = selectedPullRequest.title.trim() || "Untitled Pull Request";
   const activePullRequestKey = routedPullRequests.length > 0 ? getPullRequestKey(selectedPullRequest) : null;
@@ -1339,6 +1396,34 @@ export function App({
       active = false;
     };
   }, [workspaceClient]);
+
+  useEffect(() => {
+    let active = true;
+
+    for (const repository of reviewCloneRepositorySlugs) {
+      workspaceClient
+        .getReviewCloneStatus(repository)
+        .then((status) => {
+          if (!active) {
+            return;
+          }
+
+          setReviewCloneStatuses((current) => ({
+            ...current,
+            [status.repository.slug.toLowerCase()]: status,
+          }));
+        })
+        .catch((error) => {
+          if (active) {
+            setReviewCloneMessage(error instanceof Error ? error.message : String(error));
+          }
+        });
+    }
+
+    return () => {
+      active = false;
+    };
+  }, [reviewCloneRepositorySlugs, workspaceClient]);
 
   useEffect(() => {
     if (authSession.state === "signed-in" && repositories.length > 0) {
@@ -1911,6 +1996,24 @@ export function App({
       setWorkspaceError(error instanceof Error ? error.message : String(error));
     } finally {
       setWorkspaceBusy(false);
+    }
+  };
+
+  const ensureReviewCloneForRepository = async (repository: string) => {
+    const repositoryKey = repository.toLowerCase();
+    setReviewCloneBusyKey(repositoryKey);
+    setReviewCloneMessage(null);
+    try {
+      const status = await workspaceClient.ensureReviewClone(repository);
+      setReviewCloneStatuses((current) => ({
+        ...current,
+        [status.repository.slug.toLowerCase()]: status,
+      }));
+      setReviewCloneMessage(status.message ?? `Review Clone ${getReviewCloneBadge(status.state).label.toLowerCase()}.`);
+    } catch (error) {
+      setReviewCloneMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setReviewCloneBusyKey((current) => (current === repositoryKey ? null : current));
     }
   };
 
@@ -3105,6 +3208,47 @@ export function App({
                 </div>
               </div>
 
+              <section className="mt-3 rounded-md border border-border bg-card/60 p-3" aria-label="Review clone health">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                      <Folder className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                      <span>Review Clone</span>
+                      <Badge variant={reviewCloneBadge.variant}>{reviewCloneBadge.label}</Badge>
+                    </div>
+                    <p className="mt-1 truncate text-xs text-muted-foreground">{selectedReviewCloneStatus.storagePath}</p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void ensureReviewCloneForRepository(selectedPullRequest.repository)}
+                    disabled={selectedReviewCloneBusy}
+                  >
+                    <RefreshCw className={cn("h-3.5 w-3.5", selectedReviewCloneBusy && "animate-spin")} aria-hidden="true" />
+                    {getReviewCloneActionLabel(selectedReviewCloneStatus.state)}
+                  </Button>
+                </div>
+                <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                  <div className="rounded-md bg-muted p-2">
+                    <p className="text-muted-foreground">Storage</p>
+                    <p className="mt-1 truncate font-medium">App-managed</p>
+                  </div>
+                  <div className="rounded-md bg-muted p-2">
+                    <p className="text-muted-foreground">Clone boundary</p>
+                    <p className="mt-1 truncate font-medium">{selectedReviewCloneStatus.readOnly ? "Read-only analysis" : "Writable"}</p>
+                  </div>
+                  <div className="rounded-md bg-muted p-2">
+                    <p className="text-muted-foreground">GitHub writes</p>
+                    <Badge variant={reviewCloneWriteBadge.variant}>{reviewCloneWriteBadge.label}</Badge>
+                  </div>
+                </div>
+                {(selectedReviewCloneStatus.message || reviewCloneMessage) && (
+                  <p className="mt-2 rounded-md bg-muted p-2 text-xs text-muted-foreground" role="status">
+                    {reviewCloneMessage ?? selectedReviewCloneStatus.message}
+                  </p>
+                )}
+              </section>
+
               <details className="mt-3 rounded-md border border-border bg-card/60" aria-label="Pull Request summary">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
                   <div className="min-w-0">
@@ -3779,20 +3923,43 @@ export function App({
                   {repositories.length === 0 ? (
                     <p className="rounded-md border border-dashed border-border p-2 text-sm text-muted-foreground">No saved repositories.</p>
                   ) : (
-                    repositories.map((repository) => (
-                      <div className="flex items-center justify-between gap-2 rounded-md border border-border p-2 text-sm" key={repository.slug}>
-                        <span className="min-w-0 truncate">{repository.slug}</span>
-                        <Button
-                          aria-label={`Remove ${repository.slug}`}
-                          size="icon"
-                          variant="ghost"
-                          onClick={() => void handleRemoveRepository(repository)}
-                          disabled={workspaceBusy}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                        </Button>
-                      </div>
-                    ))
+                    repositories.map((repository) => {
+                      const cloneStatus =
+                        reviewCloneStatuses[repository.slug.toLowerCase()] ??
+                        createUnavailableReviewCloneStatus(repository.slug, "Review Clone status has not been checked yet.");
+                      const cloneBadge = getReviewCloneBadge(cloneStatus.state);
+                      const cloneBusy = reviewCloneBusyKey === repository.slug.toLowerCase() || cloneStatus.state === "cloning";
+
+                      return (
+                        <div className="rounded-md border border-border p-2 text-sm" key={repository.slug}>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 truncate">{repository.slug}</span>
+                            <div className="flex shrink-0 items-center gap-1">
+                              <Badge variant={cloneBadge.variant}>{cloneBadge.label}</Badge>
+                              <Button
+                                aria-label={`Initialize Review Clone for ${repository.slug}`}
+                                size="icon"
+                                variant="ghost"
+                                onClick={() => void ensureReviewCloneForRepository(repository.slug)}
+                                disabled={cloneBusy}
+                              >
+                                <RefreshCw className={cn("h-3.5 w-3.5", cloneBusy && "animate-spin")} aria-hidden="true" />
+                              </Button>
+                              <Button
+                                aria-label={`Remove ${repository.slug}`}
+                                size="icon"
+                                variant="ghost"
+                                onClick={() => void handleRemoveRepository(repository)}
+                                disabled={workspaceBusy}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                              </Button>
+                            </div>
+                          </div>
+                          <p className="mt-1 truncate text-xs text-muted-foreground">{cloneStatus.storagePath}</p>
+                        </div>
+                      );
+                    })
                   )}
                 </div>
 

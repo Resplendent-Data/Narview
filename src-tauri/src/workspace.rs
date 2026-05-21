@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::{header::HeaderMap, StatusCode};
@@ -11,6 +12,9 @@ use tauri::{AppHandle, Manager, State};
 use crate::auth::{AuthCommandError, AuthState};
 
 const WORKSPACE_FILE_NAME: &str = "workspace.json";
+const REVIEW_CLONES_DIR_NAME: &str = "review-clones";
+const REVIEW_CLONE_REPOSITORIES_DIR_NAME: &str = "repositories";
+const REVIEW_CLONE_METADATA_DIR_NAME: &str = "metadata";
 const GITHUB_API_ROOT: &str = "https://api.github.com";
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const MAX_PATCH_CACHE_BYTES: usize = 3 * 1024 * 1024;
@@ -200,10 +204,44 @@ pub struct WorkspaceRepositoriesResponse {
     repositories: Vec<WorkspaceRepository>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewCloneHealthState {
+    NotCloned,
+    Cloning,
+    Ready,
+    Stale,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewCloneStatusResponse {
+    repository: WorkspaceRepository,
+    state: ReviewCloneHealthState,
+    storage_path: String,
+    storage_root: String,
+    remote_url: String,
+    message: Option<String>,
+    read_only: bool,
+    write_permission: bool,
+    last_checked_epoch_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceFile {
     repositories: Vec<WorkspaceRepository>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ReviewCloneMetadata {
+    repository: String,
+    remote_url: String,
+    created_at_epoch_ms: u64,
+    last_checked_epoch_ms: u64,
 }
 
 pub struct WorkspaceState {
@@ -268,6 +306,54 @@ pub fn remove_workspace_repository(
     Ok(WorkspaceRepositoriesResponse {
         repositories: workspace.repositories,
     })
+}
+
+#[tauri::command]
+pub fn get_review_clone_status(
+    app: AppHandle,
+    auth_state: State<'_, AuthState>,
+    repository: String,
+) -> Result<ReviewCloneStatusResponse, WorkspaceCommandError> {
+    let repository = parse_repository_slug(&repository)?;
+    let write_permission = auth_state.github_token().ok().flatten().is_some();
+    let root = review_clones_root_path(&app)?;
+
+    Ok(inspect_review_clone_at(
+        &repository,
+        &root,
+        review_clone_remote_url(&repository),
+        write_permission,
+    ))
+}
+
+#[tauri::command]
+pub async fn ensure_review_clone(
+    app: AppHandle,
+    auth_state: State<'_, AuthState>,
+    repository: String,
+) -> Result<ReviewCloneStatusResponse, WorkspaceCommandError> {
+    let repository = parse_repository_slug(&repository)?;
+    let token = auth_state.github_token().ok().flatten();
+    let write_permission = token.is_some();
+    let root = review_clones_root_path(&app)?;
+    let remote_url = review_clone_remote_url(&repository);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_review_clone_at(
+            &repository,
+            &root,
+            &remote_url,
+            token.as_deref(),
+            write_permission,
+        )
+    })
+    .await
+    .map_err(|error| {
+        WorkspaceCommandError::new(
+            "review-clone-task-error",
+            format!("Could not initialize the Review Clone task: {error}"),
+        )
+    })?
 }
 
 #[tauri::command]
@@ -764,8 +850,7 @@ async fn fetch_review_threads(
             let first_comment = comments.first();
             CachedReviewThread {
                 id: thread.id,
-                author_login: first_comment
-                    .and_then(|comment| comment.author_login.clone()),
+                author_login: first_comment.and_then(|comment| comment.author_login.clone()),
                 file_path: thread.path,
                 line: thread.line.or(thread.original_line),
                 state: if thread.is_resolved {
@@ -1099,6 +1184,366 @@ fn write_workspace(path: &Path, workspace: &WorkspaceFile) -> Result<(), Workspa
     fs::write(path, contents).map_err(|error| WorkspaceCommandError::io("save", error))
 }
 
+fn review_clones_root_path(app: &AppHandle) -> Result<PathBuf, WorkspaceCommandError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| WorkspaceCommandError::new("workspace-path-error", error.to_string()))?;
+
+    Ok(app_data_dir.join(REVIEW_CLONES_DIR_NAME))
+}
+
+fn review_clone_repository_path(root: &Path, repository: &WorkspaceRepository) -> PathBuf {
+    root.join(REVIEW_CLONE_REPOSITORIES_DIR_NAME)
+        .join(repository.owner.to_ascii_lowercase())
+        .join(repository.name.to_ascii_lowercase())
+}
+
+fn review_clone_metadata_path(root: &Path, repository: &WorkspaceRepository) -> PathBuf {
+    root.join(REVIEW_CLONE_METADATA_DIR_NAME)
+        .join(repository.owner.to_ascii_lowercase())
+        .join(format!("{}.json", repository.name.to_ascii_lowercase()))
+}
+
+fn review_clone_lock_path(root: &Path, repository: &WorkspaceRepository) -> PathBuf {
+    root.join(REVIEW_CLONE_METADATA_DIR_NAME)
+        .join(repository.owner.to_ascii_lowercase())
+        .join(format!("{}.lock", repository.name.to_ascii_lowercase()))
+}
+
+fn review_clone_remote_url(repository: &WorkspaceRepository) -> String {
+    format!(
+        "https://github.com/{}/{}.git",
+        repository.owner, repository.name
+    )
+}
+
+fn inspect_review_clone_at(
+    repository: &WorkspaceRepository,
+    root: &Path,
+    remote_url: String,
+    write_permission: bool,
+) -> ReviewCloneStatusResponse {
+    let clone_path = review_clone_repository_path(root, repository);
+    let metadata_path = review_clone_metadata_path(root, repository);
+    let lock_path = review_clone_lock_path(root, repository);
+    let now = now_epoch_millis();
+
+    if lock_path.exists() {
+        return review_clone_response(
+            repository,
+            root,
+            &clone_path,
+            remote_url,
+            ReviewCloneHealthState::Cloning,
+            Some("Narview is initializing this Review Clone.".to_string()),
+            true,
+            write_permission,
+            now,
+        );
+    }
+
+    if !clone_path.exists() {
+        return review_clone_response(
+            repository,
+            root,
+            &clone_path,
+            remote_url,
+            ReviewCloneHealthState::NotCloned,
+            Some("No app-managed Review Clone exists for this repository yet.".to_string()),
+            true,
+            write_permission,
+            now,
+        );
+    }
+
+    if !clone_path.is_dir() || !clone_path.join(".git").exists() {
+        return review_clone_response(
+            repository,
+            root,
+            &clone_path,
+            remote_url,
+            ReviewCloneHealthState::Failed,
+            Some(
+                "Review Clone storage exists but is not a Git checkout Narview can inspect."
+                    .to_string(),
+            ),
+            true,
+            write_permission,
+            now,
+        );
+    }
+
+    let metadata = read_review_clone_metadata(&metadata_path).ok().flatten();
+    match metadata {
+        Some(metadata)
+            if metadata.repository == repository.key() && metadata.remote_url == remote_url =>
+        {
+            review_clone_response(
+                repository,
+                root,
+                &clone_path,
+                remote_url,
+                ReviewCloneHealthState::Ready,
+                Some("Review Clone is ready for read-only analysis.".to_string()),
+                true,
+                write_permission,
+                metadata.last_checked_epoch_ms,
+            )
+        }
+        _ => review_clone_response(
+            repository,
+            root,
+            &clone_path,
+            remote_url,
+            ReviewCloneHealthState::Stale,
+            Some("Review Clone exists but Narview metadata is missing or outdated.".to_string()),
+            true,
+            write_permission,
+            now,
+        ),
+    }
+}
+
+fn ensure_review_clone_at(
+    repository: &WorkspaceRepository,
+    root: &Path,
+    remote_url: &str,
+    token: Option<&str>,
+    write_permission: bool,
+) -> Result<ReviewCloneStatusResponse, WorkspaceCommandError> {
+    if !git_available() {
+        let clone_path = review_clone_repository_path(root, repository);
+        return Ok(review_clone_response(
+            repository,
+            root,
+            &clone_path,
+            remote_url.to_string(),
+            ReviewCloneHealthState::Unavailable,
+            Some("Git is not available on this machine, so Narview cannot initialize a Review Clone.".to_string()),
+            true,
+            write_permission,
+            now_epoch_millis(),
+        ));
+    }
+
+    let existing =
+        inspect_review_clone_at(repository, root, remote_url.to_string(), write_permission);
+    if existing.state == ReviewCloneHealthState::Ready {
+        touch_review_clone_metadata(root, repository, remote_url)?;
+        return Ok(inspect_review_clone_at(
+            repository,
+            root,
+            remote_url.to_string(),
+            write_permission,
+        ));
+    }
+
+    if existing.state == ReviewCloneHealthState::Stale {
+        write_review_clone_metadata(root, repository, remote_url)?;
+        return Ok(inspect_review_clone_at(
+            repository,
+            root,
+            remote_url.to_string(),
+            write_permission,
+        ));
+    }
+
+    if existing.state != ReviewCloneHealthState::NotCloned {
+        return Ok(existing);
+    }
+
+    let clone_path = review_clone_repository_path(root, repository);
+    let lock_path = review_clone_lock_path(root, repository);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| WorkspaceCommandError::io("prepare Review Clone metadata", error))?;
+    }
+    if let Some(parent) = clone_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| WorkspaceCommandError::io("prepare Review Clone storage", error))?;
+    }
+
+    fs::write(&lock_path, now_epoch_millis().to_string())
+        .map_err(|error| WorkspaceCommandError::io("mark Review Clone cloning", error))?;
+
+    let clone_result = run_git_clone(remote_url, &clone_path, token);
+    fs::remove_file(&lock_path).ok();
+
+    if let Err(error) = clone_result {
+        fs::remove_dir_all(&clone_path).ok();
+        return Ok(review_clone_response(
+            repository,
+            root,
+            &clone_path,
+            remote_url.to_string(),
+            ReviewCloneHealthState::Failed,
+            Some(error.message),
+            true,
+            write_permission,
+            now_epoch_millis(),
+        ));
+    }
+
+    write_review_clone_metadata(root, repository, remote_url)?;
+    Ok(inspect_review_clone_at(
+        repository,
+        root,
+        remote_url.to_string(),
+        write_permission,
+    ))
+}
+
+fn run_git_clone(
+    remote_url: &str,
+    clone_path: &Path,
+    token: Option<&str>,
+) -> Result<(), WorkspaceCommandError> {
+    let mut command = Command::new("git");
+    command
+        .arg("clone")
+        .arg("--no-tags")
+        .arg("--filter=blob:none")
+        .arg(remote_url)
+        .arg(clone_path)
+        .env("GIT_TERMINAL_PROMPT", "0");
+
+    if let Some(token) = token.filter(|value| !value.is_empty()) {
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader")
+            .env(
+                "GIT_CONFIG_VALUE_0",
+                format!("AUTHORIZATION: bearer {token}"),
+            );
+    }
+
+    let output = command.output().map_err(|error| {
+        WorkspaceCommandError::new(
+            "review-clone-git-unavailable",
+            format!("Could not run git to initialize Review Clone: {error}"),
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            "git clone failed without a diagnostic.".to_string()
+        } else {
+            stderr
+        };
+        return Err(WorkspaceCommandError::new(
+            "review-clone-git-error",
+            format!("Could not initialize Review Clone: {message}"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn git_available() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn read_review_clone_metadata(
+    path: &Path,
+) -> Result<Option<ReviewCloneMetadata>, WorkspaceCommandError> {
+    match fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str(&contents).map(Some).map_err(|error| {
+            WorkspaceCommandError::new(
+                "review-clone-metadata-invalid",
+                format!("Could not read Review Clone metadata: {error}"),
+            )
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(WorkspaceCommandError::io(
+            "read Review Clone metadata",
+            error,
+        )),
+    }
+}
+
+fn touch_review_clone_metadata(
+    root: &Path,
+    repository: &WorkspaceRepository,
+    remote_url: &str,
+) -> Result<(), WorkspaceCommandError> {
+    let metadata_path = review_clone_metadata_path(root, repository);
+    let created_at_epoch_ms = read_review_clone_metadata(&metadata_path)?
+        .map(|metadata| metadata.created_at_epoch_ms)
+        .unwrap_or_else(now_epoch_millis);
+    write_review_clone_metadata_with_created_at(root, repository, remote_url, created_at_epoch_ms)
+}
+
+fn write_review_clone_metadata(
+    root: &Path,
+    repository: &WorkspaceRepository,
+    remote_url: &str,
+) -> Result<(), WorkspaceCommandError> {
+    write_review_clone_metadata_with_created_at(root, repository, remote_url, now_epoch_millis())
+}
+
+fn write_review_clone_metadata_with_created_at(
+    root: &Path,
+    repository: &WorkspaceRepository,
+    remote_url: &str,
+    created_at_epoch_ms: u64,
+) -> Result<(), WorkspaceCommandError> {
+    let metadata_path = review_clone_metadata_path(root, repository);
+    if let Some(parent) = metadata_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| WorkspaceCommandError::io("prepare Review Clone metadata", error))?;
+    }
+
+    let metadata = ReviewCloneMetadata {
+        repository: repository.key(),
+        remote_url: remote_url.to_string(),
+        created_at_epoch_ms,
+        last_checked_epoch_ms: now_epoch_millis(),
+    };
+    let contents = serde_json::to_string_pretty(&metadata).map_err(|error| {
+        WorkspaceCommandError::new(
+            "review-clone-metadata-serialization-error",
+            format!("Could not save Review Clone metadata: {error}"),
+        )
+    })?;
+
+    fs::write(metadata_path, contents)
+        .map_err(|error| WorkspaceCommandError::io("save Review Clone metadata", error))
+}
+
+fn review_clone_response(
+    repository: &WorkspaceRepository,
+    root: &Path,
+    clone_path: &Path,
+    remote_url: String,
+    state: ReviewCloneHealthState,
+    message: Option<String>,
+    read_only: bool,
+    write_permission: bool,
+    last_checked_epoch_ms: u64,
+) -> ReviewCloneStatusResponse {
+    ReviewCloneStatusResponse {
+        repository: repository.clone(),
+        state,
+        storage_path: clone_path.to_string_lossy().to_string(),
+        storage_root: root.to_string_lossy().to_string(),
+        remote_url,
+        message: if !write_permission && message.is_none() {
+            Some("Read-Only Mode: GitHub write permission is not available.".to_string())
+        } else {
+            message
+        },
+        read_only,
+        write_permission,
+        last_checked_epoch_ms,
+    }
+}
+
 fn parse_repository_slug(value: &str) -> Result<WorkspaceRepository, WorkspaceCommandError> {
     let mut normalized = value.trim().trim_end_matches(".git").to_string();
     normalized = normalized
@@ -1179,6 +1624,10 @@ mod tests {
         std::env::temp_dir().join(format!("narview-workspace-{}.json", uuid::Uuid::new_v4()))
     }
 
+    fn test_review_clone_root() -> PathBuf {
+        std::env::temp_dir().join(format!("narview-review-clones-{}", uuid::Uuid::new_v4()))
+    }
+
     #[test]
     fn saves_normalized_repositories_without_duplicates() {
         let path = test_workspace_path();
@@ -1235,6 +1684,90 @@ mod tests {
         let error = parse_repository_slug("https://gitlab.com/acme/api").unwrap_err();
 
         assert_eq!(error.code, "repository-host-unsupported");
+    }
+
+    #[test]
+    fn review_clone_health_transitions_are_reported_from_app_managed_storage() {
+        let root = test_review_clone_root();
+        let repository = WorkspaceRepository::new("Acme", "Api");
+        let remote_url = review_clone_remote_url(&repository);
+
+        let not_cloned = inspect_review_clone_at(&repository, &root, remote_url.clone(), false);
+        assert_eq!(not_cloned.state, ReviewCloneHealthState::NotCloned);
+        assert!(PathBuf::from(&not_cloned.storage_path)
+            .starts_with(root.join(REVIEW_CLONE_REPOSITORIES_DIR_NAME)));
+        assert!(not_cloned.read_only);
+        assert!(!not_cloned.write_permission);
+
+        let clone_path = review_clone_repository_path(&root, &repository);
+        fs::create_dir_all(clone_path.join(".git")).unwrap();
+        let stale = inspect_review_clone_at(&repository, &root, remote_url.clone(), true);
+        assert_eq!(stale.state, ReviewCloneHealthState::Stale);
+        assert!(stale.write_permission);
+
+        let lock_path = review_clone_lock_path(&root, &repository);
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        fs::write(&lock_path, "1").unwrap();
+        let cloning = inspect_review_clone_at(&repository, &root, remote_url.clone(), true);
+        assert_eq!(cloning.state, ReviewCloneHealthState::Cloning);
+        fs::remove_file(lock_path).unwrap();
+
+        write_review_clone_metadata(&root, &repository, &remote_url).unwrap();
+        let ready = inspect_review_clone_at(&repository, &root, remote_url, true);
+        assert_eq!(ready.state, ReviewCloneHealthState::Ready);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn review_clone_metadata_stays_outside_the_clone_checkout() {
+        let root = test_review_clone_root();
+        let repository = WorkspaceRepository::new("Acme", "Api");
+
+        let clone_path = review_clone_repository_path(&root, &repository);
+        let metadata_path = review_clone_metadata_path(&root, &repository);
+
+        assert!(clone_path.starts_with(root.join(REVIEW_CLONE_REPOSITORIES_DIR_NAME)));
+        assert!(metadata_path.starts_with(root.join(REVIEW_CLONE_METADATA_DIR_NAME)));
+        assert!(!metadata_path.starts_with(&clone_path));
+    }
+
+    #[test]
+    fn ensure_review_clone_creates_and_reuses_a_git_checkout() {
+        if !git_available() {
+            return;
+        }
+
+        let root = test_review_clone_root();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.git");
+        let init_output = Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&source)
+            .output()
+            .unwrap();
+        if !init_output.status.success() {
+            fs::remove_dir_all(root).ok();
+            return;
+        }
+
+        let repository = WorkspaceRepository::new("Acme", "Api");
+        let remote_url = source.to_string_lossy().to_string();
+        let first = ensure_review_clone_at(&repository, &root, &remote_url, None, false).unwrap();
+        let second = ensure_review_clone_at(&repository, &root, &remote_url, None, false).unwrap();
+        let clone_path = review_clone_repository_path(&root, &repository);
+        let metadata_path = review_clone_metadata_path(&root, &repository);
+
+        assert_eq!(first.state, ReviewCloneHealthState::Ready);
+        assert_eq!(second.state, ReviewCloneHealthState::Ready);
+        assert_eq!(first.storage_path, second.storage_path);
+        assert!(clone_path.join(".git").exists());
+        assert!(metadata_path.exists());
+        assert!(!metadata_path.starts_with(&clone_path));
+        assert!(!clone_path.join("analysis-index").exists());
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

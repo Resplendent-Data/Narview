@@ -30,6 +30,8 @@ pub fn run() {
             workspace::list_workspace_repositories,
             workspace::save_workspace_repository,
             workspace::remove_workspace_repository,
+            workspace::get_review_clone_status,
+            workspace::ensure_review_clone,
             workspace::refresh_pull_requests,
             workspace::fetch_pull_request_data,
             workspace::fetch_pull_request_checks,
