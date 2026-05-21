@@ -35,6 +35,12 @@ import { MarkdownContent } from "./components/markdown-content";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Kbd } from "./components/ui/kbd";
+import {
+  buildAttentionMapPresentation,
+  buildOrReuseAnalysisIndex,
+  writeAnalysisIndex,
+  type AnalysisIndex,
+} from "./lib/analysis-index";
 import { appReleaseDownloadUrl, type AppUpdateClient, useAppUpdater } from "./lib/app-updater";
 import { type AuthClient, type AuthSession, type OAuthStartResponse, tauriAuthClient } from "./lib/auth";
 import {
@@ -1154,6 +1160,24 @@ export function App({
     pullRequestDataStatus.key === activePullRequestKey &&
     pullRequestDataStatus.state === "loading";
   const reviewOverviewCache = createOverviewCache(selectedPullRequest, selectedCacheEntry ?? undefined);
+  const analysisIndex: AnalysisIndex = useMemo(
+    () =>
+      buildOrReuseAnalysisIndex({
+        pullRequest: selectedPullRequest,
+        files: reviewOverviewCache.fileSummaries,
+        analysisInput: selectedAnalysisInputStatus,
+      }),
+    [reviewOverviewCache.fileSummaries, selectedAnalysisInputStatus, selectedPullRequest],
+  );
+  const attentionMapPresentation = useMemo(
+    () => buildAttentionMapPresentation(analysisIndex, reviewOverviewCache),
+    [analysisIndex, reviewOverviewCache],
+  );
+  useEffect(() => {
+    if (analysisIndex.headSha !== "head-unavailable") {
+      writeAnalysisIndex(analysisIndex);
+    }
+  }, [analysisIndex]);
   const rateLimitMessage =
     reviewOverviewCache.rateLimit.remaining === 0
       ? `GitHub rate limit reached${reviewOverviewCache.rateLimit.resetEpochSeconds ? ` until ${reviewOverviewCache.rateLimit.resetEpochSeconds}` : ""}. Cached partial data stays visible.`
@@ -3350,6 +3374,65 @@ export function App({
                     {reviewCloneMessage ?? selectedReviewCloneStatus.message}
                   </p>
                 )}
+              </section>
+
+              <section className="mt-3 rounded-md border border-border bg-card/60 p-3" aria-label="Attention map">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                      <FileCode2 className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                      <span>Attention Map</span>
+                      <Badge variant="muted">Index v{analysisIndex.analysisVersion}</Badge>
+                    </div>
+                    <p className="mt-1 truncate text-xs text-muted-foreground">
+                      Head {analysisIndex.headSha === "head-unavailable" ? "pending" : analysisIndex.headSha.slice(0, 7)} ·{" "}
+                      {analysisIndex.storageScope === "local-storage-outside-review-clone" ? "Stored outside Review Clone" : "Stored"}
+                    </p>
+                  </div>
+                  <Badge variant={attentionMapPresentation.summary.fallbackNodes > 0 ? "warning" : "success"}>
+                    {attentionMapPresentation.nodes.length} nodes
+                  </Badge>
+                </div>
+                <div className="mt-3 grid grid-cols-4 gap-2 text-xs">
+                  <div className="rounded-md bg-muted p-2">
+                    <p className="text-muted-foreground">Files</p>
+                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.files}</p>
+                  </div>
+                  <div className="rounded-md bg-muted p-2">
+                    <p className="text-muted-foreground">Hunks</p>
+                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.hunkNodes}</p>
+                  </div>
+                  <div className="rounded-md bg-muted p-2">
+                    <p className="text-muted-foreground">Fallbacks</p>
+                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.fallbackNodes}</p>
+                  </div>
+                  <div className="rounded-md bg-muted p-2">
+                    <p className="text-muted-foreground">Threads</p>
+                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.reviewThreads}</p>
+                  </div>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {analysisIndex.nodes.slice(0, 5).map((node) => (
+                    <div key={node.id} className="rounded-md border border-border bg-background/70 px-2 py-2 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="min-w-0 truncate font-medium">{node.filePath}</p>
+                        <Badge variant={node.kind === "hunk" ? "info" : "warning"}>
+                          {node.kind === "hunk" ? "Hunk" : "Fallback"}
+                        </Badge>
+                      </div>
+                      <p className="mt-1 truncate text-muted-foreground">
+                        {node.reason.replace(/-/g, " ")}
+                        {node.lineStart ? ` · L${node.lineStart}${node.lineEnd && node.lineEnd !== node.lineStart ? `-${node.lineEnd}` : ""}` : ""}
+                      </p>
+                    </div>
+                  ))}
+                  {analysisIndex.nodes.length === 0 && (
+                    <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">No changed files available for indexing yet.</p>
+                  )}
+                  {analysisIndex.nodes.length > 5 && (
+                    <p className="text-xs text-muted-foreground">Showing 5 of {analysisIndex.nodes.length} indexed review targets.</p>
+                  )}
+                </div>
               </section>
 
               <details className="mt-3 rounded-md border border-border bg-card/60" aria-label="Pull Request summary">

@@ -2,6 +2,16 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
+import {
+  analysisIndexStorageKey,
+  buildAnalysisIndex,
+  buildAttentionMapPresentation,
+  buildOrReuseAnalysisIndex,
+  getAnalysisIndexKey,
+  isAnalysisIndexCurrent,
+  readValidAnalysisIndex,
+  writeAnalysisIndex,
+} from "./lib/analysis-index";
 import { appReleaseDownloadUrl, lastUpdateCheckStorageKey, type AppUpdateClient } from "./lib/app-updater";
 import type { AuthClient, AuthSession } from "./lib/auth";
 import {
@@ -893,6 +903,175 @@ describe("App shell", () => {
     expect((await screen.findAllByText("Add checkout guard")).length).toBeGreaterThan(0);
     const analysisInput = await screen.findByLabelText("Pull Request analysis input");
     await waitFor(() => expect(analysisInput).toHaveTextContent("Unavailable"));
+  });
+
+  it("builds an Analysis Index with parsed hunks and deterministic fallbacks", () => {
+    const files: CachedPullRequestData["fileSummaries"] = [
+      {
+        path: "src/auth/session.ts",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        patch: "@@ -1,2 +1,2 @@\n-export const stale = true;\n+export const stale = false;",
+      },
+      {
+        path: "src/parser.ts",
+        additions: 4,
+        deletions: 1,
+        status: "modified",
+        patch: "parser output was unavailable",
+      },
+      {
+        path: "assets/review-map.png",
+        additions: 0,
+        deletions: 0,
+        status: "binary",
+        patch: null,
+      },
+      {
+        path: "docs/generated.md",
+        additions: 3,
+        deletions: 0,
+        status: "modified",
+        patch: null,
+      },
+    ];
+
+    const index = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files,
+      analysisInput: readyAnalysisInput,
+      nowEpochMs: 123,
+    });
+
+    expect(index.storageScope).toBe("local-storage-outside-review-clone");
+    expect(index.headSha).toBe(readyAnalysisInput.headSha);
+    expect(index.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: "src/auth/session.ts",
+          kind: "hunk",
+          reason: "diff-hunk",
+        }),
+        expect.objectContaining({
+          filePath: "src/parser.ts",
+          kind: "hunk",
+          reason: "generated-hunk-fallback",
+        }),
+        expect.objectContaining({
+          filePath: "assets/review-map.png",
+          kind: "file-fallback",
+          reason: "unsupported-file",
+        }),
+        expect.objectContaining({
+          filePath: "docs/generated.md",
+          kind: "file-fallback",
+          reason: "missing-text-diff",
+        }),
+      ]),
+    );
+  });
+
+  it("persists, reuses, and invalidates Analysis Index entries by head and version", () => {
+    const files = createOverviewFixture().fileSummaries;
+    const index = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files,
+      analysisInput: readyAnalysisInput,
+      nowEpochMs: 456,
+    });
+
+    writeAnalysisIndex(index);
+    const stored = JSON.parse(window.localStorage.getItem(analysisIndexStorageKey) ?? "{}");
+    const key = getAnalysisIndexKey(readyPullRequest.repository, readyPullRequest.number, index.headSha);
+    expect(stored.entries[key].generatedAtEpochMs).toBe(456);
+
+    const reused = buildOrReuseAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files,
+      analysisInput: readyAnalysisInput,
+    });
+    expect(reused.generatedAtEpochMs).toBe(456);
+
+    const nextHead = {
+      ...readyAnalysisInput,
+      headSha: "3333333333333333333333333333333333333333",
+    };
+    expect(
+      readValidAnalysisIndex({
+        pullRequest: readyPullRequest,
+        files,
+        analysisInput: nextHead,
+      }),
+    ).toBeNull();
+    expect(
+      isAnalysisIndexCurrent(index, {
+        pullRequest: readyPullRequest,
+        files,
+        analysisInput: readyAnalysisInput,
+        analysisVersion: 2,
+      }),
+    ).toBe(false);
+  });
+
+  it("rebuilds the Attention Map presentation from the Analysis Index and current PR data", () => {
+    const currentData = createOverviewFixture();
+    const index = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files: currentData.fileSummaries,
+      analysisInput: readyAnalysisInput,
+    });
+    const presentation = buildAttentionMapPresentation(index, currentData);
+
+    expect(presentation.summary.files).toBe(currentData.fileSummaries.length);
+    expect(presentation.summary.hunkNodes).toBe(index.nodes.filter((node) => node.kind === "hunk").length);
+    expect(presentation.summary.reviewThreads).toBe(currentData.reviewThreads.length);
+    expect(presentation.edges).toHaveLength(index.nodes.length);
+    expect(presentation.nodes.find((node) => node.id === "file:src/auth/session.ts")).toEqual(
+      expect.objectContaining({
+        threadCount: 1,
+      }),
+    );
+  });
+
+  it("renders and persists the Analysis Index-backed Attention Map", async () => {
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={createWorkspaceClient({
+          listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+          getReviewCloneStatus: vi.fn().mockResolvedValue(readyReviewCloneStatus),
+          preparePullRequestReviewClone: vi.fn().mockResolvedValue(readyAnalysisInput),
+          fetchPullRequestData: vi.fn().mockResolvedValue({
+            ...createOverviewFixture(),
+            fileSummaries: [
+              {
+                path: "src/auth/session.ts",
+                additions: 1,
+                deletions: 1,
+                status: "modified",
+                patch: "@@ -1,2 +1,2 @@\n-export const stale = true;\n+export const stale = false;",
+              },
+              {
+                path: "assets/review-map.png",
+                additions: 0,
+                deletions: 0,
+                status: "binary",
+                patch: null,
+              },
+            ],
+          }),
+        })}
+      />,
+    );
+
+    const attentionMap = await screen.findByLabelText("Attention map");
+    await waitFor(() => expect(attentionMap).toHaveTextContent("Head 2222222"));
+    expect(attentionMap).toHaveTextContent("Hunks");
+    expect(attentionMap).toHaveTextContent("Fallbacks");
+    expect(attentionMap).toHaveTextContent("src/auth/session.ts");
+    expect(attentionMap).toHaveTextContent("assets/review-map.png");
+    expect(window.localStorage.getItem(analysisIndexStorageKey)).toContain(readyAnalysisInput.headSha);
   });
 
   it("loads non-draft Pull Requests by default and includes drafts when filtered", async () => {
