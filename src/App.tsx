@@ -91,6 +91,7 @@ import {
   type FileKind,
 } from "./lib/file-changes";
 import { buildReviewOverview, type HotspotScore, type RepositoryHotspotOverride } from "./lib/review-overview";
+import { buildReviewTargets } from "./lib/review-targets";
 import {
   buildReviewQueueCounts,
   buildReviewThreadViews,
@@ -1190,6 +1191,16 @@ export function App({
     reviewOverviewCache,
     repositoryHotspotOverrides[selectedPullRequest.repository],
     analysisIndex,
+  );
+  const reviewTargets = useMemo(
+    () =>
+      buildReviewTargets({
+        analysisIndex,
+        attentionMap: attentionMapPresentation,
+        currentData: reviewOverviewCache,
+        hotspots: reviewOverview.hotspots,
+      }),
+    [analysisIndex, attentionMapPresentation, reviewOverview.hotspots, reviewOverviewCache],
   );
   const readinessBadge = getReadinessBadge(reviewOverview.readiness.state);
   const selectedPullRequestRefreshingChecks =
@@ -3487,7 +3498,7 @@ export function App({
                     </p>
                   </div>
                   <Badge variant={attentionMapPresentation.summary.fallbackNodes > 0 ? "warning" : "success"}>
-                    {attentionMapPresentation.nodes.length} nodes
+                    {attentionMapPresentation.nodes.length} nodes · {reviewTargets.length} targets
                   </Badge>
                 </div>
                 <div className="mt-3 grid grid-cols-3 gap-2 text-xs lg:grid-cols-7">
@@ -3521,26 +3532,25 @@ export function App({
                   </div>
                 </div>
                 <div className="mt-3 space-y-2">
-                  {analysisIndex.nodes.slice(0, 5).map((node) => (
-                    <div key={node.id} className="rounded-md border border-border bg-background/70 px-2 py-2 text-xs">
+                  {reviewTargets.slice(0, 5).map((target) => (
+                    <div key={target.id} className="rounded-md border border-border bg-background/70 px-2 py-2 text-xs">
                       <div className="flex items-center justify-between gap-2">
-                        <p className="min-w-0 truncate font-medium">{node.kind === "symbol" ? node.label : node.filePath}</p>
-                        <Badge variant={node.kind === "file-fallback" ? "warning" : node.kind === "context" ? "muted" : "info"}>
-                          {node.kind === "symbol" ? "Symbol" : node.kind === "context" ? "Context" : node.kind === "hunk" ? "Hunk" : "Fallback"}
+                        <p className="min-w-0 truncate font-medium">{target.title}</p>
+                        <Badge variant={target.priority === "high" ? "danger" : target.priority === "low" ? "muted" : "info"}>
+                          {target.kind === "generated-cluster" ? "Cluster" : target.fallback ? "Fallback" : "Target"}
                         </Badge>
                       </div>
                       <p className="mt-1 truncate text-muted-foreground">
-                        {node.kind === "symbol" ? `${node.filePath} · ${node.symbolKind ?? "symbol"} · ` : ""}
-                        {node.reason.replace(/-/g, " ")}
-                        {node.lineStart ? ` · L${node.lineStart}${node.lineEnd && node.lineEnd !== node.lineStart ? `-${node.lineEnd}` : ""}` : ""}
+                        {target.modulePath} · {target.size.nodes} node{target.size.nodes === 1 ? "" : "s"} ·{" "}
+                        {target.size.files} file{target.size.files === 1 ? "" : "s"} · {target.reasoning[0]}
                       </p>
                     </div>
                   ))}
-                  {analysisIndex.nodes.length === 0 && (
-                    <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">No changed files available for indexing yet.</p>
+                  {reviewTargets.length === 0 && (
+                    <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">No Review Targets are available yet.</p>
                   )}
-                  {analysisIndex.nodes.length > 5 && (
-                    <p className="text-xs text-muted-foreground">Showing 5 of {analysisIndex.nodes.length} indexed review targets.</p>
+                  {reviewTargets.length > 5 && (
+                    <p className="text-xs text-muted-foreground">Showing 5 of {reviewTargets.length} Review Targets.</p>
                   )}
                 </div>
               </section>

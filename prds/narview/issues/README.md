@@ -28,7 +28,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 | 22 | Deep Analysis For TypeScript JavaScript And Python | AFK | done | 21-analysis-index-and-hunk-map-mvp.md | 12, 14, 18 | [22-deep-analysis-for-typescript-javascript-and-python.md](./22-deep-analysis-for-typescript-javascript-and-python.md) |
 | 23 | Context Nodes Edges And Test Relations | AFK | done | 22-deep-analysis-for-typescript-javascript-and-python.md | 16, 17, 18, 19, 27 | [23-context-nodes-edges-and-test-relations.md](./23-context-nodes-edges-and-test-relations.md) |
 | 24 | Structural Hotspots And Generated Clusters | AFK | done | 23-context-nodes-edges-and-test-relations.md | 20, 21, 22, 26, 64, 65 | [24-structural-hotspots-and-generated-clusters.md](./24-structural-hotspots-and-generated-clusters.md) |
-| 25 | Review Target Builder And Grouping | AFK | ready | 24-structural-hotspots-and-generated-clusters.md | 23, 25, 28, 30, 31, 32 | [25-review-target-builder-and-grouping.md](./25-review-target-builder-and-grouping.md) |
+| 25 | Review Target Builder And Grouping | AFK | done | 24-structural-hotspots-and-generated-clusters.md | 23, 25, 28, 30, 31, 32 | [25-review-target-builder-and-grouping.md](./25-review-target-builder-and-grouping.md) |
 | 26 | Review Path Rail Keyboard Focus And Progress | AFK | ready | 25-review-target-builder-and-grouping.md | 23, 24, 25, 26, 28, 29, 55, 56 | [26-review-path-rail-keyboard-focus-and-progress.md](./26-review-path-rail-keyboard-focus-and-progress.md) |
 | 27 | Persistent Review Target Inspector | AFK | ready | 26-review-path-rail-keyboard-focus-and-progress.md | 33, 34, 35 | [27-persistent-review-target-inspector.md](./27-persistent-review-target-inspector.md) |
 | 28 | Reviewed State For Targets And Threads | AFK | ready | 26-review-path-rail-keyboard-focus-and-progress.md, 27-persistent-review-target-inspector.md | 47, 48, 49, 50, 51, 55, 56 | [28-reviewed-state-for-targets-and-threads.md](./28-reviewed-state-for-targets-and-threads.md) |
@@ -43,7 +43,6 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 
 ## Ready
 
-- [Review Target Builder And Grouping](./25-review-target-builder-and-grouping.md)
 - [Review Path Rail Keyboard Focus And Progress](./26-review-path-rail-keyboard-focus-and-progress.md)
 - [Persistent Review Target Inspector](./27-persistent-review-target-inspector.md)
 - [Reviewed State For Targets And Threads](./28-reviewed-state-for-targets-and-threads.md)
@@ -86,3 +85,4 @@ No issues in progress.
 - [Deep Analysis For TypeScript JavaScript And Python](./22-deep-analysis-for-typescript-javascript-and-python.md)
 - [Context Nodes Edges And Test Relations](./23-context-nodes-edges-and-test-relations.md)
 - [Structural Hotspots And Generated Clusters](./24-structural-hotspots-and-generated-clusters.md)
+- [Review Target Builder And Grouping](./25-review-target-builder-and-grouping.md)

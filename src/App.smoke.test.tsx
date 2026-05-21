@@ -11,6 +11,9 @@ import {
   isAnalysisIndexCurrent,
   readValidAnalysisIndex,
   writeAnalysisIndex,
+  type AnalysisIndex,
+  type AttentionNode,
+  type AttentionRelationship,
 } from "./lib/analysis-index";
 import { appReleaseDownloadUrl, lastUpdateCheckStorageKey, type AppUpdateClient } from "./lib/app-updater";
 import type { AuthClient, AuthSession } from "./lib/auth";
@@ -61,6 +64,7 @@ import {
   writeCachedPullRequestData,
 } from "./lib/pr-cache";
 import { buildReviewOverview, getMergeReadiness, scoreHotspots, summarizeChecks } from "./lib/review-overview";
+import { buildReviewTargets } from "./lib/review-targets";
 import {
   buildReviewThreadViews,
   filterReviewThreads,
@@ -349,6 +353,54 @@ function createOverviewFixture(): CachedPullRequestData {
         completedAt: "2026-05-18T12:02:05Z",
       },
     ],
+  };
+}
+
+function createReviewTargetIndex(nodes: AttentionNode[], relationships: AttentionRelationship[] = []): AnalysisIndex {
+  return {
+    version: 1,
+    analysisVersion: 3,
+    repository: readyPullRequest.repository,
+    pullRequestNumber: readyPullRequest.number,
+    pullRequestKey: getPullRequestKey(readyPullRequest),
+    headSha: readyAnalysisInput.state === "ready" ? (readyAnalysisInput.headSha ?? "head-unavailable") : "head-unavailable",
+    sourceSignature: "review-target-test",
+    storageScope: "local-storage-outside-review-clone",
+    generatedAtEpochMs: 1_800_000_000_000,
+    nodes,
+    relationships,
+    fileAnalyses: Object.fromEntries(
+      [...new Set(nodes.map((node) => node.filePath))].map((path) => [
+        path,
+        {
+          language: "typescript",
+          state: "parsed",
+          symbolCount: nodes.filter((node) => node.filePath === path && node.kind === "symbol").length,
+          relationshipCount: relationships.filter((relationship) => relationship.filePath === path).length,
+          importCount: 0,
+          exportCount: 0,
+          contextNodeCount: 0,
+          contextOverflowCount: 0,
+          reasons: ["Synthetic review target fixture."],
+        },
+      ]),
+    ),
+  };
+}
+
+function createSyntheticAttentionNode(overrides: Partial<AttentionNode> & Pick<AttentionNode, "id" | "filePath" | "label">): AttentionNode {
+  return {
+    kind: "symbol",
+    reason: "changed-symbol",
+    fileKind: "text",
+    status: "modified",
+    hunkId: null,
+    lineStart: 1,
+    lineEnd: 4,
+    additions: 1,
+    deletions: 0,
+    reviewTarget: true,
+    ...overrides,
   };
 }
 
@@ -2104,6 +2156,258 @@ describe("App shell", () => {
       ]),
     );
     expect(presentation.nodes.some((node) => node.filePath === "src/generated/client.ts")).toBe(false);
+  });
+
+  it("builds Review Targets from mixed symbol and hunk Attention Nodes with test relationships", () => {
+    const files: CachedPullRequestData["fileSummaries"] = [
+      {
+        path: "src/session.ts",
+        additions: 2,
+        deletions: 1,
+        status: "modified",
+        patch:
+          "@@ -1,5 +1,6 @@\n export function rotateSession() {\n-  return oldToken();\n+  return refreshToken();\n }\n function refreshToken() { return 'next'; }",
+      },
+      {
+        path: "src/session.test.ts",
+        additions: 1,
+        deletions: 0,
+        status: "modified",
+        patch: "@@ -1,2 +1,3 @@\n import { rotateSession } from './session';\n+rotateSession();",
+      },
+    ];
+    const currentData: CachedPullRequestData = {
+      ...createOverviewFixture(),
+      fileSummaries: files,
+      reviewThreads: [
+        {
+          id: "session-thread",
+          authorLogin: "monalisa",
+          filePath: "src/session.ts",
+          line: 2,
+          state: "unresolved",
+          body: "Please verify rotation and coverage together.",
+          updatedAt: "2026-05-18T12:00:00Z",
+        },
+      ],
+    };
+    const index = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files,
+      analysisInput: readyAnalysisInput,
+      fileContents: [
+        {
+          path: "src/session.ts",
+          state: "loaded",
+          content:
+            "export function rotateSession() {\n  return refreshToken();\n}\nfunction refreshToken() { return 'next'; }\n",
+          message: null,
+        },
+        {
+          path: "src/session.test.ts",
+          state: "loaded",
+          content: "import { rotateSession } from './session';\nrotateSession();\n",
+          message: null,
+        },
+      ],
+    });
+    const targets = buildReviewTargets({
+      analysisIndex: index,
+      attentionMap: buildAttentionMapPresentation(index, currentData),
+      currentData,
+    });
+    const grouped = targets.find((target) => target.paths.includes("src/session.ts") && target.paths.includes("src/session.test.ts"));
+
+    expect(grouped).toMatchObject({
+      priority: "high",
+      fallback: true,
+      size: expect.objectContaining({
+        files: 2,
+        reviewThreads: 1,
+      }),
+    });
+    expect(grouped?.reasoning).toEqual(expect.arrayContaining([expect.stringContaining("deterministic test naming")]));
+  });
+
+  it("groups same-symbol hunk splits and splits oversized weakly related groups", () => {
+    const hunkOne = createSyntheticAttentionNode({
+      id: "src/session.ts:hunk-1",
+      kind: "hunk",
+      reason: "diff-hunk",
+      filePath: "src/session.ts",
+      label: "@@ rotateSession",
+      lineStart: 10,
+      lineEnd: 14,
+    });
+    const hunkTwo = createSyntheticAttentionNode({
+      id: "src/session.ts:hunk-2",
+      kind: "hunk",
+      reason: "diff-hunk",
+      filePath: "src/session.ts",
+      label: "@@ rotateSession",
+      lineStart: 80,
+      lineEnd: 84,
+    });
+    const distant = createSyntheticAttentionNode({
+      id: "src/session.ts:hunk-3",
+      kind: "hunk",
+      reason: "diff-hunk",
+      filePath: "src/session.ts",
+      label: "@@ auditSession",
+      lineStart: 400,
+      lineEnd: 404,
+    });
+    const groupedIndex = createReviewTargetIndex([hunkTwo, distant, hunkOne]);
+    const groupedTargets = buildReviewTargets({
+      analysisIndex: groupedIndex,
+      attentionMap: buildAttentionMapPresentation(groupedIndex, createOverviewFixture()),
+      currentData: createOverviewFixture(),
+    });
+
+    expect(groupedTargets.some((target) => target.nodeIds.includes(hunkOne.id) && target.nodeIds.includes(hunkTwo.id))).toBe(true);
+    expect(groupedTargets.find((target) => target.nodeIds.includes(distant.id))?.nodeIds).toEqual([distant.id]);
+
+    const oversizedNodes = Array.from({ length: 5 }, (_, index) =>
+      createSyntheticAttentionNode({
+        id: `src/large.ts:symbol-${index}`,
+        filePath: "src/large.ts",
+        label: `change${index}`,
+        lineStart: index + 1,
+        lineEnd: index + 1,
+      }),
+    );
+    const oversizedRelationships: AttentionRelationship[] = oversizedNodes.slice(1).map((node, index) => ({
+      id: `same-file:${oversizedNodes[0].id}:${node.id}`,
+      kind: "same-file",
+      filePath: "src/large.ts",
+      fromNodeId: oversizedNodes[0].id,
+      toNodeId: node.id,
+      fromSymbolName: "change0",
+      toSymbolName: node.label,
+      targetModule: null,
+      targetFilePath: node.filePath,
+      line: index + 1,
+      reason: "Synthetic tight same-module relationship.",
+    }));
+    const oversizedIndex = createReviewTargetIndex(oversizedNodes, oversizedRelationships);
+    const splitTargets = buildReviewTargets({
+      analysisIndex: oversizedIndex,
+      attentionMap: buildAttentionMapPresentation(oversizedIndex, createOverviewFixture()),
+      currentData: createOverviewFixture(),
+      maxNodesPerTarget: 4,
+    });
+
+    expect(splitTargets).toHaveLength(2);
+    expect(splitTargets[0].reasoning).toEqual(expect.arrayContaining([expect.stringContaining("Split from an oversized")]));
+    expect(splitTargets.every((target) => target.size.nodes <= 4)).toBe(true);
+  });
+
+  it("promotes justified generated clusters to stable low-priority Review Targets", () => {
+    const currentData: CachedPullRequestData = {
+      ...createOverviewFixture(),
+      fileSummaries: [
+        { path: "src/generated/client.ts", additions: 120, deletions: 0, status: "modified" },
+        { path: "dist/bundle.min.js", additions: 80, deletions: 0, status: "modified" },
+      ],
+      reviewThreads: [],
+    };
+    const index = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files: currentData.fileSummaries,
+      analysisInput: readyAnalysisInput,
+    });
+    const attentionMap = buildAttentionMapPresentation(index, currentData);
+    const unjustifiedTargets = buildReviewTargets({
+      analysisIndex: index,
+      attentionMap,
+      currentData,
+      hotspots: [
+        {
+          kind: "generated-cluster",
+          path: "Generated Cluster",
+          score: 2,
+          changedLines: 200,
+          unresolvedThreads: 0,
+          reasons: ["2 generated/vendor/build files", "200 changed lines collapsed"],
+          collapsed: true,
+          fileCount: 2,
+          paths: ["dist/bundle.min.js", "src/generated/client.ts"],
+        },
+      ],
+    });
+    const justifiedTargets = buildReviewTargets({
+      analysisIndex: index,
+      attentionMap,
+      currentData,
+      hotspots: [
+        {
+          kind: "generated-cluster",
+          path: "Generated Cluster",
+          score: 20,
+          changedLines: 200,
+          unresolvedThreads: 1,
+          reasons: ["2 generated/vendor/build files", "200 changed lines collapsed", "1 unresolved thread"],
+          collapsed: true,
+          fileCount: 2,
+          paths: ["src/generated/client.ts", "dist/bundle.min.js"],
+        },
+      ],
+    });
+
+    expect(unjustifiedTargets.some((target) => target.kind === "generated-cluster")).toBe(false);
+    expect(justifiedTargets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "generated-cluster",
+          priority: "low",
+          paths: ["dist/bundle.min.js", "src/generated/client.ts"],
+          size: expect.objectContaining({ files: 2, reviewThreads: 1 }),
+        }),
+      ]),
+    );
+  });
+
+  it("keeps Review Target identities stable when source node order changes", () => {
+    const firstNode = createSyntheticAttentionNode({
+      id: "src/session.ts:symbol:rotateSession",
+      filePath: "src/session.ts",
+      label: "rotateSession",
+      lineStart: 1,
+    });
+    const secondNode = createSyntheticAttentionNode({
+      id: "src/session.ts:symbol:refreshToken",
+      filePath: "src/session.ts",
+      label: "refreshToken",
+      lineStart: 8,
+    });
+    const relationship: AttentionRelationship = {
+      id: `call:${firstNode.id}:${secondNode.id}`,
+      kind: "same-file-call",
+      filePath: "src/session.ts",
+      fromNodeId: firstNode.id,
+      toNodeId: secondNode.id,
+      fromSymbolName: "rotateSession",
+      toSymbolName: "refreshToken",
+      targetModule: null,
+      targetFilePath: null,
+      line: 2,
+      reason: "rotateSession calls refreshToken in the same file.",
+    };
+    const firstIndex = createReviewTargetIndex([firstNode, secondNode], [relationship]);
+    const secondIndex = createReviewTargetIndex([secondNode, firstNode], [relationship]);
+    const firstTargets = buildReviewTargets({
+      analysisIndex: firstIndex,
+      attentionMap: buildAttentionMapPresentation(firstIndex, createOverviewFixture()),
+      currentData: createOverviewFixture(),
+    });
+    const secondTargets = buildReviewTargets({
+      analysisIndex: secondIndex,
+      attentionMap: buildAttentionMapPresentation(secondIndex, createOverviewFixture()),
+      currentData: createOverviewFixture(),
+    });
+
+    expect(firstTargets[0].stableKey).toBe(secondTargets[0].stableKey);
+    expect(firstTargets[0].id).toBe(secondTargets[0].id);
   });
 
   it("summarizes checks with names, timing, and detail links", () => {
