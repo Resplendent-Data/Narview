@@ -1633,7 +1633,8 @@ describe("App shell", () => {
 
     const attentionMap = await screen.findByLabelText("Attention map");
     await waitFor(() => expect(attentionMap).toHaveTextContent("Head 2222222"));
-    await waitFor(() => expect(attentionMap).toHaveTextContent("rotateSession"));
+    await waitFor(() => expect(attentionMap).toHaveTextContent("Symbols"));
+    expect(attentionMap).toHaveTextContent("Context");
     expect(attentionMap).toHaveTextContent("Symbols");
     expect(attentionMap).toHaveTextContent("Context");
     expect(attentionMap).toHaveTextContent("Hunks");
@@ -1645,6 +1646,147 @@ describe("App shell", () => {
     expect(attentionMap).toHaveTextContent("assets/review-map.png");
     expect(window.localStorage.getItem(analysisIndexStorageKey)).toContain(readyAnalysisInput.headSha);
   });
+
+  it("passes the primary Attention Map acceptance workflow and scope audit", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const threadActionClient = createThreadActionClient();
+    const acceptanceCache = {
+      ...createOverviewFixture(),
+      fileSummaries: [
+        {
+          path: "src/auth/session.ts",
+          additions: 2,
+          deletions: 1,
+          status: "modified" as const,
+          patch:
+            "@@ -1,3 +1,4 @@\n export function rotateSession() {\n-  return previousToken();\n+  const token = refreshToken();\n+  return auditSession(token);\n }",
+        },
+        {
+          path: "src/auth/session.test.ts",
+          additions: 1,
+          deletions: 0,
+          status: "modified" as const,
+          patch: "@@ -1,2 +1,3 @@\n import { rotateSession } from './session';\n+rotateSession();",
+        },
+        {
+          path: "assets/review-map.png",
+          additions: 0,
+          deletions: 0,
+          status: "binary" as const,
+          patch: null,
+        },
+      ],
+      reviewThreads: [
+        {
+          id: "thread-coderabbit-acceptance",
+          authorLogin: "coderabbitai",
+          filePath: "src/auth/session.ts",
+          line: 2,
+          state: "unresolved" as const,
+          body: "Verify the token rotation path before merging.",
+          updatedAt: "2026-05-18T12:00:00Z",
+        },
+        {
+          id: "thread-human-acceptance",
+          authorLogin: "monalisa",
+          filePath: "src/auth/session.ts",
+          line: 2,
+          state: "unresolved" as const,
+          body: "Human reviewer asks for the audit path to be checked.",
+          updatedAt: "2026-05-18T12:01:00Z",
+          comments: [
+            {
+              id: "comment-human-acceptance",
+              authorLogin: "monalisa",
+              body: "Human reviewer asks for the audit path to be checked.",
+              updatedAt: "2026-05-18T12:01:00Z",
+              url: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r_acceptance",
+            },
+          ],
+        },
+      ],
+    } satisfies CachedPullRequestData;
+    const workspaceClient = createWorkspaceClient({
+      listRepositories: vi.fn().mockResolvedValue({ repositories: [narviewRepository] }),
+      getReviewCloneStatus: vi.fn().mockResolvedValue(readyReviewCloneStatus),
+      preparePullRequestReviewClone: vi.fn().mockResolvedValue(readyAnalysisInput),
+      readPullRequestAnalysisFiles: vi.fn().mockImplementation(async (_pullRequest: PullRequestSummary, paths: string[]) => ({
+        repository: narviewRepository,
+        pullRequestNumber: 12,
+        headSha: readyAnalysisInput.headSha,
+        files: paths.map((path) => ({
+          path,
+          state: path === "src/auth/session.ts" || path === "src/auth/session.test.ts" ? "loaded" : "unsupported",
+          content:
+            path === "src/auth/session.ts"
+              ? "export function rotateSession() {\n  const token = refreshToken();\n  return auditSession(token);\n}\nfunction refreshToken() { return 'next'; }\nfunction auditSession(value: string) { return value; }\n"
+              : path === "src/auth/session.test.ts"
+                ? "import { rotateSession } from './session';\nrotateSession();\n"
+                : null,
+          message: null,
+        })),
+      })),
+      fetchPullRequestData: vi.fn().mockResolvedValue(acceptanceCache),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        threadActionClient={threadActionClient}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    const attentionMap = await screen.findByLabelText("Attention map");
+    await waitFor(() => expect(attentionMap).toHaveTextContent("Head 2222222"));
+    await waitFor(() => expect(attentionMap).toHaveTextContent("Symbols"));
+    expect(attentionMap).toHaveTextContent("Context");
+    expect(within(attentionMap).getByLabelText("Review target graph")).toBeInTheDocument();
+    const graph = within(attentionMap).getByLabelText("Review target graph");
+    const reviewPath = within(attentionMap).getByLabelText("Review Path");
+    await waitFor(() => expect(graph).toHaveAttribute("data-focused-target-id", expect.stringMatching(/^target:/)));
+    const firstFocusedTargetId = graph.getAttribute("data-focused-target-id");
+
+    expect(reviewPath).toHaveTextContent("Hotspot score");
+    expect(within(reviewPath).getByLabelText("Review Work")).toHaveTextContent("Remaining");
+
+    const inspector = screen.getByLabelText("Review Target Inspector");
+    await waitFor(() => expect(within(inspector).getByLabelText("Review Target head version")).toHaveTextContent("refreshToken"));
+    expect(within(inspector).getByLabelText("Review Target changed context")).toHaveTextContent("auditSession");
+    expect(within(inspector).getByLabelText("Review Target related context")).toHaveTextContent("Tests");
+    expect(within(inspector).getByLabelText("Review Target review threads")).toHaveTextContent("Human");
+    await user.click(within(inspector).getByRole("button", { name: /show base comparison/i }));
+    expect(within(inspector).getByLabelText("Review Target base comparison")).toHaveTextContent("previousToken");
+
+    await user.keyboard("k");
+    await waitFor(() => expect(graph.getAttribute("data-focused-target-id")).not.toBe(firstFocusedTargetId));
+    await user.click(within(reviewPath).getByRole("button", { name: /src\/auth grouped review|src\/auth\/session\.ts|rotateSession/i }));
+
+    await user.click(within(reviewPath).getByRole("button", { name: /mark target reviewed/i }));
+    expect(within(reviewPath).getByLabelText("Review Work")).toHaveTextContent("1/");
+
+    const startThreadPanel = screen.getByLabelText("Start Review Thread");
+    await user.type(within(startThreadPanel).getByLabelText("New Review Thread body"), "Line feedback synced from acceptance pass.");
+    await user.click(within(startThreadPanel).getByRole("button", { name: /start line thread/i }));
+    await waitFor(() => expect(threadActionClient.startLineThread).toHaveBeenCalled());
+
+    await user.selectOptions(screen.getByLabelText("Handoff packet type"), "human-feedback");
+    await user.click(screen.getByRole("button", { name: /copy markdown/i }));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText.mock.calls[0][0]).toContain("# Human Feedback Packet");
+    expect(writeText.mock.calls[0][0]).toContain("Human reviewer asks for the audit path to be checked.");
+
+    expect(screen.queryByRole("button", { name: /edit code|apply patch|run command|execute command/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /pull request comment|submit review|approve|request changes/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^merge/i })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Handoff packet")).toHaveTextContent("no LLM calls");
+    expect(screen.getByLabelText("Handoff packet")).toHaveTextContent("no code changes");
+  }, 15_000);
 
   it("moves Review Path focus with J/K and keeps reviewed targets available without reorder controls", async () => {
     const user = userEvent.setup();

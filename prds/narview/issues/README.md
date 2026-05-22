@@ -39,11 +39,7 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 | 33 | Human Feedback Packets | AFK | done | 30-review-thread-attachment-and-file-threads.md | 57, 58, 59, 60, 61 | [33-human-feedback-packets.md](./33-human-feedback-packets.md) |
 | 34 | Checks Merge Readiness And Outdated Context | AFK | done | 30-review-thread-attachment-and-file-threads.md | 62, 63 | [34-checks-merge-readiness-and-outdated-context.md](./34-checks-merge-readiness-and-outdated-context.md) |
 | 35 | Privacy Performance And No-LLM Hardening | AFK | done | 24-structural-hotspots-and-generated-clusters.md, 33-human-feedback-packets.md | 17, 21, 22, 64 | [35-privacy-performance-and-no-llm-hardening.md](./35-privacy-performance-and-no-llm-hardening.md) |
-| 36 | Attention Map End-To-End Acceptance Pass | AFK | ready | 29-target-fingerprints-and-needs-re-review.md, 32-start-line-and-file-review-threads.md, 33-human-feedback-packets.md, 34-checks-merge-readiness-and-outdated-context.md, 35-privacy-performance-and-no-llm-hardening.md | 1-65 | [36-attention-map-end-to-end-acceptance-pass.md](./36-attention-map-end-to-end-acceptance-pass.md) |
-
-## Ready
-
-- [Attention Map End-To-End Acceptance Pass](./36-attention-map-end-to-end-acceptance-pass.md)
+| 36 | Attention Map End-To-End Acceptance Pass | AFK | done | 29-target-fingerprints-and-needs-re-review.md, 32-start-line-and-file-review-threads.md, 33-human-feedback-packets.md, 34-checks-merge-readiness-and-outdated-context.md, 35-privacy-performance-and-no-llm-hardening.md | 1-65 | [36-attention-map-end-to-end-acceptance-pass.md](./36-attention-map-end-to-end-acceptance-pass.md) |
 
 ## Done
 
@@ -82,3 +78,4 @@ Dependency-ordered implementation slices for [Narview V1](../2026-05-18-narview-
 - [Human Feedback Packets](./33-human-feedback-packets.md)
 - [Checks Merge Readiness And Outdated Context](./34-checks-merge-readiness-and-outdated-context.md)
 - [Privacy Performance And No-LLM Hardening](./35-privacy-performance-and-no-llm-hardening.md)
+- [Attention Map End-To-End Acceptance Pass](./36-attention-map-end-to-end-acceptance-pass.md)
