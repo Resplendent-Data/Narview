@@ -81,6 +81,29 @@
 }
 
 @layer components {
+  .react-flow__node-reviewTarget {
+    filter: drop-shadow(0 0 0.6rem hsl(var(--background) / 0.92));
+  }
+
+  .react-flow__node-reviewTarget .review-target-node {
+    box-shadow:
+      0 0 0 7px hsl(var(--background) / 0.9),
+      0 1px 2px hsl(220 16% 12% / 0.12);
+  }
+
+  .react-flow__node-reviewTarget.selected .review-target-node {
+    box-shadow:
+      0 0 0 9px hsl(var(--background) / 0.95),
+      0 0 0 12px hsl(var(--primary) / 0.16),
+      0 8px 22px hsl(220 16% 12% / 0.18);
+  }
+
+  .react-flow__edge-path {
+    transition:
+      stroke-opacity 120ms ease,
+      stroke-width 120ms ease;
+  }
+
   .markdown-body {
     color: hsl(var(--foreground));
     font-size: 0.875rem;
@@ -357,6 +380,54 @@
       inset 0 0 0 9999px hsl(var(--ring) / 0.08);
   }
 
+  .diff-row-line-selected {
+    box-shadow:
+      inset 3px 0 0 hsl(var(--primary)),
+      inset 0 0 0 9999px hsl(var(--primary) / 0.1);
+  }
+
+  .diff-comment-gutter {
+    background: var(--diff-gutter-bg);
+    border-right: 1px solid var(--diff-border);
+    color: var(--diff-gutter-fg);
+    user-select: none;
+  }
+
+  .diff-line-comment-button {
+    align-items: center;
+    background: hsl(var(--background));
+    border: 1px solid hsl(var(--border));
+    border-radius: 999px;
+    color: hsl(var(--muted-foreground));
+    display: inline-flex;
+    height: 1.15rem;
+    justify-content: center;
+    opacity: 0;
+    transition:
+      border-color 120ms ease,
+      color 120ms ease,
+      opacity 120ms ease;
+    width: 1.15rem;
+  }
+
+  .diff-row:hover .diff-line-comment-button,
+  .diff-row-line-selected .diff-line-comment-button,
+  .diff-line-comment-button:focus-visible {
+    opacity: 1;
+  }
+
+  .diff-line-comment-button:hover:not(:disabled),
+  .diff-line-comment-button:focus-visible {
+    border-color: hsl(var(--primary));
+    color: hsl(var(--primary));
+    outline: none;
+  }
+
+  .diff-line-comment-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
   .diff-inline-thread {
     background: color-mix(in srgb, hsl(var(--card)) 94%, hsl(var(--ring)) 6%);
     border-bottom: 1px solid var(--diff-border);
@@ -366,6 +437,10 @@
     min-width: 100%;
     padding: 0.85rem 1rem 0.95rem 8.5rem;
     width: max(100%, 54rem);
+  }
+
+  .diff-inline-comment-composer {
+    background: hsl(var(--card));
   }
 
   .diff-inline-thread .markdown-body {

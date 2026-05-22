@@ -202,7 +202,6 @@ const draftPullRequest: PullRequestSummary = {
 const restoredSnapshot: ReviewSessionSnapshot = {
   activeQueueId: "needs-attention",
   includeDrafts: true,
-  focusMode: true,
   threadKey: "coderabbitai:src/auth/session.ts:142",
   filePath: "src/auth/session.ts",
   nearbyLine: 142,
@@ -771,7 +770,7 @@ describe("App shell", () => {
     expect(diffCodeLine?.closest(".diff-row")).toHaveClass("diff-row-comment-anchor");
   });
 
-  it("scrolls to the top review thread card when the active thread has no diff anchor", async () => {
+  it("keeps no-anchor review thread context available without forcing the canvas away from the map", async () => {
     const originalScrollTo = HTMLElement.prototype.scrollTo;
     const scrollTo = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollTo", {
@@ -818,7 +817,7 @@ describe("App shell", () => {
 
       expect(screen.getByLabelText("Active review thread")).toHaveTextContent("This thread belongs at the top of the file");
       expect(within(screen.getByLabelText("Diff viewer")).queryByLabelText("Inline review thread")).not.toBeInTheDocument();
-      await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "smooth" }));
+      expect(scrollTo).not.toHaveBeenCalled();
     } finally {
       if (originalScrollTo) {
         Object.defineProperty(HTMLElement.prototype, "scrollTo", {
@@ -831,15 +830,48 @@ describe("App shell", () => {
     }
   });
 
-  it("toggles focus mode from the visible control", async () => {
+  it("opens the Review Target diff from the visible control", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: /focus/i }));
+    await user.click(screen.getByRole("button", { name: /^diff/i }));
 
-    expect(screen.queryByLabelText("File explorer")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Inspector")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /exit focus/i })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: /review target diff/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /focus/i })).not.toBeInTheDocument();
+  });
+
+  it("starts a GitHub line comment from a diff dialog row", async () => {
+    const user = userEvent.setup();
+    const threadActionClient = createThreadActionClient();
+    render(<App threadActionClient={threadActionClient} />);
+
+    await user.click(screen.getByRole("button", { name: /^diff/i }));
+    const dialog = await screen.findByRole("dialog", { name: /review target diff/i });
+    const lineCommentButtons = await within(dialog).findAllByRole("button", { name: /comment on .* line/i });
+
+    await user.hover(lineCommentButtons[1]);
+    await user.keyboard("c");
+    await user.type(within(dialog).getByLabelText("Line comment body"), "Please guard this exact line.");
+    await user.click(within(dialog).getByRole("button", { name: /start line thread/i }));
+
+    await waitFor(() => expect(threadActionClient.startLineThread).toHaveBeenCalled());
+    expect(threadActionClient.startLineThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: "Please guard this exact line.",
+        line: expect.any(Number),
+        path: expect.stringMatching(/src\/auth\/session\.ts|docs\/readme\.md/),
+        side: expect.stringMatching(/LEFT|RIGHT/),
+      }),
+    );
+    const inlineThread = await within(dialog).findByLabelText("Inline review thread");
+    expect(inlineThread).toHaveTextContent("Please guard this exact line.");
+    expect(within(dialog).queryByLabelText("Line comment body")).not.toBeInTheDocument();
+
+    await user.click(within(inlineThread).getByRole("button", { name: /mark reviewed/i }));
+    expect(await within(inlineThread).findByText("Reviewed")).toBeInTheDocument();
+
+    await user.click(within(inlineThread).getByRole("button", { name: /^resolve$/i }));
+    await waitFor(() => expect(threadActionClient.resolve).toHaveBeenCalledWith("thread-created-line"));
   });
 
   it("opens the command palette from the button and keyboard shortcut", async () => {
@@ -893,10 +925,10 @@ describe("App shell", () => {
     render(<App threadActionClient={threadActionClient} />);
 
     await user.click(screen.getByRole("button", { name: /command/i }));
-    await user.type(screen.getByLabelText("Search commands"), "mark active reviewed");
-    await user.click(screen.getByRole("button", { name: /mark active review thread reviewed/i }));
+    await user.type(screen.getByLabelText("Search commands"), "mark target reviewed");
+    await user.click(screen.getByRole("button", { name: /mark review target reviewed/i }));
 
-    expect(await within(screen.getByLabelText("Inspector")).findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Review Work")).toHaveTextContent("1/5"));
 
     await user.click(screen.getByRole("button", { name: /command/i }));
     await user.type(screen.getByLabelText("Search commands"), "resolve active");
@@ -1138,7 +1170,7 @@ describe("App shell", () => {
     });
   });
 
-  it("disables line-level Review Thread creation when no changed-line anchor is available", () => {
+  it("disables line-level Review Thread creation when no diff-line anchor is available", () => {
     const binaryNode = createSyntheticAttentionNode({
       id: "assets/logo.png:attention-file-fallback",
       filePath: "assets/logo.png",
@@ -1169,7 +1201,7 @@ describe("App shell", () => {
     const state = getReviewThreadLineAnchorState(model);
 
     expect(state.anchors).toEqual([]);
-    expect(state.disabled?.reason).toMatch(/added or removed changed line/i);
+    expect(state.disabled?.reason).toMatch(/diff line/i);
     expect(validateNewThreadBody("   ")).toBe("Review Thread body is required.");
   });
 
@@ -2282,7 +2314,6 @@ describe("App shell", () => {
     await user.type(within(dialog).getByLabelText("Pull Request URL"), readyPullRequest.url);
     await user.click(within(dialog).getByRole("button", { name: /^open$/i }));
 
-    await user.click(await screen.findByRole("button", { name: /exit focus/i }));
     const reopenedDialog = await openPullRequestsDialog(user);
     expect(within(reopenedDialog).getByLabelText("Include draft Pull Requests")).toBeChecked();
     await waitFor(() => expect(reviewSessionClient.saveSession).toHaveBeenCalled());
@@ -2306,7 +2337,7 @@ describe("App shell", () => {
       />,
     );
 
-    expect(await screen.findByRole("button", { name: /exit focus/i })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /diff/i })).toBeInTheDocument();
     expect(screen.getAllByText("Resplendent-Data/Narview #12").length).toBeGreaterThan(0);
   });
 
@@ -2924,7 +2955,7 @@ describe("App shell", () => {
     expect(inspector?.reasons).toEqual(expect.arrayContaining([expect.stringContaining("could not be mapped")]));
   });
 
-  it("groups same-symbol hunk splits and splits oversized weakly related groups", () => {
+  it("groups same-file fallback hunks and splits oversized weakly related symbol groups", () => {
     const hunkOne = createSyntheticAttentionNode({
       id: "src/session.ts:hunk-1",
       kind: "hunk",
@@ -2959,8 +2990,9 @@ describe("App shell", () => {
       currentData: createOverviewFixture(),
     });
 
-    expect(groupedTargets.some((target) => target.nodeIds.includes(hunkOne.id) && target.nodeIds.includes(hunkTwo.id))).toBe(true);
-    expect(groupedTargets.find((target) => target.nodeIds.includes(distant.id))?.nodeIds).toEqual([distant.id]);
+    const fileFallbackTarget = groupedTargets.find((target) => target.paths.includes("src/session.ts"));
+    expect(fileFallbackTarget?.title).toBe("src/session.ts file review");
+    expect(fileFallbackTarget?.nodeIds).toEqual([hunkOne.id, hunkTwo.id, distant.id]);
 
     const oversizedNodes = Array.from({ length: 5 }, (_, index) =>
       createSyntheticAttentionNode({
@@ -3786,6 +3818,7 @@ describe("App shell", () => {
     expect((await screen.findAllByText("acme/large-pr #9001")).length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Review queue summary")).toHaveTextContent("140 matching filters");
     expect(screen.getByLabelText("File explorer")).toHaveTextContent("0/240 viewed");
+    expect(Number(screen.getByLabelText("Review target graph").getAttribute("data-edge-count") ?? "0")).toBeLessThanOrEqual(360);
     const dialog = await openPullRequestsDialog(userEvent.setup());
     expect(within(dialog).getByText(/GitHub rate limit reached/)).toBeInTheDocument();
   });
@@ -3882,10 +3915,11 @@ describe("App shell", () => {
 
     expect(screen.getByText("Previous target")).toBeInTheDocument();
     expect(screen.getAllByText("Threads").length).toBeGreaterThan(0);
-    expect(screen.getByText("Open file")).toBeInTheDocument();
-    expect(screen.getAllByText("Focus").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Diff").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Focus")).not.toBeInTheDocument();
     const graph = screen.getByLabelText("Review target graph");
     await waitFor(() => expect(graph).toHaveAttribute("data-focused-target-id", expect.stringMatching(/^target:/)));
+    await waitFor(() => expect(Number(graph.getAttribute("data-edge-count") ?? "0")).toBeGreaterThan(0));
     const firstFocusedTargetId = graph.getAttribute("data-focused-target-id");
 
     await user.keyboard("k");
@@ -3894,8 +3928,13 @@ describe("App shell", () => {
     await user.keyboard("j");
     await waitFor(() => expect(graph.getAttribute("data-focused-target-id")).toBe(firstFocusedTargetId));
 
+    await user.keyboard("d");
+    expect(await screen.findByRole("dialog", { name: /review target diff/i })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
     await user.keyboard("r");
-    expect(await within(screen.getByLabelText("Inspector")).findByRole("button", { name: /mark unreviewed/i })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Review Work")).toHaveTextContent("1/5"));
+    await waitFor(() => expect(graph.getAttribute("data-focused-target-id")).not.toBe(firstFocusedTargetId));
 
     await user.keyboard("e");
     expect(threadActionClient.resolve).toHaveBeenCalledWith("thread-1");

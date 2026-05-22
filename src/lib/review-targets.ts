@@ -65,8 +65,10 @@ export function buildReviewTargets(input: BuildReviewTargetsInput): ReviewTarget
     ...buildRelationshipGroupEdges(input.analysisIndex.relationships, nodeById),
     ...buildNearbyGroupEdges(reviewNodes),
   ];
-  const componentTargets = buildConnectedComponents(reviewNodes, edges).flatMap((component) =>
-    splitComponentIntoTargets(component, edges, threadAttachments, maxNodesPerTarget),
+  const componentTargets = mergeSameFileFallbackTargets(
+    buildConnectedComponents(reviewNodes, edges).flatMap((component) =>
+      splitComponentIntoTargets(component, edges, threadAttachments, maxNodesPerTarget),
+    ),
   );
   const clusterTargets = buildGeneratedClusterTargets(input.attentionMap, input.hotspots ?? []);
   const threadGroupTargets = buildThreadGroupTargets(input.currentData, threadAttachments);
@@ -193,6 +195,68 @@ function splitComponentIntoTargets(
       `Split from an oversized ${component.length}-node relationship group to keep one logic question per target.`,
     ]),
   );
+}
+
+function mergeSameFileFallbackTargets(targets: ReviewTarget[]) {
+  const grouped = new Map<string, ReviewTarget[]>();
+  const passthrough: ReviewTarget[] = [];
+
+  for (const target of targets) {
+    if (target.kind !== "node-group" || !target.fallback || !target.filePath || target.paths.length !== 1) {
+      passthrough.push(target);
+      continue;
+    }
+
+    grouped.set(target.filePath, [...(grouped.get(target.filePath) ?? []), target]);
+  }
+
+  const merged = [...grouped.values()].flatMap((sameFileTargets) =>
+    sameFileTargets.length > 1 ? [createSameFileFallbackTarget(sameFileTargets)] : sameFileTargets,
+  );
+
+  return [...passthrough, ...merged];
+}
+
+function createSameFileFallbackTarget(targets: ReviewTarget[]): ReviewTarget {
+  const sortedTargets = [...targets].sort(compareReviewTargets);
+  const filePath = sortedTargets[0].filePath ?? sortedTargets[0].paths[0] ?? "Unknown file";
+  const nodeIds = uniqueSorted(sortedTargets.flatMap((target) => target.nodeIds));
+  const edgeIds = uniqueSorted(sortedTargets.flatMap((target) => target.edgeIds));
+  const reviewThreadIds = uniqueSorted(sortedTargets.flatMap((target) => target.reviewThreadIds));
+  const unresolvedReviewThreads = sortedTargets.reduce((total, target) => total + target.size.reviewThreads, 0);
+  const stableKey = `file-fallback:${filePath}:${sortedTargets.map((target) => target.stableKey).sort().join("|")}`;
+
+  return {
+    id: `target:${stableHash(stableKey)}`,
+    stableKey,
+    fingerprint: stableHash(
+      JSON.stringify({
+        stableKey,
+        targetFingerprints: sortedTargets.map((target) => target.fingerprint).sort(),
+      }),
+    ),
+    kind: "node-group",
+    title: `${filePath} file review`,
+    priority: unresolvedReviewThreads > 0 || sortedTargets.some((target) => target.priority === "high") ? "high" : "normal",
+    nodeIds,
+    edgeIds,
+    reviewThreadIds,
+    paths: [filePath],
+    filePath,
+    modulePath: getCommonDirectory([filePath]),
+    fallback: true,
+    reasoning: [
+      `Merged ${sortedTargets.length} fallback hunk target${sortedTargets.length === 1 ? "" : "s"} in ${filePath} so the file is reviewed once.`,
+      ...uniqueSorted(sortedTargets.flatMap((target) => target.reasoning)),
+    ],
+    size: {
+      nodes: nodeIds.length,
+      files: 1,
+      changedLines: sortedTargets.reduce((total, target) => total + target.size.changedLines, 0),
+      relationships: edgeIds.length,
+      reviewThreads: unresolvedReviewThreads,
+    },
+  };
 }
 
 function chunkOversizedComponent(component: AttentionNode[], maxNodesPerTarget: number) {

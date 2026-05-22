@@ -29,8 +29,10 @@ export function buildReviewThreadLineAnchors(model: ReviewTargetInspectorModel |
       const anchor =
         line.kind === "addition" && line.newLine !== null
           ? { path: context.path, line: line.newLine, side: "RIGHT" as const, label: `${context.path}:${line.newLine} added line` }
-          : line.kind === "deletion" && line.oldLine !== null
-            ? { path: context.path, line: line.oldLine, side: "LEFT" as const, label: `${context.path}:${line.oldLine} removed line` }
+        : line.kind === "deletion" && line.oldLine !== null
+          ? { path: context.path, line: line.oldLine, side: "LEFT" as const, label: `${context.path}:${line.oldLine} removed line` }
+          : line.kind === "context" && line.newLine !== null
+            ? { path: context.path, line: line.newLine, side: "RIGHT" as const, label: `${context.path}:${line.newLine} context line` }
             : null;
 
       if (!anchor) {
@@ -61,7 +63,7 @@ export function getReviewThreadLineAnchorState(
     anchors,
     disabled: {
       reason: model
-        ? "Line-level Review Threads need an added or removed changed line inside this Review Target."
+        ? "Line-level Review Threads need a diff line inside this Review Target."
         : "Select a Review Target before starting a line-level Review Thread.",
     },
   };

@@ -3,7 +3,6 @@ import type { PullRequestSummary } from "./workspace";
 export interface ReviewSessionSnapshot {
   activeQueueId: string;
   includeDrafts: boolean;
-  focusMode: boolean;
   threadKey: string;
   filePath: string;
   nearbyLine: number;

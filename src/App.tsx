@@ -1,14 +1,27 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+  forceX,
+  forceY,
+  type SimulationLinkDatum,
+  type SimulationNodeDatum,
+} from "d3-force";
+import {
   Background,
   Controls,
+  Handle,
   MiniMap,
+  Position,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
   type Edge,
   type Node,
+  type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
@@ -29,8 +42,6 @@ import {
   LogOut,
   MessageSquare,
   Moon,
-  PanelLeftClose,
-  PanelLeftOpen,
   Plus,
   RefreshCw,
   Rows3,
@@ -40,8 +51,9 @@ import {
   ShieldCheck,
   Sun,
   Trash2,
+  X,
 } from "lucide-react";
-import { type FormEvent, type Ref, useEffect, useMemo, useRef, useState } from "react";
+import { memo, type FormEvent, type Ref, useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownContent } from "./components/markdown-content";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -51,6 +63,7 @@ import {
   buildOrReuseAnalysisIndex,
   writeAnalysisIndex,
   type AnalysisIndex,
+  type AttentionMapEdge,
 } from "./lib/analysis-index";
 import { appReleaseDownloadUrl, type AppUpdateClient, useAppUpdater } from "./lib/app-updater";
 import { type AuthClient, type AuthSession, type OAuthStartResponse, tauriAuthClient } from "./lib/auth";
@@ -496,20 +509,147 @@ function buildFileExplorerRows(
 
 interface ReviewTargetFlowProps {
   items: ReviewPathItem[];
+  attentionEdges: AttentionMapEdge[];
   selectedTargetId: string | null;
   reviewedTargetIds: Set<string>;
   needsReReviewTargetIds: Set<string>;
   onSelectTarget: (targetId: string) => void;
+  onOpenTarget: (targetId: string) => void;
 }
 
-function ReviewTargetFlow({ items, selectedTargetId, reviewedTargetIds, needsReReviewTargetIds, onSelectTarget }: ReviewTargetFlowProps) {
-  const { nodes, edges } = buildReviewTargetFlowElements(items, selectedTargetId, reviewedTargetIds, needsReReviewTargetIds);
+type ReviewTargetNodeData = {
+  order: number;
+  title: string;
+  primaryLabel: string;
+  scopeLabel: string;
+  kindLabel: string;
+  hotspotScore: number;
+  fileCount: number;
+  changedLines: number;
+  threadCount: number;
+  compact: boolean;
+  reviewed: boolean;
+  needsReReview: boolean;
+};
+
+const ReviewTargetNode = memo(function ReviewTargetNode({ data, selected }: NodeProps<Node<ReviewTargetNodeData>>) {
+  const emphasized = selected;
+
+  return (
+    <div
+      className={cn(
+        "review-target-node group relative overflow-hidden border bg-card text-card-foreground shadow-sm transition-shadow",
+        data.compact ? "h-11 w-40 rounded-md px-2 py-1.5" : "h-28 w-64 rounded-lg p-3",
+        emphasized && "border-primary shadow-lg ring-2 ring-primary/20",
+        !emphasized && data.needsReReview && "border-amber-500/70 bg-amber-500/10",
+        !emphasized && !data.needsReReview && "border-border",
+        data.reviewed && "opacity-55",
+      )}
+      title={data.title}
+    >
+      <Handle id="target-top" className="opacity-0" position={Position.Top} type="target" />
+      <Handle id="target-right" className="opacity-0" position={Position.Right} type="target" />
+      <Handle id="target-bottom" className="opacity-0" position={Position.Bottom} type="target" />
+      <Handle id="target-left" className="opacity-0" position={Position.Left} type="target" />
+      <Handle id="source-top" className="opacity-0" position={Position.Top} type="source" />
+      <Handle id="source-right" className="opacity-0" position={Position.Right} type="source" />
+      <Handle id="source-bottom" className="opacity-0" position={Position.Bottom} type="source" />
+      <Handle id="source-left" className="opacity-0" position={Position.Left} type="source" />
+      {data.compact ? (
+        <div className="flex h-full min-w-0 items-center gap-2">
+          <span className="flex h-6 w-7 shrink-0 items-center justify-center rounded bg-muted text-[10px] font-semibold text-muted-foreground">
+            {data.order}
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate font-mono text-[11px] font-semibold leading-4">{data.primaryLabel}</p>
+            <p className="truncate text-[10px] leading-4 text-muted-foreground">{data.scopeLabel}</p>
+            <span className="sr-only">{data.title}</span>
+          </div>
+          {data.threadCount > 0 && (
+            <span className="shrink-0 rounded bg-amber-500/15 px-1 text-[10px] font-semibold text-amber-700 dark:text-amber-300">
+              {data.threadCount}
+            </span>
+          )}
+        </div>
+      ) : (
+        <div className="flex h-full min-w-0 flex-col">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Badge variant={emphasized ? "info" : data.needsReReview ? "warning" : "muted"}>#{data.order}</Badge>
+              <span className="truncate text-[11px] font-medium uppercase tracking-normal text-muted-foreground">{data.kindLabel}</span>
+            </div>
+            {data.hotspotScore > 0 && (
+              <Badge variant={data.hotspotScore > 70 ? "danger" : "warning"}>{getReviewTargetScoreLabel(data.hotspotScore)}</Badge>
+            )}
+          </div>
+          <p className="mt-2 truncate font-mono text-[13px] font-semibold leading-5">{data.primaryLabel}</p>
+          <p className="mt-1 truncate text-[11px] leading-4 text-muted-foreground">{data.scopeLabel}</p>
+          <span className="sr-only">{data.title}</span>
+          <div className="mt-auto flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+            <span>{data.fileCount} file{data.fileCount === 1 ? "" : "s"}</span>
+            <span>{data.changedLines} lines</span>
+            {data.threadCount > 0 && <span>{data.threadCount} thread{data.threadCount === 1 ? "" : "s"}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}, areReviewTargetNodePropsEqual);
+
+function areReviewTargetNodePropsEqual(
+  previous: NodeProps<Node<ReviewTargetNodeData>>,
+  next: NodeProps<Node<ReviewTargetNodeData>>,
+) {
+  return previous.selected === next.selected && previous.data === next.data;
+}
+
+const reviewTargetNodeTypes = {
+  reviewTarget: ReviewTargetNode,
+};
+
+function ReviewTargetFlow({
+  attentionEdges,
+  items,
+  selectedTargetId,
+  reviewedTargetIds,
+  needsReReviewTargetIds,
+  onSelectTarget,
+  onOpenTarget,
+}: ReviewTargetFlowProps) {
+  const visualItems = useMemo(() => getReviewTargetVisualItems(items), [items]);
+  const denseBoard = visualItems.length > 120;
+  const layoutItems = useMemo(
+    () => getReviewTargetLayoutItems(visualItems, needsReReviewTargetIds),
+    [needsReReviewTargetIds, visualItems],
+  );
+  const relationshipGroups = useMemo(
+    () => buildReviewTargetRelationshipGroups(items, attentionEdges),
+    [attentionEdges, items],
+  );
+  const positionsById = useMemo(
+    () => layoutReviewTargetNodes(layoutItems, relationshipGroups),
+    [layoutItems, relationshipGroups],
+  );
+  const baseNodes = useMemo(
+    () => buildReviewTargetBaseNodes(layoutItems, positionsById, reviewedTargetIds, needsReReviewTargetIds),
+    [layoutItems, needsReReviewTargetIds, positionsById, reviewedTargetIds],
+  );
+  const nodes = useMemo(
+    () => applyReviewTargetSelectionToNodes(baseNodes, selectedTargetId),
+    [baseNodes, selectedTargetId],
+  );
+  const edges = useMemo(
+    () => buildReviewTargetRelationshipEdges(relationshipGroups, positionsById, selectedTargetId, visualItems.length),
+    [positionsById, relationshipGroups, selectedTargetId, visualItems.length],
+  );
 
   return (
     <ReactFlowProvider>
       <ReviewTargetFlowCanvas
+        denseBoard={denseBoard}
         edges={edges}
         nodes={nodes}
+        onOpenTarget={onOpenTarget}
         onSelectTarget={onSelectTarget}
         selectedTargetId={selectedTargetId}
       />
@@ -518,13 +658,17 @@ function ReviewTargetFlow({ items, selectedTargetId, reviewedTargetIds, needsReR
 }
 
 function ReviewTargetFlowCanvas({
+  denseBoard,
   edges,
   nodes,
+  onOpenTarget,
   onSelectTarget,
   selectedTargetId,
 }: {
+  denseBoard: boolean;
   edges: Edge[];
-  nodes: Node[];
+  nodes: Node<ReviewTargetNodeData>[];
+  onOpenTarget: (targetId: string) => void;
   onSelectTarget: (targetId: string) => void;
   selectedTargetId: string | null;
 }) {
@@ -535,19 +679,21 @@ function ReviewTargetFlowCanvas({
       return;
     }
 
+    const focusNodeIds = getReviewTargetFocusNodeIds(selectedTargetId, nodes, edges);
     window.requestAnimationFrame(() => {
       void flow.fitView({
-        nodes: [{ id: selectedTargetId }],
-        padding: 0.45,
+        nodes: focusNodeIds.map((id) => ({ id })),
+        padding: 0.34,
         duration: 180,
       });
     });
-  }, [flow, selectedTargetId]);
+  }, [edges, flow, nodes, selectedTargetId]);
 
   return (
     <div
       aria-label="Review target graph"
-      className="h-full min-h-[320px] overflow-hidden rounded-md border border-border bg-background"
+      className="h-full min-h-full overflow-hidden bg-background"
+      data-edge-count={edges.length}
       data-focused-target-id={selectedTargetId ?? ""}
     >
       <ReactFlow
@@ -555,17 +701,20 @@ function ReviewTargetFlowCanvas({
         edges={edges}
         fitView
         maxZoom={1.8}
-        minZoom={0.35}
+        minZoom={0.25}
         nodes={nodes}
         nodesConnectable={false}
         nodesDraggable={false}
+        onlyRenderVisibleElements={denseBoard}
+        nodeTypes={reviewTargetNodeTypes}
+        onNodeDoubleClick={(_, node) => onOpenTarget(node.id)}
         onNodeClick={(_, node) => onSelectTarget(node.id)}
         panOnScroll
         proOptions={{ hideAttribution: true }}
       >
-        <Background gap={16} />
+        <Background gap={18} />
         <Controls showInteractive={false} />
-        <MiniMap pannable={false} zoomable={false} />
+        {!denseBoard && <MiniMap pannable={false} zoomable={false} nodeStrokeWidth={2} />}
       </ReactFlow>
     </div>
   );
@@ -573,85 +722,833 @@ function ReviewTargetFlowCanvas({
 
 function buildReviewTargetFlowElements(
   items: ReviewPathItem[],
+  attentionEdges: AttentionMapEdge[],
   selectedTargetId: string | null,
   reviewedTargetIds: Set<string>,
   needsReReviewTargetIds: Set<string>,
-): { nodes: Node[]; edges: Edge[] } {
-  const visualItems = [...items].sort(
-    (left, right) =>
-      left.target.modulePath.localeCompare(right.target.modulePath) ||
-      left.target.title.localeCompare(right.target.title) ||
-      left.id.localeCompare(right.id),
-  );
-  const columns = Math.max(1, Math.ceil(Math.sqrt(Math.max(visualItems.length, 1))));
-  const nodes = visualItems.map((item, index) => {
-    const selected = item.id === selectedTargetId;
-    const reviewed = reviewedTargetIds.has(item.id);
-    const needsReReview = needsReReviewTargetIds.has(item.id);
-    const row = Math.floor(index / columns);
-    const column = index % columns;
-
-    return {
-      id: item.id,
-      data: {
-        label: item.target.title,
-      },
-      position: {
-        x: column * 260,
-        y: row * 140,
-      },
-      selected,
-      style: {
-        width: 210,
-        border: selected ? "2px solid hsl(var(--primary))" : needsReReview ? "2px solid hsl(38 92% 50%)" : "1px solid hsl(var(--border))",
-        borderRadius: 8,
-        color: "hsl(var(--foreground))",
-        background: reviewed ? "hsl(var(--muted))" : needsReReview ? "hsl(38 92% 50% / 0.12)" : "hsl(var(--card))",
-        opacity: reviewed ? 0.58 : 1,
-        fontSize: 12,
-        lineHeight: 1.35,
-        padding: 10,
-      },
-    } satisfies Node;
-  });
-  const targetByNodeId = new Map<string, string>();
-  for (const item of items) {
-    for (const nodeId of item.target.nodeIds) {
-      targetByNodeId.set(nodeId, item.id);
-    }
-  }
-  const edgesById = new Map<string, Edge>();
-  for (const item of items) {
-    for (const edgeId of item.target.edgeIds) {
-      const [fromTargetId, toTargetId] = findTargetsForEdge(items, targetByNodeId, edgeId);
-      if (!fromTargetId || !toTargetId || fromTargetId === toTargetId) {
-        continue;
-      }
-      const id = `target-edge:${edgeId}`;
-      edgesById.set(id, {
-        id,
-        source: fromTargetId,
-        target: toTargetId,
-        animated: fromTargetId === selectedTargetId || toTargetId === selectedTargetId,
-      });
-    }
-  }
+): { nodes: Node<ReviewTargetNodeData>[]; edges: Edge[] } {
+  const visualItems = getReviewTargetVisualItems(items);
+  const layoutItems = getReviewTargetLayoutItems(visualItems, needsReReviewTargetIds);
+  const relationshipGroups = buildReviewTargetRelationshipGroups(items, attentionEdges);
+  const positionsById = layoutReviewTargetNodes(layoutItems, relationshipGroups);
+  const baseNodes = buildReviewTargetBaseNodes(layoutItems, positionsById, reviewedTargetIds, needsReReviewTargetIds);
+  const nodes = applyReviewTargetSelectionToNodes(baseNodes, selectedTargetId);
+  const edges = buildReviewTargetRelationshipEdges(relationshipGroups, positionsById, selectedTargetId, visualItems.length);
 
   return {
     nodes,
-    edges: [...edgesById.values()],
+    edges,
   };
 }
 
-function findTargetsForEdge(items: ReviewPathItem[], targetByNodeId: Map<string, string>, edgeId: string) {
-  const matchingItems = items.filter((item) => item.target.edgeIds.includes(edgeId));
-  if (matchingItems.length > 1) {
-    return [matchingItems[0].id, matchingItems[1].id] as const;
+function getReviewTargetVisualItems(items: ReviewPathItem[]) {
+  return [...items].sort(
+    (left, right) => left.order - right.order || left.target.modulePath.localeCompare(right.target.modulePath) || left.id.localeCompare(right.id),
+  );
+}
+
+function getReviewTargetLayoutItems(
+  visualItems: ReviewPathItem[],
+  needsReReviewTargetIds: Set<string>,
+): ReviewTargetLayoutItem[] {
+  const denseBoard = visualItems.length > 120;
+  const prominentLimit = denseBoard ? 18 : 24;
+  const hotspotLimit = denseBoard ? 78 : 70;
+
+  return visualItems.map((item) => ({
+    item,
+    compact: !needsReReviewTargetIds.has(item.id) && item.order > prominentLimit && item.hotspotScore < hotspotLimit,
+  }));
+}
+
+function buildReviewTargetBaseNodes(
+  layoutItems: ReviewTargetLayoutItem[],
+  positionsById: Map<string, ReviewTargetNodeLayout>,
+  reviewedTargetIds: Set<string>,
+  needsReReviewTargetIds: Set<string>,
+) {
+  return layoutItems.map(({ item, compact }) => {
+    const reviewed = reviewedTargetIds.has(item.id);
+    const needsReReview = needsReReviewTargetIds.has(item.id);
+    const position = positionsById.get(item.id) ?? { x: item.order * 32, y: item.order * 24 };
+
+    return {
+      id: item.id,
+      type: "reviewTarget",
+      data: buildReviewTargetNodeData(item, compact, reviewed, needsReReview),
+      position,
+      selected: false,
+      zIndex: needsReReview ? 45 : compact ? 28 : 36,
+    } satisfies Node<ReviewTargetNodeData>;
+  });
+}
+
+function applyReviewTargetSelectionToNodes(
+  baseNodes: Node<ReviewTargetNodeData>[],
+  selectedTargetId: string | null,
+) {
+  if (!selectedTargetId) {
+    return baseNodes;
   }
 
-  const edgeNodeIds = edgeId.split(":").filter((part) => targetByNodeId.has(part));
-  const targetIds = [...new Set(edgeNodeIds.map((nodeId) => targetByNodeId.get(nodeId)).filter((id): id is string => Boolean(id)))];
-  return [targetIds[0] ?? null, targetIds[1] ?? null] as const;
+  return baseNodes.map((node) => {
+    if (node.id !== selectedTargetId) {
+      return node;
+    }
+
+    return {
+      ...node,
+      selected: true,
+      zIndex: 80,
+    } satisfies Node<ReviewTargetNodeData>;
+  });
+}
+
+function getReviewTargetFocusNodeIds(selectedTargetId: string, nodes: Node<ReviewTargetNodeData>[], edges: Edge[]) {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const relatedIds = new Set<string>([selectedTargetId]);
+  for (const edge of edges) {
+    if (edge.source === selectedTargetId && nodeIds.has(edge.target)) {
+      relatedIds.add(edge.target);
+    }
+    if (edge.target === selectedTargetId && nodeIds.has(edge.source)) {
+      relatedIds.add(edge.source);
+    }
+  }
+
+  if (relatedIds.size > 1) {
+    return [...relatedIds].slice(0, 14);
+  }
+
+  return [selectedTargetId];
+}
+
+type ReviewTargetRelationshipKind = AttentionMapEdge["kind"] | "module-neighborhood" | "path-neighborhood";
+type ReviewTargetRelationshipGroup = {
+  source: string;
+  target: string;
+  count: number;
+  kinds: Set<ReviewTargetRelationshipKind>;
+};
+
+function buildReviewTargetRelationshipGroups(
+  items: ReviewPathItem[],
+  attentionEdges: AttentionMapEdge[],
+) {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const targetIdsByNodeId = new Map<string, Set<string>>();
+  const targetIdsByFileEndpoint = new Map<string, Set<string>>();
+
+  for (const item of items) {
+    for (const nodeId of item.target.nodeIds) {
+      addMapSetValue(targetIdsByNodeId, nodeId, item.id);
+    }
+    for (const path of item.target.paths) {
+      addMapSetValue(targetIdsByFileEndpoint, `file:${path}`, item.id);
+    }
+  }
+
+  const edgeGroups = new Map<string, ReviewTargetRelationshipGroup>();
+  const addRelationship = (leftTargetId: string, rightTargetId: string, kind: ReviewTargetRelationshipKind) => {
+    if (leftTargetId === rightTargetId) {
+      return;
+    }
+
+    const left = itemById.get(leftTargetId);
+    const right = itemById.get(rightTargetId);
+    if (!left || !right) {
+      return;
+    }
+
+    const [source, target] =
+      left.order < right.order || (left.order === right.order && left.id.localeCompare(right.id) <= 0)
+        ? [leftTargetId, rightTargetId]
+        : [rightTargetId, leftTargetId];
+    const key = `${source}->${target}`;
+    const existing = edgeGroups.get(key);
+    if (existing) {
+      existing.count += 1;
+      existing.kinds.add(kind);
+      return;
+    }
+
+    edgeGroups.set(key, { source, target, count: 1, kinds: new Set([kind]) });
+  };
+
+  for (const edge of attentionEdges) {
+    const fromTargetIds = resolveReviewTargetEndpoint(edge.from, targetIdsByNodeId, targetIdsByFileEndpoint);
+    const toTargetIds = resolveReviewTargetEndpoint(edge.to, targetIdsByNodeId, targetIdsByFileEndpoint);
+    for (const fromTargetId of fromTargetIds) {
+      for (const toTargetId of toTargetIds) {
+        addRelationship(fromTargetId, toTargetId, edge.kind);
+      }
+    }
+  }
+
+  addNeighborhoodRelationships(items, edgeGroups, addRelationship);
+
+  return [...edgeGroups.values()]
+    .sort((left, right) => {
+      return right.count - left.count || left.source.localeCompare(right.source) || left.target.localeCompare(right.target);
+    })
+    .slice(0, 900);
+}
+
+function buildReviewTargetRelationshipEdges(
+  groups: ReviewTargetRelationshipGroup[],
+  positionsById: Map<string, ReviewTargetNodeLayout>,
+  selectedTargetId: string | null,
+  targetCount: number,
+) {
+  const selectedNeighborIds = getReviewTargetNeighborIds(groups, selectedTargetId);
+  const visibleGroups = getVisibleReviewTargetRelationshipGroups(groups, selectedTargetId, selectedNeighborIds, targetCount);
+
+  return visibleGroups.map((group) => {
+    const selected = group.source === selectedTargetId || group.target === selectedTargetId;
+    const nearSelected =
+      Boolean(selectedTargetId) && (selectedNeighborIds.has(group.source) || selectedNeighborIds.has(group.target));
+    const background = Boolean(selectedTargetId) && !selected && !nearSelected;
+    const direct = [...group.kinds].some((kind) => kind !== "module-neighborhood" && kind !== "path-neighborhood");
+    const moduleOnly = !direct && group.kinds.has("module-neighborhood");
+    const pathOnly = !direct && group.kinds.has("path-neighborhood");
+    const handles = getReviewTargetEdgeHandles(group, positionsById);
+    const opacity = getReviewTargetEdgeOpacity({ background, direct, moduleOnly, nearSelected, selected });
+    const width = getReviewTargetEdgeWidth({ count: group.count, background, direct, moduleOnly, nearSelected, selected });
+
+    return {
+      id: `target-edge:${group.source}:${group.target}`,
+      source: group.source,
+      sourceHandle: handles.sourceHandle,
+      target: group.target,
+      targetHandle: handles.targetHandle,
+      animated: selected,
+      interactionWidth: 18,
+      type: "default",
+      zIndex: selected ? 2 : nearSelected ? 1 : 0,
+      label: selected && group.count > 1 ? String(group.count) : undefined,
+      labelStyle: { fill: selected ? "hsl(var(--primary))" : "hsl(var(--muted-foreground))", fontSize: 10, fontWeight: 650 },
+      labelBgBorderRadius: 4,
+      labelBgPadding: [4, 2],
+      labelBgStyle: { fill: "hsl(var(--background))", fillOpacity: 0.92 },
+      style: {
+        stroke: selected
+          ? "hsl(var(--primary))"
+          : background
+            ? "hsl(var(--muted-foreground))"
+            : direct
+              ? "hsl(var(--primary) / 0.58)"
+            : moduleOnly
+              ? "hsl(42 92% 50%)"
+              : "hsl(var(--muted-foreground))",
+        strokeDasharray: pathOnly ? "2 8" : moduleOnly ? "6 6" : undefined,
+        strokeLinecap: "round",
+        strokeOpacity: opacity,
+        strokeWidth: width,
+      },
+    } satisfies Edge;
+  });
+}
+
+function getVisibleReviewTargetRelationshipGroups(
+  groups: ReviewTargetRelationshipGroup[],
+  selectedTargetId: string | null,
+  selectedNeighborIds: Set<string>,
+  targetCount: number,
+) {
+  if (targetCount <= 120 || groups.length <= 360) {
+    return groups;
+  }
+
+  if (!selectedTargetId) {
+    return groups.slice(0, getDenseReviewTargetEdgeBudget(targetCount, false));
+  }
+
+  const selectedGroups: ReviewTargetRelationshipGroup[] = [];
+  const nearSelectedGroups: ReviewTargetRelationshipGroup[] = [];
+  const backgroundGroups: ReviewTargetRelationshipGroup[] = [];
+  for (const group of groups) {
+    if (group.source === selectedTargetId || group.target === selectedTargetId) {
+      selectedGroups.push(group);
+      continue;
+    }
+    if (selectedNeighborIds.has(group.source) || selectedNeighborIds.has(group.target)) {
+      nearSelectedGroups.push(group);
+      continue;
+    }
+    backgroundGroups.push(group);
+  }
+
+  const budget = getDenseReviewTargetEdgeBudget(targetCount, true);
+  const selectedBudgetRemaining = Math.max(0, budget - selectedGroups.length);
+  const nearBudget = Math.min(nearSelectedGroups.length, Math.max(120, Math.floor(selectedBudgetRemaining * 0.72)));
+  const backgroundBudget = Math.max(0, budget - selectedGroups.length - nearBudget);
+
+  return [
+    ...selectedGroups,
+    ...nearSelectedGroups.slice(0, nearBudget),
+    ...backgroundGroups.slice(0, backgroundBudget),
+  ];
+}
+
+function getDenseReviewTargetEdgeBudget(targetCount: number, selected: boolean) {
+  if (targetCount > 260) {
+    return selected ? 260 : 320;
+  }
+  return selected ? 300 : 360;
+}
+
+function getReviewTargetNeighborIds(groups: ReviewTargetRelationshipGroup[], selectedTargetId: string | null) {
+  const neighbors = new Set<string>();
+  if (!selectedTargetId) {
+    return neighbors;
+  }
+
+  neighbors.add(selectedTargetId);
+  for (const group of groups) {
+    if (group.source === selectedTargetId) {
+      neighbors.add(group.target);
+    }
+    if (group.target === selectedTargetId) {
+      neighbors.add(group.source);
+    }
+  }
+
+  return neighbors;
+}
+
+function getReviewTargetEdgeOpacity({
+  background,
+  direct,
+  moduleOnly,
+  nearSelected,
+  selected,
+}: {
+  background: boolean;
+  direct: boolean;
+  moduleOnly: boolean;
+  nearSelected: boolean;
+  selected: boolean;
+}) {
+  if (selected) {
+    return 0.92;
+  }
+  if (background) {
+    return direct ? 0.12 : moduleOnly ? 0.09 : 0.07;
+  }
+  if (nearSelected) {
+    return direct ? 0.34 : moduleOnly ? 0.24 : 0.18;
+  }
+  return direct ? 0.44 : moduleOnly ? 0.28 : 0.18;
+}
+
+function getReviewTargetEdgeWidth({
+  background,
+  count,
+  direct,
+  moduleOnly,
+  nearSelected,
+  selected,
+}: {
+  background: boolean;
+  count: number;
+  direct: boolean;
+  moduleOnly: boolean;
+  nearSelected: boolean;
+  selected: boolean;
+}) {
+  if (selected) {
+    return 2.6;
+  }
+  if (background) {
+    return 0.9;
+  }
+  if (nearSelected) {
+    return direct ? Math.min(1.9, 1 + count * 0.1) : moduleOnly ? 1.3 : 1;
+  }
+  return direct ? Math.min(2.1, 1.1 + count * 0.12) : moduleOnly ? 1.5 : 1.1;
+}
+
+type ReviewTargetLayoutItem = {
+  item: ReviewPathItem;
+  compact: boolean;
+};
+type ReviewTargetNodeLayout = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+type ReviewTargetSimulationNode = SimulationNodeDatum & {
+  id: string;
+  order: number;
+  compact: boolean;
+  width: number;
+  height: number;
+  radius: number;
+  clusterX: number;
+  clusterY: number;
+};
+type ReviewTargetSimulationLink = SimulationLinkDatum<ReviewTargetSimulationNode> & {
+  count: number;
+  direct: boolean;
+};
+
+const reviewTargetFullNodeSize = { width: 256, height: 112 };
+const reviewTargetCompactNodeSize = { width: 160, height: 44 };
+const reviewTargetLayoutMargin = 120;
+
+function layoutReviewTargetNodes(
+  layoutItems: ReviewTargetLayoutItem[],
+  relationshipGroups: ReviewTargetRelationshipGroup[],
+): Map<string, ReviewTargetNodeLayout> {
+  if (layoutItems.length === 0) {
+    return new Map();
+  }
+
+  const visibleIds = new Set(layoutItems.map(({ item }) => item.id));
+  const components = buildReviewTargetLayoutComponents(layoutItems, relationshipGroups);
+  const componentByTargetId = new Map<string, number>();
+  const targetIndexInComponent = new Map<string, number>();
+  components.forEach((component, componentIndex) => {
+    component.ids.forEach((targetId, index) => {
+      componentByTargetId.set(targetId, componentIndex);
+      targetIndexInComponent.set(targetId, index);
+    });
+  });
+  const componentCenters = getReviewTargetComponentCenters(components);
+  const neighborhoodCenters = getReviewTargetNeighborhoodCenters(layoutItems, components, componentCenters);
+  const nodes: ReviewTargetSimulationNode[] = layoutItems.map(({ item, compact }) => {
+    const size = compact ? reviewTargetCompactNodeSize : reviewTargetFullNodeSize;
+    const componentIndex = componentByTargetId.get(item.id) ?? 0;
+    const component = components[componentIndex];
+    const componentCenter = componentCenters.get(componentIndex) ?? { x: 0, y: 0 };
+    const neighborhoodKey = getReviewTargetNeighborhoodKey(item.target) ?? getReviewTargetBroadNeighborhoodKey(item.target) ?? item.target.modulePath;
+    const clusterCenter = neighborhoodCenters.get(`${componentIndex}:${neighborhoodKey}`) ?? componentCenter;
+    const localIndex = targetIndexInComponent.get(item.id) ?? 0;
+    const localRadius = Math.max(140, Math.sqrt(component?.ids.length ?? 1) * 56);
+    const angle = localIndex * 2.399963229728653;
+
+    return {
+      id: item.id,
+      order: item.order,
+      compact,
+      width: size.width,
+      height: size.height,
+      radius: Math.hypot(size.width, size.height) / 2 + (compact ? 36 : 58),
+      clusterX: clusterCenter.x,
+      clusterY: clusterCenter.y,
+      x: clusterCenter.x + Math.cos(angle) * localRadius,
+      y: clusterCenter.y + Math.sin(angle) * localRadius,
+    };
+  });
+  const links: ReviewTargetSimulationLink[] = relationshipGroups
+    .filter((group) => visibleIds.has(group.source) && visibleIds.has(group.target))
+    .map((group) => ({
+      source: group.source,
+      target: group.target,
+      count: group.count,
+      direct: [...group.kinds].some((kind) => kind !== "module-neighborhood" && kind !== "path-neighborhood"),
+    }));
+
+  forceSimulation<ReviewTargetSimulationNode>(nodes)
+    .stop()
+    .force(
+      "link",
+      forceLink<ReviewTargetSimulationNode, ReviewTargetSimulationLink>(links)
+        .id((node) => node.id)
+        .distance((link) => (link.direct ? 230 : 300))
+        .strength((link) => Math.min(0.36, link.direct ? 0.14 + link.count * 0.02 : 0.08)),
+    )
+    .force("charge", forceManyBody<ReviewTargetSimulationNode>().strength((node) => (node.compact ? -260 : -640)).theta(0.85))
+    .force("collision", forceCollide<ReviewTargetSimulationNode>().radius((node) => node.radius).strength(0.96).iterations(3))
+    .force("x", forceX<ReviewTargetSimulationNode>((node) => node.clusterX).strength(0.045))
+    .force("y", forceY<ReviewTargetSimulationNode>((node) => node.clusterY).strength(0.045))
+    .alpha(1)
+    .alphaDecay(getReviewTargetLayoutAlphaDecay(layoutItems.length))
+    .velocityDecay(0.36)
+    .tick(getReviewTargetLayoutIterations(layoutItems.length));
+
+  return normalizeReviewTargetLayout(nodes);
+}
+
+function buildReviewTargetLayoutComponents(layoutItems: ReviewTargetLayoutItem[], relationshipGroups: ReviewTargetRelationshipGroup[]) {
+  const ids = layoutItems.map(({ item }) => item.id);
+  const idSet = new Set(ids);
+  const adjacency = new Map(ids.map((id) => [id, new Set<string>()]));
+  for (const group of relationshipGroups) {
+    if (!idSet.has(group.source) || !idSet.has(group.target)) {
+      continue;
+    }
+    adjacency.get(group.source)?.add(group.target);
+    adjacency.get(group.target)?.add(group.source);
+  }
+
+  const itemById = new Map(layoutItems.map(({ item }) => [item.id, item]));
+  const visited = new Set<string>();
+  const components: Array<{ ids: string[]; minOrder: number }> = [];
+  for (const id of ids) {
+    if (visited.has(id)) {
+      continue;
+    }
+
+    const queue = [id];
+    const componentIds: string[] = [];
+    visited.add(id);
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current) {
+        continue;
+      }
+      componentIds.push(current);
+      for (const next of adjacency.get(current) ?? []) {
+        if (!visited.has(next)) {
+          visited.add(next);
+          queue.push(next);
+        }
+      }
+    }
+
+    componentIds.sort((left, right) => (itemById.get(left)?.order ?? 0) - (itemById.get(right)?.order ?? 0) || left.localeCompare(right));
+    components.push({
+      ids: componentIds,
+      minOrder: Math.min(...componentIds.map((targetId) => itemById.get(targetId)?.order ?? Number.MAX_SAFE_INTEGER)),
+    });
+  }
+
+  return components.sort((left, right) => left.minOrder - right.minOrder || right.ids.length - left.ids.length);
+}
+
+function getReviewTargetComponentCenters(components: Array<{ ids: string[]; minOrder: number }>) {
+  const centers = new Map<number, { x: number; y: number }>();
+  let cursorX = 0;
+  let cursorY = 0;
+  let rowHeight = 0;
+  const maxRowWidth = 3600;
+
+  components.forEach((component, index) => {
+    const width = Math.max(520, Math.ceil(Math.sqrt(component.ids.length)) * 280);
+    const height = Math.max(360, Math.ceil(component.ids.length / Math.max(1, Math.ceil(Math.sqrt(component.ids.length)))) * 190);
+    if (cursorX > 0 && cursorX + width > maxRowWidth) {
+      cursorX = 0;
+      cursorY += rowHeight + 320;
+      rowHeight = 0;
+    }
+
+    centers.set(index, {
+      x: cursorX + width / 2,
+      y: cursorY + height / 2,
+    });
+    cursorX += width + 280;
+    rowHeight = Math.max(rowHeight, height);
+  });
+
+  return centers;
+}
+
+function getReviewTargetNeighborhoodCenters(
+  layoutItems: ReviewTargetLayoutItem[],
+  components: Array<{ ids: string[]; minOrder: number }>,
+  componentCenters: Map<number, { x: number; y: number }>,
+) {
+  const itemById = new Map(layoutItems.map(({ item }) => [item.id, item]));
+  const centers = new Map<string, { x: number; y: number }>();
+
+  components.forEach((component, componentIndex) => {
+    const componentCenter = componentCenters.get(componentIndex) ?? { x: 0, y: 0 };
+    const keys = [
+      ...new Set(
+        component.ids.map((targetId) => {
+          const target = itemById.get(targetId)?.target;
+          return target ? getReviewTargetNeighborhoodKey(target) ?? getReviewTargetBroadNeighborhoodKey(target) ?? target.modulePath : "unknown";
+        }),
+      ),
+    ].sort((left, right) => left.localeCompare(right));
+    const ringRadius = Math.max(190, Math.sqrt(keys.length) * 170);
+
+    keys.forEach((key, index) => {
+      const angle = keys.length === 1 ? 0 : (index / keys.length) * Math.PI * 2 - Math.PI / 2;
+      centers.set(`${componentIndex}:${key}`, {
+        x: componentCenter.x + Math.cos(angle) * ringRadius,
+        y: componentCenter.y + Math.sin(angle) * ringRadius,
+      });
+    });
+  });
+
+  return centers;
+}
+
+function normalizeReviewTargetLayout(nodes: ReviewTargetSimulationNode[]) {
+  const minX = Math.min(...nodes.map((node) => (node.x ?? 0) - node.width / 2));
+  const minY = Math.min(...nodes.map((node) => (node.y ?? 0) - node.height / 2));
+  return new Map(
+    nodes.map((node) => [
+      node.id,
+      {
+        x: (node.x ?? 0) - node.width / 2 - minX + reviewTargetLayoutMargin,
+        y: (node.y ?? 0) - node.height / 2 - minY + reviewTargetLayoutMargin,
+        width: node.width,
+        height: node.height,
+      },
+    ]),
+  );
+}
+
+function getReviewTargetEdgeHandles(group: ReviewTargetRelationshipGroup, positionsById: Map<string, ReviewTargetNodeLayout>) {
+  const source = positionsById.get(group.source);
+  const target = positionsById.get(group.target);
+  if (!source || !target) {
+    return { sourceHandle: "source-bottom", targetHandle: "target-top" };
+  }
+
+  const sourceCenter = { x: source.x + source.width / 2, y: source.y + source.height / 2 };
+  const targetCenter = { x: target.x + target.width / 2, y: target.y + target.height / 2 };
+  const deltaX = targetCenter.x - sourceCenter.x;
+  const deltaY = targetCenter.y - sourceCenter.y;
+  if (Math.abs(deltaX) > Math.abs(deltaY)) {
+    return deltaX > 0
+      ? { sourceHandle: "source-right", targetHandle: "target-left" }
+      : { sourceHandle: "source-left", targetHandle: "target-right" };
+  }
+
+  return deltaY > 0
+    ? { sourceHandle: "source-bottom", targetHandle: "target-top" }
+    : { sourceHandle: "source-top", targetHandle: "target-bottom" };
+}
+
+function getReviewTargetLayoutIterations(count: number) {
+  if (count <= 80) {
+    return 280;
+  }
+  if (count <= 320) {
+    return 220;
+  }
+  if (count <= 800) {
+    return 160;
+  }
+  return 120;
+}
+
+function getReviewTargetLayoutAlphaDecay(count: number) {
+  if (count <= 320) {
+    return 0.018;
+  }
+  return 0.026;
+}
+
+function resolveReviewTargetEndpoint(
+  endpointId: string,
+  targetIdsByNodeId: Map<string, Set<string>>,
+  targetIdsByFileEndpoint: Map<string, Set<string>>,
+) {
+  const nodeTargets = targetIdsByNodeId.get(endpointId);
+  if (nodeTargets && nodeTargets.size > 0) {
+    return [...nodeTargets];
+  }
+
+  const fileTargets = targetIdsByFileEndpoint.get(endpointId);
+  if (fileTargets && fileTargets.size > 0) {
+    return [...fileTargets];
+  }
+
+  return [];
+}
+
+function addNeighborhoodRelationships(
+  items: ReviewPathItem[],
+  edgeGroups: Map<string, ReviewTargetRelationshipGroup>,
+  addRelationship: (leftTargetId: string, rightTargetId: string, kind: ReviewTargetRelationshipKind) => void,
+) {
+  const exactGroups = new Map<string, ReviewPathItem[]>();
+  const broadGroups = new Map<string, ReviewPathItem[]>();
+  for (const item of items) {
+    const key = getReviewTargetNeighborhoodKey(item.target);
+    if (key) {
+      exactGroups.set(key, [...(exactGroups.get(key) ?? []), item]);
+    }
+
+    const broadKey = getReviewTargetBroadNeighborhoodKey(item.target);
+    if (broadKey) {
+      broadGroups.set(broadKey, [...(broadGroups.get(broadKey) ?? []), item]);
+    }
+  }
+
+  const maxFallbackEdges = Math.min(700, items.length * 3);
+  let fallbackEdges = 0;
+  fallbackEdges += addGroupedNeighborEdges({
+    edgeGroups,
+    groups: exactGroups,
+    kind: "module-neighborhood",
+    maxEdges: maxFallbackEdges - fallbackEdges,
+    neighborsPerTarget: 2,
+    addRelationship,
+  });
+
+  addGroupedNeighborEdges({
+    edgeGroups,
+    groups: broadGroups,
+    kind: "path-neighborhood",
+    maxEdges: Math.max(0, maxFallbackEdges - fallbackEdges),
+    neighborsPerTarget: 1,
+    addRelationship,
+  });
+}
+
+function addGroupedNeighborEdges({
+  addRelationship,
+  edgeGroups,
+  groups,
+  kind,
+  maxEdges,
+  neighborsPerTarget,
+}: {
+  addRelationship: (leftTargetId: string, rightTargetId: string, kind: ReviewTargetRelationshipKind) => void;
+  edgeGroups: Map<string, ReviewTargetRelationshipGroup>;
+  groups: Map<string, ReviewPathItem[]>;
+  kind: "module-neighborhood" | "path-neighborhood";
+  maxEdges: number;
+  neighborsPerTarget: number;
+}) {
+  let added = 0;
+
+  for (const [, groupItems] of [...groups.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    if (added >= maxEdges || groupItems.length < 2) {
+      continue;
+    }
+
+    const sortedItems = [...groupItems].sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
+    for (let index = 0; index < sortedItems.length - 1 && added < maxEdges; index += 1) {
+      for (let offset = 1; offset <= neighborsPerTarget && index + offset < sortedItems.length && added < maxEdges; offset += 1) {
+        const left = sortedItems[index];
+        const right = sortedItems[index + offset];
+        const pairKey =
+          left.order < right.order || (left.order === right.order && left.id.localeCompare(right.id) <= 0)
+            ? `${left.id}->${right.id}`
+            : `${right.id}->${left.id}`;
+        if (edgeGroups.has(pairKey)) {
+          continue;
+        }
+        addRelationship(left.id, right.id, kind);
+        added += 1;
+      }
+    }
+  }
+
+  return added;
+}
+
+function getReviewTargetNeighborhoodKey(target: ReviewPathItem["target"]) {
+  if (target.modulePath && target.modulePath !== "Generated Cluster" && target.modulePath !== "Unknown module") {
+    const parts = target.modulePath.split("/").filter(Boolean);
+    return parts.length > 5 ? parts.slice(0, 5).join("/") : target.modulePath;
+  }
+
+  const firstPath = target.paths[0];
+  if (!firstPath) {
+    return null;
+  }
+
+  const parts = firstPath.split("/").filter(Boolean);
+  return parts.length > 1 ? parts.slice(0, Math.min(parts.length - 1, 5)).join("/") : parts[0];
+}
+
+function getReviewTargetBroadNeighborhoodKey(target: ReviewPathItem["target"]) {
+  const anchor = target.modulePath && target.modulePath !== "Generated Cluster" && target.modulePath !== "Unknown module"
+    ? target.modulePath
+    : target.paths[0];
+  if (!anchor) {
+    return null;
+  }
+
+  const parts = anchor.split("/").filter(Boolean);
+  if (parts.length === 0) {
+    return null;
+  }
+  if (parts[0] === "apps" && parts.length >= 3) {
+    return parts.slice(0, 3).join("/");
+  }
+  if (parts[0] === "packages" && parts.length >= 2) {
+    return parts.slice(0, 2).join("/");
+  }
+  return parts[0];
+}
+
+function addMapSetValue<Key, Value>(map: Map<Key, Set<Value>>, key: Key, value: Value) {
+  const existing = map.get(key);
+  if (existing) {
+    existing.add(value);
+    return;
+  }
+
+  map.set(key, new Set([value]));
+}
+
+function buildReviewTargetNodeData(
+  item: ReviewPathItem,
+  compact: boolean,
+  reviewed: boolean,
+  needsReReview: boolean,
+): ReviewTargetNodeData {
+  return {
+    order: item.order,
+    title: item.target.title,
+    primaryLabel: getReviewTargetPrimaryLabel(item.target),
+    scopeLabel: getReviewTargetScopeLabel(item.target),
+    kindLabel: getReviewTargetKindLabel(item.target),
+    hotspotScore: item.hotspotScore,
+    fileCount: item.target.size.files,
+    changedLines: item.target.size.changedLines,
+    threadCount: item.target.size.reviewThreads,
+    compact,
+    reviewed,
+    needsReReview,
+  };
+}
+
+function getReviewTargetPrimaryLabel(target: ReviewPathItem["target"]) {
+  if (target.kind === "generated-cluster") {
+    return target.modulePath === "Generated Cluster" ? "Generated cluster" : getPathTail(target.modulePath, 2);
+  }
+  if (target.filePath) {
+    return target.filePath.split("/").at(-1) ?? target.filePath;
+  }
+  const firstPath = target.paths[0];
+  if (firstPath) {
+    return getPathTail(firstPath, 2);
+  }
+  return target.title.replace(/\s+(grouped|hunk)\s+review$/i, "");
+}
+
+function getReviewTargetScopeLabel(target: ReviewPathItem["target"]) {
+  if (target.filePath) {
+    const directory = target.filePath.split("/").slice(0, -1).join("/");
+    return directory || target.filePath;
+  }
+  if (target.paths.length > 1) {
+    return `${getPathTail(target.modulePath, 3)} · ${target.paths.length} files`;
+  }
+  return target.modulePath || target.title;
+}
+
+function getReviewTargetKindLabel(target: ReviewPathItem["target"]) {
+  if (target.kind === "generated-cluster") {
+    return "Cluster";
+  }
+  if (target.kind === "thread-group") {
+    return "Thread";
+  }
+  if (target.fallback && target.filePath && target.size.nodes > 1) {
+    return "File";
+  }
+  return target.fallback ? "Hunk" : "Symbol";
+}
+
+function getReviewTargetScoreLabel(score: number) {
+  return `Score ${score}`;
+}
+
+function getPathTail(path: string, parts: number) {
+  const segments = path.split("/").filter(Boolean);
+  return segments.slice(-parts).join("/") || path;
 }
 
 function getDiffLineClass(kind: DiffLine["kind"]) {
@@ -672,6 +1569,16 @@ function getDiffPrefix(kind: DiffLine["kind"]) {
     return "-";
   }
   return " ";
+}
+
+function getDiffLineReviewAnchor(filePath: string, line: DiffLine, anchors: ReviewThreadLineAnchor[]) {
+  const side = line.kind === "deletion" ? "LEFT" : "RIGHT";
+  const lineNumber = line.kind === "deletion" ? line.oldLine : line.newLine;
+  if (lineNumber === null) {
+    return null;
+  }
+
+  return anchors.find((anchor) => anchor.path === filePath && anchor.side === side && anchor.line === lineNumber) ?? null;
 }
 
 function getDiffThreadAnchorKey(diffState: { filePath: string; hunks: { id: string; loaded: boolean; lines: DiffLine[] }[] }, thread: CachedReviewThread | null) {
@@ -927,110 +1834,125 @@ function ReviewTargetInspector({
             </Button>
           </div>
 
-          <div className="space-y-2" aria-label="Review Target review threads">
-            <h3 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Review Threads</h3>
-            {model.reviewThreads.length > 0 ? (
-              <div className="space-y-2">
-                {model.reviewThreads.slice(0, 4).map((thread) => {
-                  const origin = getReviewThreadOrigin(thread);
-                  return (
-                    <div
-                      className={cn(
-                        "rounded-md border border-border bg-background p-2 text-xs",
-                        thread.state === "outdated" && "border-amber-500/50 bg-amber-500/10",
-                      )}
-                      key={thread.id}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate font-semibold">{getThreadTitle(thread.body)}</p>
-                          <p className="mt-1 truncate font-mono text-muted-foreground">
-                            {thread.filePath}
-                            {thread.line !== null ? `:${thread.line}` : " · file"}
-                          </p>
-                        </div>
-                        <div className="flex shrink-0 flex-wrap justify-end gap-1">
-                          <Badge variant={origin === "coderabbit" ? "warning" : "info"}>
-                            {origin === "coderabbit" ? "CodeRabbit" : "Human"}
-                          </Badge>
-                          <Badge variant={thread.state === "outdated" ? "warning" : "muted"}>
-                            {getThreadStateLabel(thread.state)}
-                          </Badge>
-                        </div>
-                      </div>
-                      <p className="mt-2 line-clamp-2 text-muted-foreground">{stripMarkdownPreview(thread.body, 160)}</p>
-                    </div>
-                  );
-                })}
-                {model.reviewThreads.length > 4 && (
-                  <p className="text-xs text-muted-foreground">
-                    {model.reviewThreads.length - 4} more Review Thread{model.reviewThreads.length - 4 === 1 ? "" : "s"} attached.
-                  </p>
-                )}
-              </div>
-            ) : (
-              <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">
-                No GitHub Review Threads are attached to this target.
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-2" aria-label="Review Target changed context">
-            <h3 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Changed Context</h3>
-            {model.changedContexts.length > 0 ? (
-              model.changedContexts.slice(0, 3).map((context) => (
-                <div className="overflow-hidden rounded-md border border-border bg-background" key={context.id}>
-                  <div className="border-b border-border px-2 py-1">
-                    <p className="truncate font-mono text-xs text-muted-foreground">{context.title}</p>
-                  </div>
-                  <div className="diff-code-grid max-h-52 overflow-auto font-mono text-xs">
-                    {context.lines.slice(0, 18).map((line, index) => (
+          <details className="rounded-md border border-border bg-background/70 p-2" aria-label="Review Target review threads">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-semibold uppercase tracking-normal text-muted-foreground">
+              <span>Review Threads</span>
+              <Badge variant={model.reviewThreads.length > 0 ? "info" : "muted"}>{model.reviewThreads.length}</Badge>
+            </summary>
+            <div className="mt-2 space-y-2">
+              {model.reviewThreads.length > 0 ? (
+                <div className="space-y-2">
+                  {model.reviewThreads.slice(0, 4).map((thread) => {
+                    const origin = getReviewThreadOrigin(thread);
+                    return (
                       <div
-                        className={cn("diff-row grid grid-cols-[42px_18px_minmax(0,1fr)] border-t first:border-t-0", getDiffLineClass(line.kind))}
-                        key={`${context.id}:${index}`}
+                        className={cn(
+                          "rounded-md border border-border bg-background p-2 text-xs",
+                          thread.state === "outdated" && "border-amber-500/50 bg-amber-500/10",
+                        )}
+                        key={thread.id}
                       >
-                        <div className="px-1 py-1 text-right text-muted-foreground">{line.newLine ?? line.oldLine ?? ""}</div>
-                        <div className="diff-marker px-1 py-1 text-center">{getDiffPrefix(line.kind)}</div>
-                        <div className="diff-code-cell min-w-0 py-1 pl-2 pr-3">
-                          <DiffCodeLine line={line} />
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate font-semibold">{getThreadTitle(thread.body)}</p>
+                            <p className="mt-1 truncate font-mono text-muted-foreground">
+                              {thread.filePath}
+                              {thread.line !== null ? `:${thread.line}` : " · file"}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                            <Badge variant={origin === "coderabbit" ? "warning" : "info"}>
+                              {origin === "coderabbit" ? "CodeRabbit" : "Human"}
+                            </Badge>
+                            <Badge variant={thread.state === "outdated" ? "warning" : "muted"}>
+                              {getThreadStateLabel(thread.state)}
+                            </Badge>
+                          </div>
                         </div>
+                        <p className="mt-2 line-clamp-2 text-muted-foreground">{stripMarkdownPreview(thread.body, 160)}</p>
                       </div>
-                    ))}
-                  </div>
+                    );
+                  })}
+                  {model.reviewThreads.length > 4 && (
+                    <p className="text-xs text-muted-foreground">
+                      {model.reviewThreads.length - 4} more Review Thread{model.reviewThreads.length - 4 === 1 ? "" : "s"} attached.
+                    </p>
+                  )}
                 </div>
-              ))
-            ) : (
-              <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">
-                No changed hunk context is available for this target.
-              </p>
-            )}
-          </div>
+              ) : (
+                <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">
+                  No GitHub Review Threads are attached to this target.
+                </p>
+              )}
+            </div>
+          </details>
 
-          <div className="space-y-2" aria-label="Review Target head version">
-            <h3 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Head Version</h3>
-            {model.headContexts.slice(0, 3).map((context) => (
-              <div className="overflow-hidden rounded-md border border-border bg-background" key={context.id}>
-                <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1">
-                  <p className="min-w-0 truncate font-mono text-xs text-muted-foreground">{context.title}</p>
-                  <Badge variant={context.source === "head-symbol" ? "success" : "warning"}>
-                    {context.source === "head-symbol" ? "Head" : "Fallback"}
-                  </Badge>
-                </div>
-                {context.lines.length > 0 ? (
-                  <div className="max-h-52 overflow-auto font-mono text-xs">
-                    {context.lines.slice(0, 24).map((line) => (
-                      <div className="grid grid-cols-[42px_minmax(0,1fr)] border-t first:border-t-0" key={`${context.id}:${line.lineNumber}`}>
-                        <div className="bg-muted/60 px-1 py-1 text-right text-muted-foreground">{line.lineNumber}</div>
-                        <pre className="min-w-0 overflow-x-auto px-2 py-1 text-foreground">{line.content || " "}</pre>
-                      </div>
-                    ))}
+          <details className="rounded-md border border-border bg-background/70 p-2" aria-label="Review Target changed context">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-semibold uppercase tracking-normal text-muted-foreground">
+              <span>Changed Context</span>
+              <Badge variant={model.changedContexts.length > 0 ? "info" : "muted"}>{model.changedContexts.length}</Badge>
+            </summary>
+            <div className="mt-2 space-y-2">
+              {model.changedContexts.length > 0 ? (
+                model.changedContexts.slice(0, 3).map((context) => (
+                  <div className="overflow-hidden rounded-md border border-border bg-background" key={context.id}>
+                    <div className="border-b border-border px-2 py-1">
+                      <p className="truncate font-mono text-xs text-muted-foreground">{context.title}</p>
+                    </div>
+                    <div className="diff-code-grid max-h-52 overflow-auto font-mono text-xs">
+                      {context.lines.slice(0, 18).map((line, index) => (
+                        <div
+                          className={cn("diff-row grid grid-cols-[42px_18px_minmax(0,1fr)] border-t first:border-t-0", getDiffLineClass(line.kind))}
+                          key={`${context.id}:${index}`}
+                        >
+                          <div className="px-1 py-1 text-right text-muted-foreground">{line.newLine ?? line.oldLine ?? ""}</div>
+                          <div className="diff-marker px-1 py-1 text-center">{getDiffPrefix(line.kind)}</div>
+                          <div className="diff-code-cell min-w-0 py-1 pl-2 pr-3">
+                            <DiffCodeLine line={line} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                ) : (
-                  <p className="p-2 text-xs text-muted-foreground">{context.message}</p>
-                )}
-              </div>
-            ))}
-          </div>
+                ))
+              ) : (
+                <p className="rounded-md border border-dashed border-border p-2 text-xs text-muted-foreground">
+                  No changed hunk context is available for this target.
+                </p>
+              )}
+            </div>
+          </details>
+
+          <details className="rounded-md border border-border bg-background/70 p-2" aria-label="Review Target head version">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-semibold uppercase tracking-normal text-muted-foreground">
+              <span>Head Version</span>
+              <Badge variant={model.headContexts.length > 0 ? "info" : "muted"}>{model.headContexts.length}</Badge>
+            </summary>
+            <div className="mt-2 space-y-2">
+              {model.headContexts.slice(0, 3).map((context) => (
+                <div className="overflow-hidden rounded-md border border-border bg-background" key={context.id}>
+                  <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1">
+                    <p className="min-w-0 truncate font-mono text-xs text-muted-foreground">{context.title}</p>
+                    <Badge variant={context.source === "head-symbol" ? "success" : "warning"}>
+                      {context.source === "head-symbol" ? "Head" : "Fallback"}
+                    </Badge>
+                  </div>
+                  {context.lines.length > 0 ? (
+                    <div className="max-h-52 overflow-auto font-mono text-xs">
+                      {context.lines.slice(0, 24).map((line) => (
+                        <div className="grid grid-cols-[42px_minmax(0,1fr)] border-t first:border-t-0" key={`${context.id}:${line.lineNumber}`}>
+                          <div className="bg-muted/60 px-1 py-1 text-right text-muted-foreground">{line.lineNumber}</div>
+                          <pre className="min-w-0 overflow-x-auto px-2 py-1 text-foreground">{line.content || " "}</pre>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="p-2 text-xs text-muted-foreground">{context.message}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </details>
 
           <div className="space-y-2">
             <Button className="w-full justify-between" size="sm" variant="outline" onClick={onToggleBaseComparison}>
@@ -1068,51 +1990,58 @@ function ReviewTargetInspector({
             )}
           </div>
 
-          <div className="space-y-2" aria-label="Review Target related context">
-            <h3 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Related Context</h3>
-            <div className="rounded-md border border-border p-2 text-xs">
-              <p className="font-medium">Context nodes</p>
-              <div className="mt-1 space-y-1 text-muted-foreground">
-                {[...model.nodes, ...model.relatedNodes].slice(0, 6).map((node) => (
-                  <button
-                    className="block w-full truncate rounded px-1 py-0.5 text-left hover:bg-accent"
-                    key={node.id}
-                    onClick={() => onOpenFile(node.filePath)}
-                    type="button"
-                  >
-                    {node.label} · {node.filePath}
-                  </button>
-                ))}
-                {model.nodes.length + model.relatedNodes.length === 0 && <p>No related nodes.</p>}
+          <details className="rounded-md border border-border bg-background/70 p-2" aria-label="Review Target related context">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-semibold uppercase tracking-normal text-muted-foreground">
+              <span>Related Context</span>
+              <Badge variant={model.relatedEdges.length + model.relatedTests.length > 0 ? "info" : "muted"}>
+                {model.relatedEdges.length + model.relatedTests.length}
+              </Badge>
+            </summary>
+            <div className="mt-2 space-y-2">
+              <div className="rounded-md border border-border p-2 text-xs">
+                <p className="font-medium">Context nodes</p>
+                <div className="mt-1 space-y-1 text-muted-foreground">
+                  {[...model.nodes, ...model.relatedNodes].slice(0, 6).map((node) => (
+                    <button
+                      className="block w-full truncate rounded px-1 py-0.5 text-left hover:bg-accent"
+                      key={node.id}
+                      onClick={() => onOpenFile(node.filePath)}
+                      type="button"
+                    >
+                      {node.label} · {node.filePath}
+                    </button>
+                  ))}
+                  {model.nodes.length + model.relatedNodes.length === 0 && <p>No related nodes.</p>}
+                </div>
+              </div>
+              <div className="rounded-md border border-border p-2 text-xs">
+                <p className="font-medium">Edges</p>
+                <div className="mt-1 space-y-1 text-muted-foreground">
+                  {model.relatedEdges.slice(0, 5).map((edge) => (
+                    <p key={edge.id}>{edge.reason}</p>
+                  ))}
+                  {model.relatedEdges.length === 0 && <p>No related edges.</p>}
+                </div>
+              </div>
+              <div className="rounded-md border border-border p-2 text-xs">
+                <p className="font-medium">Tests</p>
+                <div className="mt-1 space-y-1 text-muted-foreground">
+                  {model.relatedTests.map((edge) => (
+                    <p key={edge.id}>{edge.reason}</p>
+                  ))}
+                  {model.relatedTests.length === 0 && <p>No related tests.</p>}
+                </div>
+              </div>
+              <div className="rounded-md border border-border p-2 text-xs">
+                <p className="font-medium">Reasons</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4 text-muted-foreground">
+                  {model.reasons.slice(0, 6).map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
               </div>
             </div>
-            <div className="rounded-md border border-border p-2 text-xs">
-              <p className="font-medium">Edges</p>
-              <div className="mt-1 space-y-1 text-muted-foreground">
-                {model.relatedEdges.slice(0, 5).map((edge) => (
-                  <p key={edge.id}>{edge.reason}</p>
-                ))}
-                {model.relatedEdges.length === 0 && <p>No related edges.</p>}
-              </div>
-            </div>
-            <div className="rounded-md border border-border p-2 text-xs">
-              <p className="font-medium">Tests</p>
-              <div className="mt-1 space-y-1 text-muted-foreground">
-                {model.relatedTests.map((edge) => (
-                  <p key={edge.id}>{edge.reason}</p>
-                ))}
-                {model.relatedTests.length === 0 && <p>No related tests.</p>}
-              </div>
-            </div>
-            <div className="rounded-md border border-border p-2 text-xs">
-              <p className="font-medium">Reasons</p>
-              <ul className="mt-1 list-disc space-y-1 pl-4 text-muted-foreground">
-                {model.reasons.slice(0, 6).map((reason) => (
-                  <li key={reason}>{reason}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
+          </details>
         </div>
       )}
     </section>
@@ -1276,19 +2205,36 @@ function StartReviewThreadPanel({
 
 function InlineReviewThread({
   anchorRef,
+  canResolve,
+  onResolveState,
+  onSelect,
+  onToggleReviewed,
   pathCount,
   pathIndex,
+  resolveBusy,
   stateLabel,
   view,
 }: {
   anchorRef?: Ref<HTMLDivElement>;
+  canResolve: boolean;
+  onResolveState: (view: ReviewThreadView) => void;
+  onSelect: (view: ReviewThreadView) => void;
+  onToggleReviewed: (view: ReviewThreadView) => void;
   pathCount: number;
   pathIndex: number;
+  resolveBusy: boolean;
   stateLabel: string;
   view: ReviewThreadView;
 }) {
+  const resolveLabel = view.thread.state === "resolved" ? "Unresolve" : "Resolve";
+
   return (
-    <div aria-label="Inline review thread" className="diff-inline-thread" ref={anchorRef}>
+    <div
+      aria-label="Inline review thread"
+      className="diff-inline-thread"
+      onClick={() => onSelect(view)}
+      ref={anchorRef}
+    >
       <div className="mb-2 flex items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
           <p className="text-xs font-medium text-muted-foreground">
@@ -1306,6 +2252,32 @@ function InlineReviewThread({
         </div>
       </div>
       <ReviewThreadConversation thread={view.thread} emptyFallback="No review comment body was returned by GitHub." />
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleReviewed(view);
+          }}
+          size="sm"
+          type="button"
+          variant={view.reviewed ? "secondary" : "outline"}
+        >
+          {view.reviewed ? "Mark unreviewed" : "Mark reviewed"}
+        </Button>
+        <Button
+          disabled={!canResolve || resolveBusy || view.thread.state === "outdated"}
+          onClick={(event) => {
+            event.stopPropagation();
+            onResolveState(view);
+          }}
+          size="sm"
+          title={view.thread.state === "outdated" ? "Outdated GitHub threads cannot be resolved from the current diff." : undefined}
+          type="button"
+          variant="outline"
+        >
+          {resolveLabel}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -1615,13 +2587,15 @@ export function App({
   updaterClient,
 }: AppProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
-  const [focusMode, setFocusMode] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [pullRequestDialogOpen, setPullRequestDialogOpen] = useState(false);
   const [pullRequestDialogQuery, setPullRequestDialogQuery] = useState("");
   const [threadDialogOpen, setThreadDialogOpen] = useState(false);
   const [threadDialogQuery, setThreadDialogQuery] = useState("");
+  const [reviewThreadDialogOpen, setReviewThreadDialogOpen] = useState(false);
+  const [startReviewThreadDialogOpen, setStartReviewThreadDialogOpen] = useState(false);
+  const [targetDiffDialogOpen, setTargetDiffDialogOpen] = useState(false);
   const [hotspotsDialogOpen, setHotspotsDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [authSession, setAuthSession] = useState<AuthSession>(checkingSession);
@@ -1670,10 +2644,13 @@ export function App({
   const [newThreadMode, setNewThreadMode] = useState<"line" | "file">("line");
   const [newThreadBody, setNewThreadBody] = useState("");
   const [selectedNewThreadLineAnchorId, setSelectedNewThreadLineAnchorId] = useState("");
+  const [inlineCommentAnchorId, setInlineCommentAnchorId] = useState<string | null>(null);
+  const [hoveredDiffLineAnchorId, setHoveredDiffLineAnchorId] = useState<string | null>(null);
   const [newThreadResult, setNewThreadResult] = useState<ThreadActionResult | null>(null);
   const [newThreadOriginTargetId, setNewThreadOriginTargetId] = useState<string | null>(null);
   const [threadActionBusy, setThreadActionBusy] = useState<ThreadWriteAction | null>(null);
   const [threadActionResult, setThreadActionResult] = useState<ThreadActionResult | null>(null);
+  const [optimisticCreatedReviewThreads, setOptimisticCreatedReviewThreads] = useState<CachedReviewThread[]>([]);
   const [selectedBulkThreadIds, setSelectedBulkThreadIds] = useState<string[]>([]);
   const [bulkUndo, setBulkUndo] = useState<{ message: string; previousReviewed: Record<string, boolean> } | null>(null);
   const [bulkActionResult, setBulkActionResult] = useState<{
@@ -1700,6 +2677,7 @@ export function App({
   const checkRefreshInFlightKeyRef = useRef<string | null>(null);
   const reviewCanvasScrollRef = useRef<HTMLDivElement | null>(null);
   const activeInlineThreadRef = useRef<HTMLDivElement | null>(null);
+  const inlineCommentBodyRef = useRef<HTMLTextAreaElement | null>(null);
   const [privacyMessage, setPrivacyMessage] = useState<string | null>(null);
   const [diagnosticsPreview, setDiagnosticsPreview] = useState<DiagnosticsPreview | null>(null);
   const [diagnosticsCopyMessage, setDiagnosticsCopyMessage] = useState<string | null>(null);
@@ -1773,13 +2751,28 @@ export function App({
   const analysisInputBadge = getAnalysisInputBadge(
     selectedAnalysisInputBusy ? "preparing" : selectedAnalysisInputStatus.state,
   );
-  const selectedCacheEntry = activePullRequestKey ? readCacheStore().entries[activePullRequestKey] : null;
+  const cacheStore = useMemo(() => readCacheStore(), [cacheSummary]);
+  const selectedCacheEntry = activePullRequestKey ? cacheStore.entries[activePullRequestKey] : null;
   const selectedPullRequestPinned = selectedCacheEntry?.pinned ?? false;
   const selectedPullRequestLoadingData =
     activePullRequestKey !== null &&
     pullRequestDataStatus.key === activePullRequestKey &&
     pullRequestDataStatus.state === "loading";
-  const reviewOverviewCache = createOverviewCache(selectedPullRequest, selectedCacheEntry ?? undefined);
+  const reviewOverviewCache = useMemo(
+    () => createOverviewCache(selectedPullRequest, selectedCacheEntry ?? undefined),
+    [selectedCacheEntry, selectedPullRequest],
+  );
+  const effectiveReviewThreads = useMemo(() => {
+    const threadsById = new Map<string, CachedReviewThread>();
+    for (const thread of reviewOverviewCache.reviewThreads) {
+      threadsById.set(thread.id, thread);
+    }
+    for (const thread of optimisticCreatedReviewThreads) {
+      threadsById.set(thread.id, thread);
+    }
+
+    return [...threadsById.values()];
+  }, [optimisticCreatedReviewThreads, reviewOverviewCache.reviewThreads]);
   const selectedAnalysisFileContents = activePullRequestKey ? analysisFileContents[activePullRequestKey] : null;
   const analysisIndex: AnalysisIndex = useMemo(
     () =>
@@ -1804,10 +2797,14 @@ export function App({
     reviewOverviewCache.rateLimit.remaining === 0
       ? `GitHub rate limit reached${reviewOverviewCache.rateLimit.resetEpochSeconds ? ` until ${reviewOverviewCache.rateLimit.resetEpochSeconds}` : ""}. Cached partial data stays visible.`
       : null;
-  const reviewOverview = buildReviewOverview(
-    reviewOverviewCache,
-    repositoryHotspotOverrides[selectedPullRequest.repository],
-    analysisIndex,
+  const reviewOverview = useMemo(
+    () =>
+      buildReviewOverview(
+        reviewOverviewCache,
+        repositoryHotspotOverrides[selectedPullRequest.repository],
+        analysisIndex,
+      ),
+    [analysisIndex, reviewOverviewCache, repositoryHotspotOverrides, selectedPullRequest.repository],
   );
   const reviewTargets = useMemo(
     () =>
@@ -1845,12 +2842,12 @@ export function App({
         pullRequest: selectedPullRequest,
         files: reviewOverviewCache.fileSummaries,
         fileContents: selectedAnalysisFileContents?.files ?? [],
-        reviewThreads: reviewOverviewCache.reviewThreads,
+        reviewThreads: effectiveReviewThreads,
       }),
     [
       analysisIndex,
+      effectiveReviewThreads,
       reviewOverviewCache.fileSummaries,
-      reviewOverviewCache.reviewThreads,
       selectedAnalysisFileContents,
       selectedPullRequest,
       selectedReviewPathItem,
@@ -1884,7 +2881,7 @@ export function App({
     : authSession.state !== "signed-in"
       ? "Sign in to refresh GitHub checks."
       : null;
-  const reviewThreadSignature = reviewOverviewCache.reviewThreads
+  const reviewThreadSignature = effectiveReviewThreads
     .map((thread) => `${thread.id}:${thread.state}:${thread.updatedAt}`)
     .join("|");
   const fileChangeSignature = reviewOverviewCache.fileSummaries
@@ -1906,7 +2903,7 @@ export function App({
   const baseReviewThreadViews = buildReviewThreadViews(
     currentUserKey,
     selectedPullRequestReviewKey,
-    reviewOverviewCache.reviewThreads,
+    effectiveReviewThreads,
     reviewQueueStore,
   );
   const reviewThreadViews = baseReviewThreadViews.map((view) => {
@@ -1954,6 +2951,10 @@ export function App({
     : threadDialogSourceViews;
 
   useEffect(() => {
+    setOptimisticCreatedReviewThreads([]);
+  }, [selectedPullRequestReviewKey]);
+
+  useEffect(() => {
     syncReviewTargets(currentUserKey, selectedPullRequestReviewKey, reviewTargets);
     setReviewTargetRevision((current) => current + 1);
   }, [currentUserKey, reviewTargetSyncSignature, selectedPullRequestReviewKey]);
@@ -1978,6 +2979,8 @@ export function App({
     setNewThreadBody("");
     setNewThreadResult(null);
     setNewThreadOriginTargetId(null);
+    setInlineCommentAnchorId(null);
+    setHoveredDiffLineAnchorId(null);
   }, [selectedReviewTargetId]);
 
   useEffect(() => {
@@ -2084,8 +3087,51 @@ export function App({
         fullFileLoaded: fullFileDiffs[selectedFileChange.id],
       })
     : null;
+  const diffDialogLineAnchors = selectedFileDiffState
+    ? lineThreadAnchorState.anchors.filter((anchor) => anchor.path === selectedFileDiffState.filePath)
+    : lineThreadAnchorState.anchors;
+  const selectedDiffDialogLineAnchor =
+    diffDialogLineAnchors.find((anchor) => anchor.id === selectedNewThreadLineAnchorId) ?? diffDialogLineAnchors[0] ?? null;
+  const hoveredDiffDialogLineAnchor =
+    diffDialogLineAnchors.find((anchor) => anchor.id === hoveredDiffLineAnchorId) ?? null;
+  const diffDialogLineAnchorSignature = diffDialogLineAnchors.map((anchor) => anchor.id).join("|");
+  const diffDialogThreadsByLineKey = useMemo(() => {
+    const threadsByLineKey = new Map<string, ReviewThreadView[]>();
+    if (!selectedFileDiffState) {
+      return threadsByLineKey;
+    }
+
+    for (const view of reviewThreadViews) {
+      if (view.thread.filePath !== selectedFileDiffState.filePath) {
+        continue;
+      }
+
+      const lineKey = getDiffThreadAnchorKey(selectedFileDiffState, view.thread);
+      if (!lineKey) {
+        continue;
+      }
+
+      threadsByLineKey.set(lineKey, [...(threadsByLineKey.get(lineKey) ?? []), view]);
+    }
+
+    return threadsByLineKey;
+  }, [reviewThreadViews, selectedFileDiffState]);
   const activeThreadAnchorKey = selectedFileDiffState ? getDiffThreadAnchorKey(selectedFileDiffState, activeThread) : null;
   const activeThreadAnchoredInDiff = Boolean(selectedReviewThread && activeThreadAnchorKey);
+
+  useEffect(() => {
+    if (!targetDiffDialogOpen || diffDialogLineAnchors.length === 0) {
+      return;
+    }
+
+    if (!diffDialogLineAnchors.some((anchor) => anchor.id === selectedNewThreadLineAnchorId)) {
+      setSelectedNewThreadLineAnchorId(diffDialogLineAnchors[0].id);
+    }
+    if (hoveredDiffLineAnchorId && !diffDialogLineAnchors.some((anchor) => anchor.id === hoveredDiffLineAnchorId)) {
+      setHoveredDiffLineAnchorId(null);
+    }
+  }, [diffDialogLineAnchorSignature, diffDialogLineAnchors, hoveredDiffLineAnchorId, selectedNewThreadLineAnchorId, targetDiffDialogOpen]);
+
   const fullFileLineWindow = selectedFileDiffState?.fullFileLines
     ? getBoundedRenderWindow(selectedFileDiffState.fullFileLines, { limit: fullFileRenderLimit })
     : null;
@@ -2148,23 +3194,6 @@ export function App({
   useEffect(() => {
     writeDiffModePreference(diffMode);
   }, [diffMode]);
-
-  useEffect(() => {
-    if (!selectedReviewThread) {
-      return;
-    }
-
-    const scrollTimer = window.setTimeout(() => {
-      if (activeThreadAnchoredInDiff) {
-        activeInlineThreadRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
-        return;
-      }
-
-      reviewCanvasScrollRef.current?.scrollTo?.({ top: 0, behavior: "smooth" });
-    }, 0);
-
-    return () => window.clearTimeout(scrollTimer);
-  }, [activeThreadAnchoredInDiff, activeThreadAnchorKey, selectedReviewThread?.id]);
 
   useEffect(() => {
     let active = true;
@@ -2273,7 +3302,6 @@ export function App({
   }, [
     activePullRequestKey,
     currentUserKey,
-    focusMode,
     includeDrafts,
     reviewSessionClient,
     routedPullRequests.length,
@@ -2691,7 +3719,6 @@ export function App({
     return {
       activeQueueId: activeQueue.id,
       includeDrafts,
-      focusMode,
       threadKey: selectedReviewThread?.id ?? "",
       filePath: activeThreadFile,
       nearbyLine: activeThreadLine ?? 1,
@@ -2701,7 +3728,6 @@ export function App({
 
   function applyReviewSession(snapshot: ReviewSessionSnapshot) {
     setIncludeDrafts(snapshot.includeDrafts);
-    setFocusMode(snapshot.focusMode);
     setSelectedReviewThreadId(snapshot.threadKey);
   }
 
@@ -3092,6 +4118,69 @@ export function App({
     }
   };
 
+  const openReviewTargetDiff = (targetId = selectedReviewTargetId) => {
+    if (targetId) {
+      selectReviewTarget(targetId);
+    }
+    setTargetDiffDialogOpen(true);
+  };
+
+  const openReviewTargetComment = () => {
+    if (!selectedReviewPathItem) {
+      return;
+    }
+    setTargetDiffDialogOpen(false);
+    setInlineCommentAnchorId(null);
+    setStartReviewThreadDialogOpen(true);
+  };
+
+  const openLineCommentComposer = (anchor: ReviewThreadLineAnchor | null = hoveredDiffDialogLineAnchor ?? selectedDiffDialogLineAnchor) => {
+    if (!anchor) {
+      openReviewTargetComment();
+      return;
+    }
+
+    setNewThreadMode("line");
+    setSelectedNewThreadLineAnchorId(anchor.id);
+    setInlineCommentAnchorId(anchor.id);
+    setStartReviewThreadDialogOpen(false);
+    setNewThreadResult(null);
+    window.setTimeout(() => inlineCommentBodyRef.current?.focus(), 0);
+  };
+
+  const moveDiffLineAnchor = (direction: 1 | -1) => {
+    if (diffDialogLineAnchors.length === 0) {
+      return;
+    }
+
+    const currentIndex = selectedDiffDialogLineAnchor
+      ? diffDialogLineAnchors.findIndex((anchor) => anchor.id === selectedDiffDialogLineAnchor.id)
+      : -1;
+    const baseIndex = currentIndex >= 0 ? currentIndex : direction > 0 ? -1 : 0;
+    const nextAnchor = diffDialogLineAnchors[(baseIndex + direction + diffDialogLineAnchors.length) % diffDialogLineAnchors.length];
+    setNewThreadMode("line");
+    setSelectedNewThreadLineAnchorId(nextAnchor.id);
+  };
+
+  const toggleSelectedReviewTargetReviewed = (advanceAfterReview = false) => {
+    if (!selectedReviewPathItem) {
+      return;
+    }
+
+    const targetId = selectedReviewPathItem.id;
+    const reviewed = reviewedTargetIds.has(targetId);
+    setReviewTargetReviewed(targetId, !reviewed);
+
+    if (!reviewed && advanceAfterReview) {
+      const nextReviewedTargetIds = new Set(reviewedTargetIds);
+      nextReviewedTargetIds.add(targetId);
+      const nextTargetId = moveReviewPathSelection(reviewPathItems, nextReviewedTargetIds, targetId, 1);
+      if (nextTargetId) {
+        selectReviewTarget(nextTargetId);
+      }
+    }
+  };
+
   const moveReviewTarget = (direction: 1 | -1) => {
     const nextTargetId = moveReviewPathSelection(reviewPathItems, reviewedTargetIds, selectedReviewTargetId, direction);
     if (nextTargetId) {
@@ -3117,7 +4206,10 @@ export function App({
   };
 
   const focusReplyField = () => {
-    document.querySelector<HTMLTextAreaElement>("[aria-label='Reply body']")?.focus();
+    setReviewThreadDialogOpen(true);
+    window.setTimeout(() => {
+      document.querySelector<HTMLTextAreaElement>("[aria-label='Reply body']")?.focus();
+    }, 0);
   };
 
   const handleSetFileChangeViewed = (fileChangeId: string, viewed: boolean) => {
@@ -3152,14 +4244,18 @@ export function App({
     setHandoffCopyMessage(`Copied ${handoffPacket.threads.length} thread${handoffPacket.threads.length === 1 ? "" : "s"} to Markdown.`);
   };
 
+  const handleSetReviewThreadReviewed = (threadId: string, reviewed: boolean) => {
+    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), effectiveReviewThreads);
+    setReviewThreadReviewed(currentUserKey, threadId, reviewed);
+    setReviewQueueRevision((current) => current + 1);
+  };
+
   const handleSetSelectedThreadReviewed = (reviewed: boolean) => {
     if (!selectedReviewThread) {
       return;
     }
 
-    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
-    setReviewThreadReviewed(currentUserKey, selectedReviewThread.id, reviewed);
-    setReviewQueueRevision((current) => current + 1);
+    handleSetReviewThreadReviewed(selectedReviewThread.id, reviewed);
   };
 
   const markResolvedThreadsReviewed = (threadIds: string[]) => {
@@ -3167,7 +4263,7 @@ export function App({
       return;
     }
 
-    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewOverviewCache.reviewThreads);
+    syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), effectiveReviewThreads);
     for (const threadId of threadIds) {
       setReviewThreadReviewed(currentUserKey, threadId, true);
     }
@@ -3192,7 +4288,7 @@ export function App({
         : thread,
     );
 
-    upsertCachedPullRequest(selectedPullRequest, { reviewThreads });
+    writeCachedPullRequestData({ ...reviewOverviewCache, pullRequest: selectedPullRequest, reviewThreads });
     setCacheSummary(cacheStats());
     setReviewQueueRevision((current) => current + 1);
   };
@@ -3203,8 +4299,9 @@ export function App({
       ...reviewOverviewCache.reviewThreads.filter((existingThread) => existingThread.id !== thread.id),
     ];
 
-    upsertCachedPullRequest(selectedPullRequest, { reviewThreads });
+    writeCachedPullRequestData({ ...reviewOverviewCache, pullRequest: selectedPullRequest, reviewThreads });
     syncReviewThreads(currentUserKey, getPullRequestKey(selectedPullRequest), reviewThreads);
+    setOptimisticCreatedReviewThreads((current) => [thread, ...current.filter((existingThread) => existingThread.id !== thread.id)]);
     setSelectedReviewThreadId(thread.id);
     setCacheSummary(cacheStats());
     setReviewQueueRevision((current) => current + 1);
@@ -3278,6 +4375,52 @@ export function App({
         mergeCreatedThreadIntoCache(result.createdThread);
         setNewThreadBody("");
         setNewThreadOriginTargetId(selectedReviewPathItem.id);
+        if (mode === "line") {
+          setInlineCommentAnchorId(null);
+        }
+      }
+    } finally {
+      setThreadActionBusy(null);
+    }
+  };
+
+  const runReviewThreadStateAction = async (view: ReviewThreadView, action: "resolve" | "unresolve") => {
+    if (threadActionBusy !== null) {
+      return;
+    }
+    if (!canPublishReviewThreads) {
+      setThreadActionResult(
+        createThreadActionFailure(
+          action,
+          view.id,
+          "github-thread-read-only",
+          reviewThreadWriteDisabledReason ?? "GitHub write access is unavailable.",
+        ),
+      );
+      return;
+    }
+
+    setThreadActionBusy(action);
+    setThreadActionResult(null);
+
+    try {
+      const result = action === "resolve" ? await threadActionClient.resolve(view.id) : await threadActionClient.unresolve(view.id);
+
+      setThreadActionResult(result);
+
+      if (result.ok && action === "resolve") {
+        markResolvedThreadsReviewed([view.id]);
+        setThreadStateOverrides((current) => ({
+          ...current,
+          [view.id]: "resolved",
+        }));
+        setReviewQueueRevision((current) => current + 1);
+      }
+      if (result.ok && action === "unresolve") {
+        setThreadStateOverrides((current) => ({
+          ...current,
+          [view.id]: "unresolved",
+        }));
       }
     } finally {
       setThreadActionBusy(null);
@@ -3288,6 +4431,12 @@ export function App({
     if (!selectedReviewThread || threadActionBusy !== null) {
       return;
     }
+
+    if (action === "resolve" || action === "unresolve") {
+      await runReviewThreadStateAction(selectedReviewThread, action);
+      return;
+    }
+
     if (!canPublishReviewThreads) {
       setThreadActionResult(
         createThreadActionFailure(
@@ -3305,32 +4454,13 @@ export function App({
     setThreadActionResult(null);
 
     try {
-      const result =
-        action === "reply"
-          ? await threadActionClient.reply(selectedReviewThread.id, submittedReplyBody)
-          : action === "resolve"
-            ? await threadActionClient.resolve(selectedReviewThread.id)
-            : await threadActionClient.unresolve(selectedReviewThread.id);
+      const result = await threadActionClient.reply(selectedReviewThread.id, submittedReplyBody);
 
       setThreadActionResult(result);
 
-      if (result.ok && action === "reply") {
+      if (result.ok) {
         appendReplyToCachedThread(selectedReviewThread.id, submittedReplyBody, result.replyUrl);
         setReplyDraft("");
-      }
-      if (result.ok && action === "resolve") {
-        markResolvedThreadsReviewed([selectedReviewThread.id]);
-        setThreadStateOverrides((current) => ({
-          ...current,
-          [selectedReviewThread.id]: "resolved",
-        }));
-        setReviewQueueRevision((current) => current + 1);
-      }
-      if (result.ok && action === "unresolve") {
-        setThreadStateOverrides((current) => ({
-          ...current,
-          [selectedReviewThread.id]: "unresolved",
-        }));
       }
     } finally {
       setThreadActionBusy(null);
@@ -3607,42 +4737,47 @@ export function App({
     {
       id: "navigation.open-active-file",
       category: "Navigation",
-      label: "Open Active Thread File",
-      description: activeThreadFile ? `Show ${activeThreadFile} in the diff viewer.` : "Show the active Review Thread file in the diff viewer.",
-      shortcut: "O",
-      disabled: !selectedReviewThread,
-      disabledReason: noActiveThreadReason,
+      label: "Open Diff",
+      description: selectedFileDiffState ? `Inspect ${selectedFileDiffState.filePath}.` : "Open the selected Review Target diff.",
+      shortcut: "D",
+      disabled: !selectedReviewPathItem,
+      disabledReason: "Select a Review Target with a changed file first.",
       keywords: ["diff", "file"],
       run: () => {
         if (selectedReviewThread) {
           openThreadFileInDiff(selectedReviewThread.id);
         }
+        openReviewTargetDiff();
       },
     },
     {
-      id: "navigation.toggle-focus",
-      category: "Navigation",
-      label: focusMode ? "Exit Focus Mode" : "Enter Focus Mode",
-      description: focusMode ? "Restore the Review Map and Inspector." : "Hide side panels and keep the Review Canvas centered.",
-      shortcut: "F",
-      keywords: ["layout", "canvas"],
-      run: () => setFocusMode((current) => !current),
+      id: "review.comment-target",
+      category: "Review",
+      label: "Comment On Review Target",
+      description: selectedReviewPathItem
+        ? `Start a GitHub Review Thread for ${selectedReviewPathItem.target.title}.`
+        : "Start a GitHub Review Thread for the selected Review Target.",
+      shortcut: "C",
+      disabled: !selectedReviewPathItem,
+      disabledReason: "Select a Review Target first.",
+      keywords: ["comment", "review target", "github"],
+      run: openReviewTargetComment,
     },
     {
       id: "review.toggle-reviewed",
       category: "Review",
-      label: selectedReviewThread?.reviewed ? "Mark Active Review Thread Unreviewed" : "Mark Active Review Thread Reviewed",
-      description: "Update the local per-user Reviewed checklist state.",
+      label: selectedReviewPathItem && reviewedTargetIds.has(selectedReviewPathItem.id) ? "Mark Review Target Active" : "Mark Review Target Reviewed",
+      description: "Update the local per-user Reviewed checklist state for the selected Review Target.",
       shortcut: "R",
-      disabled: !selectedReviewThread,
-      disabledReason: noActiveThreadReason,
-      keywords: ["checklist", "local"],
-      run: () => handleSetSelectedThreadReviewed(!(selectedReviewThread?.reviewed ?? false)),
+      disabled: !selectedReviewPathItem,
+      disabledReason: "Select a Review Target first.",
+      keywords: ["checklist", "local", "target"],
+      run: () => toggleSelectedReviewTargetReviewed(true),
     },
     {
       id: "review.reply-focus",
       category: "Review",
-      label: "Focus Reply Composer",
+      label: "Open Reply Composer",
       description: "Move the cursor to the active Review Thread reply field.",
       shortcut: "⇧R",
       disabled: !selectedReviewThread,
@@ -3888,6 +5023,12 @@ export function App({
         return;
       }
 
+      if (targetDiffDialogOpen && (key === "arrowdown" || key === "arrowup")) {
+        event.preventDefault();
+        moveDiffLineAnchor(key === "arrowdown" ? 1 : -1);
+        return;
+      }
+
       if (key === "k") {
         event.preventDefault();
         moveReviewTarget(1);
@@ -3908,14 +5049,22 @@ export function App({
         focusReplyField();
       } else if (key === "r") {
         event.preventDefault();
-        handleSetSelectedThreadReviewed(!(selectedReviewThread?.reviewed ?? false));
+        toggleSelectedReviewTargetReviewed(true);
       } else if (key === "e") {
         event.preventDefault();
         void runThreadAction(threadResolveAction);
-      } else if (key === "o") {
+      } else if (key === "d" || key === "o") {
         event.preventDefault();
         if (selectedReviewThread) {
           openThreadFileInDiff(selectedReviewThread.id);
+        }
+        openReviewTargetDiff();
+      } else if (key === "c") {
+        event.preventDefault();
+        if (targetDiffDialogOpen) {
+          openLineCommentComposer();
+        } else {
+          openReviewTargetComment();
         }
       } else if (key === "h") {
         event.preventDefault();
@@ -3926,15 +5075,12 @@ export function App({
       } else if (key === "v") {
         event.preventDefault();
         toggleSelectedFileViewed();
-      } else if (key === "f") {
-        event.preventDefault();
-        setFocusMode((current) => !current);
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [allFilteredThreadsSelected, moveReviewTarget, openCommandPalette, openHotspotsDialog, openPullRequestDialog, openThreadDialog, openThreadFileInDiff, pullRequestDialogOpen, pullRequestDialogPullRequests, refreshCurrentPullRequest, selectPullRequestFromDialog, selectedReviewThread, threadResolveAction, toggleSelectedFileViewed]);
+  }, [allFilteredThreadsSelected, moveDiffLineAnchor, moveReviewTarget, openCommandPalette, openHotspotsDialog, openLineCommentComposer, openPullRequestDialog, openReviewTargetComment, openThreadDialog, openThreadFileInDiff, pullRequestDialogOpen, pullRequestDialogPullRequests, refreshCurrentPullRequest, selectPullRequestFromDialog, selectedReviewThread, targetDiffDialogOpen, threadResolveAction, toggleSelectedFileViewed, toggleSelectedReviewTargetReviewed]);
 
   const refreshBadge = getRefreshBadge(refreshStatus);
 
@@ -3995,14 +5141,8 @@ export function App({
         </div>
       </header>
 
-      <main
-        className={cn(
-          "grid h-[calc(100vh-3rem)] min-h-0 overflow-hidden",
-          focusMode ? "grid-cols-[1fr]" : "grid-cols-[360px_minmax(520px,1fr)_340px]",
-        )}
-      >
-        {!focusMode && (
-          <aside aria-label="File explorer" className="pane-scroll-y border-r border-border bg-card/40">
+      <main className="relative h-[calc(100vh-3rem)] min-h-0 overflow-hidden bg-background">
+        <aside aria-label="File explorer" className="pane-scroll-y sr-only">
             <section className="border-b border-border p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Files</h2>
@@ -4105,11 +5245,10 @@ export function App({
                 </p>
               )}
             </section>
-          </aside>
-        )}
+        </aside>
 
-        <section aria-label="Review canvas" className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-          <div className="flex h-11 items-center justify-between gap-3 border-b border-border px-3">
+        <section aria-label="Review canvas" className="relative h-full min-h-0 min-w-0 overflow-hidden">
+          <div className="absolute left-4 right-4 top-4 z-30 flex min-h-11 items-center justify-between gap-3 rounded-lg border border-border bg-card/95 px-3 py-2 shadow-xl backdrop-blur xl:right-[26rem]">
             <div className="flex min-w-0 flex-1 items-center gap-3">
               <div
                 aria-label="Current Pull Request"
@@ -4138,6 +5277,16 @@ export function App({
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <Button
+                aria-label="Open selected Review Thread"
+                variant="outline"
+                size="sm"
+                onClick={() => setReviewThreadDialogOpen(true)}
+                disabled={!selectedReviewThread}
+              >
+                <MessageSquare className="h-3.5 w-3.5" aria-hidden="true" />
+                Review Thread
+              </Button>
+              <Button
                 aria-label="Refresh current Pull Request"
                 variant="outline"
                 size="sm"
@@ -4148,15 +5297,15 @@ export function App({
                 Refresh PR
                 <Kbd>⌃R</Kbd>
               </Button>
-              <Button variant="outline" size="sm" onClick={() => setFocusMode((current) => !current)}>
-                {focusMode ? <PanelLeftOpen className="h-3.5 w-3.5" aria-hidden="true" /> : <PanelLeftClose className="h-3.5 w-3.5" aria-hidden="true" />}
-                {focusMode ? "Exit focus" : "Focus"}
-                <Kbd>F</Kbd>
+              <Button variant="outline" size="sm" onClick={() => openReviewTargetDiff()} disabled={!selectedReviewPathItem}>
+                <FileText className="h-3.5 w-3.5" aria-hidden="true" />
+                Diff
+                <Kbd>D</Kbd>
               </Button>
             </div>
           </div>
 
-          <div aria-label="Review queue summary" className="border-b border-border bg-card/50 px-3 py-2">
+          <div aria-label="Review queue summary" className="sr-only">
             <div className="flex flex-wrap items-center gap-2">
               <span className="mr-1 text-xs font-semibold uppercase tracking-normal text-muted-foreground">Queues</span>
               {queueButtons.map((queue) => (
@@ -4290,9 +5439,9 @@ export function App({
             )}
           </div>
 
-          <div aria-label="Review canvas scroll area" className="pane-scroll flex-1 p-4" ref={reviewCanvasScrollRef}>
-            <section className="rounded-md border border-border bg-background p-4" aria-label="Review overview">
-              <div className="flex items-start justify-between gap-4">
+          <div aria-label="Review canvas scroll area" className="pane-scroll absolute inset-0" ref={reviewCanvasScrollRef}>
+            <section className="relative h-full min-h-full overflow-hidden bg-background" aria-label="Review overview">
+              <div className="mt-3 flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <p className="truncate text-xs text-muted-foreground">
                     {reviewOverview.repository} #{reviewOverviewCache.metadata.number} by {reviewOverview.author}
@@ -4334,7 +5483,7 @@ export function App({
                 </div>
               </div>
 
-              <section className="mt-3 rounded-md border border-border bg-card/60 p-3" aria-label="Review clone health">
+              <section className="sr-only" aria-label="Review clone health">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
@@ -4397,7 +5546,26 @@ export function App({
                 )}
               </section>
 
-              <section className="mt-3 rounded-md border border-border bg-card/60 p-3" aria-label="Attention map">
+              <section className="order-first absolute inset-0 overflow-hidden bg-background" aria-label="Attention map">
+                <div className="pointer-events-none absolute left-4 top-[5rem] z-20 max-w-[min(34rem,calc(100vw-2rem))] rounded-lg border border-border bg-card/90 px-3 py-2 shadow-xl backdrop-blur">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                        <FileCode2 className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                        <span>Attention Map</span>
+                        <Badge variant="muted">Index v{analysisIndex.analysisVersion}</Badge>
+                      </div>
+                      <p className="mt-1 truncate text-xs text-muted-foreground">
+                        Head {analysisIndex.headSha === "head-unavailable" ? "pending" : analysisIndex.headSha.slice(0, 7)} ·{" "}
+                        {attentionMapPresentation.summary.files} files · {attentionMapPresentation.summary.relationships} edges
+                      </p>
+                    </div>
+                    <Badge variant={attentionMapPresentation.summary.fallbackNodes > 0 ? "warning" : "success"}>
+                      {attentionMapPresentation.nodes.length} nodes · {reviewTargets.length} targets
+                    </Badge>
+                  </div>
+                </div>
+                <div className="sr-only">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
@@ -4444,15 +5612,18 @@ export function App({
                     <p className="mt-1 font-semibold">{attentionMapPresentation.summary.relationships}</p>
                   </div>
                 </div>
-                <div className="mt-3 grid min-h-[320px] grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_20rem]">
+                </div>
+                <div className="absolute inset-0">
                   <ReviewTargetFlow
+                    attentionEdges={attentionMapPresentation.edges}
                     items={reviewPathItems}
                     needsReReviewTargetIds={needsReReviewTargetIds}
+                    onOpenTarget={openReviewTargetDiff}
                     onSelectTarget={selectReviewTarget}
                     reviewedTargetIds={reviewedTargetIds}
                     selectedTargetId={selectedReviewTargetId}
                   />
-                  <aside aria-label="Review Path" className="min-h-0 rounded-md border border-border bg-background p-3">
+                  <aside aria-label="Review Path" className="absolute bottom-4 right-4 top-[5rem] z-20 flex w-[min(24rem,calc(100vw-2rem))] min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card/95 p-3 shadow-xl backdrop-blur xl:top-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <h3 className="text-sm font-semibold">Review Path</h3>
@@ -4483,7 +5654,11 @@ export function App({
                     {selectedReviewPathItem && (
                       <div className="mt-3 rounded-md border border-border p-2 text-xs" aria-label="Selected Review Target">
                         <div className="flex items-start justify-between gap-2">
-                          <p className="min-w-0 truncate font-semibold">{selectedReviewPathItem.target.title}</p>
+                          <div className="min-w-0">
+                            <p className="truncate font-mono font-semibold">{getReviewTargetPrimaryLabel(selectedReviewPathItem.target)}</p>
+                            <p className="mt-1 truncate text-muted-foreground">{getReviewTargetScopeLabel(selectedReviewPathItem.target)}</p>
+                            <span className="sr-only">{selectedReviewPathItem.target.title}</span>
+                          </div>
                           <Badge
                             variant={
                               reviewedTargetIds.has(selectedReviewPathItem.id)
@@ -4496,18 +5671,29 @@ export function App({
                             {needsReReviewTargetIds.has(selectedReviewPathItem.id) ? "Needs re-review" : `#${selectedReviewPathItem.order}`}
                           </Badge>
                         </div>
-                        <p className="mt-1 truncate text-muted-foreground">{selectedReviewPathItem.orderingReasons.join(", ")}</p>
+                        <p className="mt-2 max-h-8 overflow-hidden leading-4 text-muted-foreground">{selectedReviewPathItem.orderingReasons.join(", ")}</p>
                         <Button
                           className="mt-2 w-full"
-                          onClick={() => setReviewTargetReviewed(selectedReviewPathItem.id, !reviewedTargetIds.has(selectedReviewPathItem.id))}
+                          onClick={() => toggleSelectedReviewTargetReviewed()}
                           size="sm"
                           variant="outline"
                         >
                           {reviewedTargetIds.has(selectedReviewPathItem.id) ? "Mark target active" : "Mark target reviewed"}
+                          <Kbd>R</Kbd>
                         </Button>
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                          <Button onClick={() => openReviewTargetDiff(selectedReviewPathItem.id)} size="sm" variant="secondary">
+                            Open diff
+                            <Kbd>D</Kbd>
+                          </Button>
+                          <Button onClick={openReviewTargetComment} size="sm" variant="secondary">
+                            Comment
+                            <Kbd>C</Kbd>
+                          </Button>
+                        </div>
                       </div>
                     )}
-                    <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
+                    <div className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
                       {activeReviewPathItems.map((item) => (
                         <button
                           aria-pressed={selectedReviewTargetId === item.id}
@@ -4517,15 +5703,27 @@ export function App({
                           )}
                           key={item.id}
                           onClick={() => selectReviewTarget(item.id)}
+                          onDoubleClick={() => openReviewTargetDiff(item.id)}
+                          title={item.target.title}
                           type="button"
                         >
                           <div className="flex items-start justify-between gap-2">
-                            <span className="min-w-0 truncate font-medium">
-                              {item.order}. {item.target.title}
-                            </span>
-                            <Badge variant={item.hotspotScore > 0 ? "warning" : "muted"}>{item.hotspotScore}</Badge>
+                            <div className="min-w-0">
+                              <p className="truncate font-mono font-semibold">
+                                {item.order}. {getReviewTargetPrimaryLabel(item.target)}
+                              </p>
+                              <p className="mt-1 truncate text-muted-foreground">{getReviewTargetScopeLabel(item.target)}</p>
+                              <span className="sr-only">{item.target.title}</span>
+                            </div>
+                            <Badge variant={item.hotspotScore > 0 ? "warning" : "muted"}>
+                              {item.hotspotScore > 0 ? getReviewTargetScoreLabel(item.hotspotScore) : "No score"}
+                            </Badge>
                           </div>
-                          <p className="mt-1 truncate text-muted-foreground">{item.orderingReasons.join(", ")}</p>
+                          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                            <span className="rounded bg-muted px-1.5 py-0.5">{getReviewTargetKindLabel(item.target)}</span>
+                            <span>{item.target.size.changedLines} lines</span>
+                            {item.target.size.reviewThreads > 0 && <span>{item.target.size.reviewThreads} thread{item.target.size.reviewThreads === 1 ? "" : "s"}</span>}
+                          </div>
                           {needsReReviewTargetIds.has(item.id) && <Badge variant="warning">Needs re-review</Badge>}
                         </button>
                       ))}
@@ -4546,7 +5744,7 @@ export function App({
                               onClick={() => selectReviewTarget(item.id)}
                               type="button"
                             >
-                              {item.order}. {item.target.title}
+                              {item.order}. {getReviewTargetPrimaryLabel(item.target)}
                             </button>
                           ))}
                         </div>
@@ -4728,8 +5926,15 @@ export function App({
                                     {showInlineThread && (
                                       <InlineReviewThread
                                         anchorRef={activeInlineThreadRef}
+                                        canResolve={canPublishReviewThreads}
+                                        onResolveState={(view) =>
+                                          void runReviewThreadStateAction(view, view.thread.state === "resolved" ? "unresolve" : "resolve")
+                                        }
+                                        onSelect={(view) => setSelectedReviewThreadId(view.id)}
+                                        onToggleReviewed={(view) => handleSetReviewThreadReviewed(view.id, !view.reviewed)}
                                         pathCount={filteredReviewThreads.length}
                                         pathIndex={selectedReviewThreadIndex + 1}
+                                        resolveBusy={threadActionBusy === "resolve" || threadActionBusy === "unresolve"}
                                         stateLabel={activeThreadStateLabel}
                                         view={selectedReviewThread}
                                       />
@@ -4770,8 +5975,15 @@ export function App({
                                     {showInlineThread && (
                                       <InlineReviewThread
                                         anchorRef={activeInlineThreadRef}
+                                        canResolve={canPublishReviewThreads}
+                                        onResolveState={(view) =>
+                                          void runReviewThreadStateAction(view, view.thread.state === "resolved" ? "unresolve" : "resolve")
+                                        }
+                                        onSelect={(view) => setSelectedReviewThreadId(view.id)}
+                                        onToggleReviewed={(view) => handleSetReviewThreadReviewed(view.id, !view.reviewed)}
                                         pathCount={filteredReviewThreads.length}
                                         pathIndex={selectedReviewThreadIndex + 1}
+                                        resolveBusy={threadActionBusy === "resolve" || threadActionBusy === "unresolve"}
                                         stateLabel={activeThreadStateLabel}
                                         view={selectedReviewThread}
                                       />
@@ -4826,20 +6038,20 @@ export function App({
                 <span>Previous target <Kbd>J</Kbd></span>
                 <span>Threads <Kbd>T</Kbd></span>
                 <span>Refresh PR <Kbd>⌃R</Kbd></span>
-                <span>Reviewed <Kbd>R</Kbd></span>
+                <span>Target reviewed <Kbd>R</Kbd></span>
                 <span>Resolve <Kbd>E</Kbd></span>
                 <span>Reply <Kbd>⇧R</Kbd></span>
-                <span>Open file <Kbd>O</Kbd></span>
-                <span>Viewed <Kbd>V</Kbd></span>
-                <span>Focus <Kbd>F</Kbd></span>
+                <span>Diff <Kbd>D</Kbd></span>
+                <span>Comment <Kbd>C</Kbd></span>
+                <span>File viewed <Kbd>V</Kbd></span>
                 <span>Select visible <Kbd>A</Kbd></span>
                 <span>Handoff <Kbd>H</Kbd></span>
               </div>
             </div>
         </section>
 
-        {!focusMode && (
-          <aside aria-label="Inspector" className="pane-scroll-y border-l border-border bg-card/40">
+        {!reviewThreadDialogOpen && !startReviewThreadDialogOpen && (
+          <aside aria-label="Inspector" className="pane-scroll-y sr-only">
             <ReviewTargetInspector
               baseComparisonOpen={targetBaseComparisonOpen}
               model={selectedReviewTargetInspector}
@@ -5402,12 +6614,470 @@ export function App({
                             </p>
                           )}
                         </div>
-                        <Badge variant={hotspot.score > 80 ? "danger" : "warning"}>{hotspot.score}</Badge>
+                        <Badge variant={hotspot.score > 80 ? "danger" : "warning"}>{getReviewTargetScoreLabel(hotspot.score)}</Badge>
                       </div>
                     </button>
                   ))}
                 </div>
               )}
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={startReviewThreadDialogOpen} onOpenChange={setStartReviewThreadDialogOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed right-6 top-10 z-50 flex max-h-[86vh] w-[min(520px,calc(100vw-2rem))] flex-col rounded-lg border border-border bg-card shadow-xl">
+            <div className="border-b border-border p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <Dialog.Title className="text-base font-semibold">Comment on Review Target</Dialog.Title>
+                  <Dialog.Description className="mt-1 truncate text-sm text-muted-foreground">
+                    {selectedReviewTargetInspector?.target.title ?? "Select a Review Target from the board first."}
+                  </Dialog.Description>
+                </div>
+                <Kbd>C</Kbd>
+              </div>
+            </div>
+            <div className="pane-scroll-y min-h-0">
+              <StartReviewThreadPanel
+                body={newThreadBody}
+                fileAnchor={fileThreadAnchorState.anchor}
+                fileDisabledReason={fileThreadDisabledReason}
+                lineAnchors={lineThreadAnchorState.anchors}
+                lineDisabledReason={lineThreadDisabledReason}
+                mode={newThreadMode}
+                onBodyChange={setNewThreadBody}
+                onMarkOriginReviewed={() => {
+                  if (newThreadOriginTargetId) {
+                    setReviewTargetReviewed(newThreadOriginTargetId, true);
+                  }
+                }}
+                onModeChange={setNewThreadMode}
+                onSelectLineAnchor={setSelectedNewThreadLineAnchorId}
+                onStartFileThread={() => void runStartReviewThread("file")}
+                onStartLineThread={() => void runStartReviewThread("line")}
+                result={newThreadResult}
+                selectedLineAnchorId={selectedNewThreadLineAnchor?.id ?? ""}
+                targetTitle={selectedReviewTargetInspector?.target.title ?? null}
+                threadActionBusy={threadActionBusy}
+                canMarkOriginReviewed={Boolean(
+                  newThreadOriginTargetId &&
+                    newThreadOriginTargetId === selectedReviewPathItem?.id &&
+                    !reviewedTargetIds.has(newThreadOriginTargetId),
+                )}
+              />
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={reviewThreadDialogOpen} onOpenChange={setReviewThreadDialogOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed right-6 top-8 z-50 flex max-h-[90vh] w-[min(760px,calc(100vw-2rem))] flex-col rounded-lg border border-border bg-card shadow-xl">
+            <div className="border-b border-border p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <Dialog.Title className="text-base font-semibold">Review Thread</Dialog.Title>
+                  <Dialog.Description className="mt-1 truncate text-sm text-muted-foreground">
+                    {selectedReviewThread
+                      ? `${activeThreadFile}${activeThreadLine !== null ? `:${activeThreadLine}` : ""}`
+                      : "Select a Review Thread from the board or thread browser."}
+                  </Dialog.Description>
+                </div>
+                <Badge variant={selectedReviewThread ? "info" : "muted"}>{selectedReviewThread ? "Selected" : "None"}</Badge>
+              </div>
+            </div>
+            <div className="pane-scroll-y min-h-0 p-4">
+              {!selectedReviewThread ? (
+                <p className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+                  No Review Thread is selected.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  <section className="rounded-md border border-border bg-background p-3" aria-label="Review Thread details">
+                    <dl className="grid grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <dt className="text-muted-foreground">Author</dt>
+                        <dd className="mt-1 truncate">@{activeThreadAuthor ?? "unknown"}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-muted-foreground">State</dt>
+                        <dd className="mt-1 flex items-center gap-1">
+                          <Badge variant={activeThreadState === "outdated" ? "warning" : "muted"}>{activeThreadStateLabel}</Badge>
+                          {selectedReviewThread.reviewed && <Badge variant="success">Reviewed</Badge>}
+                        </dd>
+                      </div>
+                      <div className="col-span-2">
+                        <dt className="text-muted-foreground">File</dt>
+                        <dd className="mt-1 truncate font-mono">{activeThreadFile}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-muted-foreground">Line</dt>
+                        <dd className="mt-1">{activeThreadLine ?? "None"}</dd>
+                      </div>
+                    </dl>
+                  </section>
+
+                  <section className="rounded-md border border-border bg-background p-3" aria-label="Review Thread conversation">
+                    <ReviewThreadConversation thread={activeThread} emptyFallback={activeThreadBody} />
+                  </section>
+
+                  <section className="space-y-2 rounded-md border border-border bg-background p-3" aria-label="Review Thread actions">
+                    {reviewThreadWriteDisabledReason && (
+                      <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300" role="status">
+                        {reviewThreadWriteDisabledReason}
+                      </p>
+                    )}
+                    <textarea
+                      aria-label="Reply body"
+                      className="min-h-24 w-full resize-none rounded-md border border-input bg-background p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onChange={(event) => setReplyDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                          event.preventDefault();
+                          void runThreadAction("reply");
+                        }
+                      }}
+                      placeholder="Reply to this Review Thread"
+                      value={replyDraft}
+                      disabled={!canPublishReviewThreads}
+                    />
+                    <div className="grid grid-cols-3 gap-2">
+                      <Button
+                        className="justify-between"
+                        variant="default"
+                        onClick={() => void runThreadAction("reply")}
+                        disabled={!replyCanSubmit}
+                      >
+                        Submit reply
+                        <Kbd>⌘↵</Kbd>
+                      </Button>
+                      <Button
+                        className="justify-between"
+                        variant="secondary"
+                        onClick={() => handleSetSelectedThreadReviewed(!(selectedReviewThread.reviewed ?? false))}
+                      >
+                        {selectedReviewThread.reviewed ? "Mark unreviewed" : "Mark reviewed"}
+                        <Kbd>R</Kbd>
+                      </Button>
+                      <Button
+                        className="justify-between"
+                        variant="outline"
+                        onClick={() => void runThreadAction(threadResolveAction)}
+                        disabled={!canPublishReviewThreads || threadActionBusy !== null}
+                      >
+                        {threadResolveAction === "unresolve" ? "Unresolve" : "Resolve"}
+                        <Kbd>E</Kbd>
+                      </Button>
+                    </div>
+                    {threadActionResult && (
+                      <p
+                        className={cn(
+                          "rounded-md p-2 text-xs",
+                          threadActionResult.ok
+                            ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                            : threadActionResult.retryable
+                              ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                              : "bg-destructive/10 text-destructive",
+                        )}
+                        role="status"
+                      >
+                        {threadActionResult.message}
+                      </p>
+                    )}
+                  </section>
+                </div>
+              )}
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={targetDiffDialogOpen} onOpenChange={setTargetDiffDialogOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
+          <Dialog.Content className="fixed left-1/2 top-8 z-50 flex max-h-[90vh] w-[min(1180px,calc(100vw-2rem))] -translate-x-1/2 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl">
+            <div className="border-b border-border p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <Dialog.Title className="text-base font-semibold">Review Target Diff</Dialog.Title>
+                  <Dialog.Description className="mt-1 truncate text-sm text-muted-foreground">
+                    {selectedReviewPathItem?.target.title ?? selectedFileDiffState?.filePath ?? "Select a Review Target first."}
+                  </Dialog.Description>
+                </div>
+                <Dialog.Close asChild>
+                  <Button aria-label="Close Review Target Diff" size="icon" type="button" variant="ghost">
+                    <X className="h-4 w-4" aria-hidden="true" />
+                  </Button>
+                </Dialog.Close>
+              </div>
+            </div>
+            <div className="grid min-h-0 flex-1 grid-cols-[300px_minmax(0,1fr)]">
+              <aside className="pane-scroll-y min-h-0 border-r border-border p-3" aria-label="Diff target context">
+                {selectedReviewPathItem ? (
+                  <div className="space-y-3">
+                    <div className="rounded-md border border-border bg-background p-3 text-sm">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="min-w-0 truncate font-semibold">{selectedReviewPathItem.target.title}</p>
+                        <Badge variant={selectedReviewPathItem.hotspotScore > 0 ? "warning" : "muted"}>
+                          {selectedReviewPathItem.hotspotScore > 0 ? getReviewTargetScoreLabel(selectedReviewPathItem.hotspotScore) : "No score"}
+                        </Badge>
+                      </div>
+                      <p className="mt-2 text-xs text-muted-foreground">{selectedReviewPathItem.orderingReasons.join(", ")}</p>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">Changed files</p>
+                      {selectedReviewPathItem.target.paths.map((path) => (
+                        <button
+                          className={cn(
+                            "w-full rounded-md border border-border p-2 text-left font-mono text-xs hover:bg-accent",
+                            selectedFileDiffState?.filePath === path && "border-primary bg-accent text-accent-foreground",
+                          )}
+                          key={path}
+                          onClick={() => selectFilePathInDiff(path)}
+                          type="button"
+                        >
+                          <span className="block truncate">{path}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <Button
+                      className="w-full"
+                      onClick={() => toggleSelectedReviewTargetReviewed()}
+                      size="sm"
+                      variant="outline"
+                    >
+                      {reviewedTargetIds.has(selectedReviewPathItem.id) ? "Mark target active" : "Mark target reviewed"}
+                      <Kbd>R</Kbd>
+                    </Button>
+                    <Button className="w-full" onClick={openReviewTargetComment} size="sm" variant="secondary">
+                      Comment on target
+                      <Kbd>C</Kbd>
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">No Review Target selected.</p>
+                )}
+              </aside>
+              <div className="pane-scroll min-h-0 p-3">
+                <section className="diff-shell rounded-md border border-border bg-background" aria-label="Diff dialog viewer">
+                  <div className="diff-file-header flex items-center justify-between gap-3 border-b border-border px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold">{selectedFileDiffState?.filePath ?? activeThreadFile}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {selectedFileDiffState?.language ?? "text"} · {selectedFileDiffState?.kind ?? "text"}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {selectedFileChange && (
+                        <Badge variant={selectedFileChange.viewed ? "success" : "muted"}>
+                          {selectedFileChange.viewed ? "File viewed" : "File unviewed"}
+                        </Badge>
+                      )}
+                      <Badge variant="muted">Line <Kbd>↑</Kbd><Kbd>↓</Kbd></Badge>
+                      <Badge variant="muted">Comment <Kbd>C</Kbd></Badge>
+                      <Badge variant="muted">Unified preview</Badge>
+                    </div>
+                  </div>
+
+                  {!selectedFileChange || !selectedFileDiffState ? (
+                    <p className="p-4 text-sm text-muted-foreground">No File Change selected.</p>
+                  ) : selectedFileDiffState.kind !== "text" ? (
+                    <div className="space-y-3 p-4">
+                      <Badge variant="warning">{getFileKindLabel(selectedFileDiffState.kind)} fallback</Badge>
+                      <p className="text-sm text-muted-foreground">
+                        Narview lists this File Change, but rich diff preview is unavailable for this file type.
+                      </p>
+                      <a
+                        className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-accent"
+                        href={selectedFileDiffState.githubUrl}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                        Open in GitHub
+                      </a>
+                    </div>
+                  ) : (
+                    <div className="diff-content divide-y divide-border">
+                      {selectedFileDiffState.hunks.length === 0 && (
+                        <div className="space-y-2 p-4">
+                          <p className="text-sm font-medium">No cached text diff for this file.</p>
+                          <p className="text-sm text-muted-foreground">
+                            GitHub did not return a patch for this file, or Narview skipped it because the patch is too large.
+                          </p>
+                        </div>
+                      )}
+                      {selectedFileDiffState.hunks.map((hunk) => (
+                        <div key={hunk.id}>
+                          <div className="diff-hunk-header flex items-center justify-between gap-2 px-3 py-2">
+                            <p className="min-w-0 truncate font-mono text-xs text-muted-foreground">{hunk.header}</p>
+                            {!hunk.loaded ? (
+                              <Button size="sm" variant="outline" onClick={() => loadDiffHunk(selectedFileChange.id, selectedFileChange.file, hunk.id)}>
+                                Load hunk
+                              </Button>
+                            ) : hunk.expandable && !hunk.expanded ? (
+                              <Button size="sm" variant="outline" onClick={() => expandDiffHunk(selectedFileChange.id, hunk.id)}>
+                                Expand context
+                              </Button>
+                            ) : hunk.expandable ? (
+                              <Badge variant="muted">Context expanded</Badge>
+                            ) : null}
+                          </div>
+                          {hunk.loaded ? (
+                            <div className="diff-code-grid font-mono text-xs">
+                              {hunk.lines.map((line, lineIndex) => {
+                                const lineKey = `${hunk.id}:${lineIndex}`;
+                                const lineAnchor = getDiffLineReviewAnchor(selectedFileDiffState.filePath, line, lineThreadAnchorState.anchors);
+                                const anchoredThreadViews = diffDialogThreadsByLineKey.get(lineKey) ?? [];
+                                const lineSelected = Boolean(lineAnchor && selectedDiffDialogLineAnchor?.id === lineAnchor.id);
+                                const showComposer = Boolean(lineAnchor && inlineCommentAnchorId === lineAnchor.id);
+                                const commentDisabled = !lineAnchor || !canPublishReviewThreads || threadActionBusy !== null;
+
+                                return (
+                                  <div className="contents" key={lineKey}>
+                                    <div
+                                      className={cn(
+                                        "diff-row grid grid-cols-[36px_52px_52px_24px_max-content] border-t first:border-t-0",
+                                        getDiffLineClass(line.kind),
+                                        lineSelected && "diff-row-line-selected",
+                                        anchoredThreadViews.length > 0 && "diff-row-comment-anchor",
+                                      )}
+                                      onClick={() => {
+                                        if (lineAnchor) {
+                                          setSelectedNewThreadLineAnchorId(lineAnchor.id);
+                                        }
+                                      }}
+                                      onMouseEnter={() => {
+                                        if (lineAnchor) {
+                                          setHoveredDiffLineAnchorId(lineAnchor.id);
+                                          setSelectedNewThreadLineAnchorId(lineAnchor.id);
+                                        }
+                                      }}
+                                    >
+                                      <div className="diff-comment-gutter flex items-center justify-center">
+                                        {lineAnchor ? (
+                                          <button
+                                            aria-label={`Comment on ${lineAnchor.label}`}
+                                            className="diff-line-comment-button"
+                                            disabled={commentDisabled}
+                                            onClick={() => openLineCommentComposer(lineAnchor)}
+                                            title={reviewThreadWriteDisabledReason ?? `Comment on ${lineAnchor.label}`}
+                                            type="button"
+                                          >
+                                            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                                          </button>
+                                        ) : null}
+                                      </div>
+                                      <div className="diff-gutter px-2 py-1 text-right">{line.oldLine ?? ""}</div>
+                                      <div className="diff-gutter px-2 py-1 text-right">{line.newLine ?? ""}</div>
+                                      <div className="diff-marker px-1 py-1 text-center">{getDiffPrefix(line.kind)}</div>
+                                      <div className="diff-code-cell py-1 pl-2 pr-8">
+                                        <DiffCodeLine line={line} />
+                                      </div>
+                                    </div>
+                                    {anchoredThreadViews.map((view) => {
+                                      const filteredIndex = filteredReviewThreads.findIndex((item) => item.id === view.id);
+                                      const fallbackIndex = reviewThreadViews.findIndex((item) => item.id === view.id);
+                                      const pathIndex = Math.max(filteredIndex, fallbackIndex, 0) + 1;
+                                      const pathCount = Math.max(filteredReviewThreads.length, reviewThreadViews.length, 1);
+
+                                      return (
+                                        <InlineReviewThread
+                                          anchorRef={selectedReviewThread?.id === view.id ? activeInlineThreadRef : undefined}
+                                          canResolve={canPublishReviewThreads}
+                                          key={view.id}
+                                          onResolveState={(threadView) =>
+                                            void runReviewThreadStateAction(
+                                              threadView,
+                                              threadView.thread.state === "resolved" ? "unresolve" : "resolve",
+                                            )
+                                          }
+                                          onSelect={(threadView) => setSelectedReviewThreadId(threadView.id)}
+                                          onToggleReviewed={(threadView) => handleSetReviewThreadReviewed(threadView.id, !threadView.reviewed)}
+                                          pathCount={pathCount}
+                                          pathIndex={pathIndex}
+                                          resolveBusy={threadActionBusy === "resolve" || threadActionBusy === "unresolve"}
+                                          stateLabel={getThreadStateLabel(view.thread.state)}
+                                          view={view}
+                                        />
+                                      );
+                                    })}
+                                    {showComposer && (
+                                      <div className="diff-inline-thread diff-inline-comment-composer">
+                                        <div className="mb-2 flex items-center justify-between gap-3">
+                                          <p className="min-w-0 truncate text-xs font-medium text-muted-foreground">
+                                            New line comment · {lineAnchor?.path}:{lineAnchor?.line}
+                                          </p>
+                                          <Badge variant="info">{lineAnchor?.side === "LEFT" ? "Old line" : "New line"}</Badge>
+                                        </div>
+                                        <textarea
+                                          aria-label="Line comment body"
+                                          className="min-h-24 w-full resize-none rounded-md border border-input bg-background p-2 font-sans text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                          disabled={!canPublishReviewThreads || threadActionBusy !== null}
+                                          onChange={(event) => setNewThreadBody(event.target.value)}
+                                          onKeyDown={(event) => {
+                                            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                                              event.preventDefault();
+                                              void runStartReviewThread("line");
+                                            }
+                                          }}
+                                          placeholder="Write a GitHub line comment"
+                                          ref={inlineCommentBodyRef}
+                                          value={newThreadBody}
+                                        />
+                                        <div className="mt-2 flex items-center gap-2">
+                                          <Button
+                                            className="justify-between"
+                                            disabled={!canPublishReviewThreads || threadActionBusy !== null || newThreadBody.trim().length === 0}
+                                            onClick={() => void runStartReviewThread("line")}
+                                            size="sm"
+                                          >
+                                            {threadActionBusy === "create-line" ? "Publishing..." : "Start line thread"}
+                                            <Kbd>⌘↵</Kbd>
+                                          </Button>
+                                          <Button
+                                            onClick={() => setInlineCommentAnchorId(null)}
+                                            size="sm"
+                                            type="button"
+                                            variant="ghost"
+                                          >
+                                            Cancel
+                                          </Button>
+                                        </div>
+                                        {newThreadResult && (
+                                          <p
+                                            className={cn(
+                                              "mt-2 rounded-md p-2 font-sans text-xs",
+                                              newThreadResult.ok
+                                                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                                                : newThreadResult.retryable
+                                                  ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                                                  : "bg-destructive/10 text-destructive",
+                                            )}
+                                            role="status"
+                                          >
+                                            {newThreadResult.message}
+                                          </p>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <p className="p-3 text-sm text-muted-foreground">Hunk not loaded yet.</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </div>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
