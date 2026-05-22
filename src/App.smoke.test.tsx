@@ -25,7 +25,13 @@ import {
   highlightDiffLines,
   type DiffLine,
 } from "./lib/diff-viewer";
-import { buildHandoffPacket, renderHandoffMarkdown, selectDiffContextLines } from "./lib/handoff-packet";
+import {
+  buildHandoffPacket,
+  buildHumanFeedbackPacket,
+  renderHandoffMarkdown,
+  selectDiffContextLines,
+  selectHumanFeedbackThreads,
+} from "./lib/handoff-packet";
 import {
   createSyntheticLargePullRequestFixture,
   getBoundedRenderWindow,
@@ -3794,6 +3800,67 @@ describe("App shell", () => {
     expect(markdown).toContain("- src/auth/session.ts");
   });
 
+  it("builds Human Feedback Packets from unresolved human threads with optional CodeRabbit inclusion", () => {
+    const cache = createOverviewFixture();
+    const humanThread = {
+      id: "thread-human-feedback",
+      authorLogin: "monalisa",
+      filePath: "src/auth/session.ts",
+      line: 24,
+      state: "unresolved" as const,
+      body: "Human reviewer says: verify the rotated credential path before changing it.",
+      updatedAt: "2026-05-18T12:05:00Z",
+      comments: [
+        {
+          id: "comment-human-feedback",
+          authorLogin: "monalisa",
+          body: "Human reviewer says: verify the rotated credential path before changing it.",
+          updatedAt: "2026-05-18T12:05:00Z",
+          url: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r_human",
+        },
+      ],
+    };
+    const resolvedHumanThread = {
+      ...humanThread,
+      id: "thread-resolved-human-feedback",
+      state: "resolved" as const,
+    };
+    const threads: CachedPullRequestData["reviewThreads"] = [cache.reviewThreads[0]!, humanThread, resolvedHumanThread];
+
+    expect(selectHumanFeedbackThreads(threads).map((thread) => thread.id)).toEqual(["thread-human-feedback"]);
+    expect(selectHumanFeedbackThreads(threads, true).map((thread) => thread.id)).toEqual(["thread-1", "thread-human-feedback"]);
+
+    const packet = buildHumanFeedbackPacket({
+      pullRequest: cache.metadata,
+      threads,
+      files: cache.fileSummaries,
+      diffContextByPath: {
+        "src/auth/session.ts": [
+          { oldLine: 23, newLine: 23, kind: "context", content: "before", highlighted: true, language: "typescript" },
+          { oldLine: null, newLine: 24, kind: "addition", content: "const credential = rotate();", highlighted: true, language: "typescript" },
+        ],
+      },
+      generatedAt: "2026-05-18T12:10:00Z",
+      githubDataFetchedAtEpochMs: Date.parse("2026-05-18T12:05:00Z"),
+      sourceRevision: "2222222222222222222222222222222222222222",
+    });
+    const markdown = renderHandoffMarkdown(packet);
+
+    expect(packet.mode).toBe("human-feedback");
+    expect(packet.threads).toHaveLength(1);
+    expect(packet.threads[0]).toMatchObject({
+      id: "thread-human-feedback",
+      url: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r_human",
+      resolved: false,
+      outdated: false,
+    });
+    expect(markdown).toContain("# Human Feedback Packet");
+    expect(markdown).toContain("GitHub data freshness: fetched 5 minutes before generation");
+    expect(markdown).toContain("Source PR revision: 2222222222222222222222222222222222222222");
+    expect(markdown).toContain("Before implementing changes, verify each review comment");
+    expect(markdown).toContain("Human reviewer says: verify the rotated credential path before changing it.");
+  });
+
   it("captures custom handoff intent and copies Markdown for selected Review Threads", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -3814,6 +3881,69 @@ describe("App shell", () => {
     expect(markdown).toContain("LLM used: false");
     expect(markdown).toContain("Applies code changes: false");
     expect(await screen.findByText("Copied 1 thread to Markdown.")).toBeInTheDocument();
+  });
+
+  it("copies Human Feedback Packet Markdown from the current filtered view and can include CodeRabbit", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const cache = {
+      ...createOverviewFixture(),
+      reviewThreads: [
+        {
+          id: "thread-coderabbit-feedback",
+          authorLogin: "coderabbitai",
+          filePath: "src/auth/session.ts",
+          line: 24,
+          state: "unresolved" as const,
+          body: "CodeRabbit bot feedback should be optional.",
+          updatedAt: "2026-05-18T12:00:00Z",
+        },
+        {
+          id: "thread-human-feedback",
+          authorLogin: "monalisa",
+          filePath: "src/auth/session.ts",
+          line: 24,
+          state: "unresolved" as const,
+          body: "Human feedback should be copied exactly.",
+          updatedAt: "2026-05-18T12:05:00Z",
+        },
+      ],
+    };
+    const workspaceClient = createWorkspaceClient({
+      fetchPullRequestData: vi.fn().mockResolvedValue(cache),
+    });
+
+    render(
+      <App
+        authClient={createAuthClient({ getStatus: vi.fn().mockResolvedValue(signedInSession) })}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    const dialog = await openPullRequestsDialog(user);
+    await user.type(within(dialog).getByLabelText("Pull Request URL"), readyPullRequest.url);
+    await user.click(within(dialog).getByRole("button", { name: /^open$/i }));
+    await waitFor(() => expect(workspaceClient.fetchPullRequestData).toHaveBeenCalled());
+
+    await user.selectOptions(screen.getByLabelText("Handoff packet type"), "human-feedback");
+    await user.click(screen.getByRole("button", { name: /copy markdown/i }));
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const humanMarkdown = writeText.mock.calls[0][0] as string;
+    expect(humanMarkdown).toContain("# Human Feedback Packet");
+    expect(humanMarkdown).toContain("Human feedback should be copied exactly.");
+    expect(humanMarkdown).not.toContain("CodeRabbit bot feedback should be optional.");
+
+    await user.click(screen.getByLabelText("Include CodeRabbit Threads"));
+    await user.click(screen.getByRole("button", { name: /copy markdown/i }));
+
+    const withBotMarkdown = writeText.mock.calls[1][0] as string;
+    expect(withBotMarkdown).toContain("Human feedback should be copied exactly.");
+    expect(withBotMarkdown).toContain("CodeRabbit bot feedback should be optional.");
   });
 
   it("marks Review Threads reviewed locally and distinguishes outdated threads in the UI", async () => {

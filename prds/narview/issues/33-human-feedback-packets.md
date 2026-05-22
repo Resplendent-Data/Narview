@@ -1,7 +1,7 @@
 ---
 title: "Human Feedback Packets"
 type: AFK
-status: ready
+status: done
 blocked_by: ["30-review-thread-attachment-and-file-threads.md"]
 depends_on_story_ids: [57, 58, 59, 60, 61]
 slice_order: 33
@@ -13,14 +13,14 @@ Add Human Feedback Packets as a focused Handoff Packet mode for unresolved human
 
 ## Acceptance criteria
 
-- [ ] Users can copy a Human Feedback Packet from the current filtered Narview view.
-- [ ] The default packet includes unresolved Human Review Threads.
-- [ ] Users can optionally include CodeRabbit Threads.
-- [ ] Packet output preserves raw Review Thread conversation text instead of rewriting feedback into tasks.
-- [ ] Packet output includes PR metadata, thread IDs, URLs, author, file path, line or file anchor, state, outdated/resolved flags, and nearby context.
-- [ ] Packet output includes generation time, GitHub data freshness, and source PR revision.
-- [ ] Packet output instructs external coding agents to verify feedback before implementing changes.
-- [ ] Tests cover default filtering, optional bot inclusion, raw text preservation, metadata, context, freshness, and clipboard/export behavior.
+- [x] Users can copy a Human Feedback Packet from the current filtered Narview view.
+- [x] The default packet includes unresolved Human Review Threads.
+- [x] Users can optionally include CodeRabbit Threads.
+- [x] Packet output preserves raw Review Thread conversation text instead of rewriting feedback into tasks.
+- [x] Packet output includes PR metadata, thread IDs, URLs, author, file path, line or file anchor, state, outdated/resolved flags, and nearby context.
+- [x] Packet output includes generation time, GitHub data freshness, and source PR revision.
+- [x] Packet output instructs external coding agents to verify feedback before implementing changes.
+- [x] Tests cover default filtering, optional bot inclusion, raw text preservation, metadata, context, freshness, and clipboard/export behavior.
 
 ## Blocked by
 

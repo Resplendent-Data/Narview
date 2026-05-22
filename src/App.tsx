@@ -62,7 +62,7 @@ import {
   type DiffLine,
   type DiffMode,
 } from "./lib/diff-viewer";
-import { buildHandoffPacket, renderHandoffMarkdown } from "./lib/handoff-packet";
+import { buildHandoffPacket, buildHumanFeedbackPacket, renderHandoffMarkdown, type HandoffPacketMode } from "./lib/handoff-packet";
 import { getBoundedRenderWindow } from "./lib/large-pr-performance";
 import {
   buildDiagnosticsPreview,
@@ -1660,6 +1660,8 @@ export function App({
   const [loadedDiffHunks, setLoadedDiffHunks] = useState<Record<string, string[]>>({});
   const [expandedDiffHunks, setExpandedDiffHunks] = useState<Record<string, string[]>>({});
   const [fullFileDiffs, setFullFileDiffs] = useState<Record<string, boolean>>({});
+  const [handoffPacketMode, setHandoffPacketMode] = useState<HandoffPacketMode>("selected-review-threads");
+  const [humanPacketIncludeCodeRabbit, setHumanPacketIncludeCodeRabbit] = useState(false);
   const [handoffIntentPreset, setHandoffIntentPreset] = useState("Fix selected feedback");
   const [handoffCustomIntent, setHandoffCustomIntent] = useState("");
   const [handoffCopyMessage, setHandoffCopyMessage] = useState<string | null>(null);
@@ -2088,7 +2090,15 @@ export function App({
     ? getBoundedRenderWindow(selectedFileDiffState.fullFileLines, { limit: fullFileRenderLimit })
     : null;
   const fileExplorerRows = buildFileExplorerRows(filteredFileChanges, reviewThreadViews, reviewOverview.hotspots);
-  const handoffThreadViews = selectedBulkThreads.length > 0 ? selectedBulkThreads : selectedReviewThread ? [selectedReviewThread] : [];
+  const selectedHandoffThreadViews = selectedBulkThreads.length > 0 ? selectedBulkThreads : selectedReviewThread ? [selectedReviewThread] : [];
+  const humanFeedbackThreadViews = filteredReviewThreads.filter((view) => {
+    if (view.thread.state !== "unresolved") {
+      return false;
+    }
+    return view.origin === "human" || (humanPacketIncludeCodeRabbit && view.origin === "coderabbit");
+  });
+  const handoffThreadViews =
+    handoffPacketMode === "human-feedback" ? humanFeedbackThreadViews : selectedHandoffThreadViews;
   const handoffIntent = handoffCustomIntent.trim() || handoffIntentPreset;
   const handoffDiffContextByPath = Object.fromEntries(
     handoffThreadViews.map((view) => {
@@ -2108,13 +2118,27 @@ export function App({
       return [view.thread.filePath, state.fullFileLines ?? state.hunks.flatMap((hunk) => hunk.lines)];
     }),
   );
-  const handoffPacket = buildHandoffPacket({
-    intent: handoffIntent,
-    pullRequest: reviewOverviewCache.metadata,
-    threads: handoffThreadViews.map((view) => view.thread),
-    files: reviewOverviewCache.fileSummaries,
-    diffContextByPath: handoffDiffContextByPath,
-  });
+  const handoffPacket =
+    handoffPacketMode === "human-feedback"
+      ? buildHumanFeedbackPacket({
+          intent: handoffIntent,
+          pullRequest: reviewOverviewCache.metadata,
+          threads: filteredReviewThreads.map((view) => view.thread),
+          includeCodeRabbitThreads: humanPacketIncludeCodeRabbit,
+          files: reviewOverviewCache.fileSummaries,
+          diffContextByPath: handoffDiffContextByPath,
+          githubDataFetchedAtEpochMs: reviewOverviewCache.fetchedAtEpochMs,
+          sourceRevision: selectedAnalysisInputStatus.headSha ?? reviewOverviewCache.metadata.updatedAt,
+        })
+      : buildHandoffPacket({
+          intent: handoffIntent,
+          pullRequest: reviewOverviewCache.metadata,
+          threads: handoffThreadViews.map((view) => view.thread),
+          files: reviewOverviewCache.fileSummaries,
+          diffContextByPath: handoffDiffContextByPath,
+          githubDataFetchedAtEpochMs: reviewOverviewCache.fetchedAtEpochMs,
+          sourceRevision: selectedAnalysisInputStatus.headSha ?? reviewOverviewCache.metadata.updatedAt,
+        });
   const handoffMarkdown = renderHandoffMarkdown(handoffPacket);
 
   useEffect(() => {
@@ -5044,9 +5068,32 @@ export function App({
 
             <div className="space-y-2 border-b border-border p-3" aria-label="Handoff packet">
               <div className="mb-2 flex items-center justify-between gap-2 text-sm font-semibold">
-                <span>Handoff Packet</span>
+                <span>{handoffPacketMode === "human-feedback" ? "Human Feedback Packet" : "Handoff Packet"}</span>
                 <Badge variant="info">{handoffPacket.threads.length}</Badge>
               </div>
+              <label className="text-xs text-muted-foreground">
+                Packet
+                <select
+                  aria-label="Handoff packet type"
+                  className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground"
+                  onChange={(event) => setHandoffPacketMode(event.target.value as HandoffPacketMode)}
+                  value={handoffPacketMode}
+                >
+                  <option value="selected-review-threads">Selected Review Threads</option>
+                  <option value="human-feedback">Human Feedback</option>
+                </select>
+              </label>
+              {handoffPacketMode === "human-feedback" && (
+                <label className="flex items-center gap-2 rounded-md border border-border p-2 text-xs">
+                  <input
+                    aria-label="Include CodeRabbit Threads"
+                    checked={humanPacketIncludeCodeRabbit}
+                    onChange={(event) => setHumanPacketIncludeCodeRabbit(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Include CodeRabbit Threads</span>
+                </label>
+              )}
               <label className="text-xs text-muted-foreground">
                 Intent
                 <select
@@ -5069,7 +5116,12 @@ export function App({
                 placeholder="Optional custom intent"
                 value={handoffCustomIntent}
               />
-              <Button className="w-full justify-between" variant="outline" onClick={() => void copyHandoffMarkdown()}>
+              <Button
+                className="w-full justify-between"
+                variant="outline"
+                onClick={() => void copyHandoffMarkdown()}
+                disabled={handoffPacket.threads.length === 0}
+              >
                 <span className="inline-flex items-center gap-2">
                   <Copy className="h-3.5 w-3.5" aria-hidden="true" />
                   Copy Markdown
@@ -5077,7 +5129,7 @@ export function App({
                 <Kbd>H</Kbd>
               </Button>
               <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">
-                {handoffPacket.threads.length} selected Review Thread{handoffPacket.threads.length === 1 ? "" : "s"} · no LLM calls · no code changes
+                {handoffPacket.threads.length} Review Thread{handoffPacket.threads.length === 1 ? "" : "s"} · no LLM calls · no code changes
               </p>
               {handoffCopyMessage && (
                 <p className="rounded-md bg-emerald-500/10 p-2 text-xs text-emerald-700 dark:text-emerald-300" role="status">
