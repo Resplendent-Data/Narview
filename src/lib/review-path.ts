@@ -27,13 +27,14 @@ export interface ReviewWorkProgress {
 export function buildReviewPathItems(targets: ReviewTarget[], hotspots: HotspotScore[]): ReviewPathItem[] {
   return [...targets]
     .map((target) => {
-      const hotspotScore = getTargetHotspotScore(target, hotspots);
+      const targetHotspots = getTargetHotspots(target, hotspots);
+      const hotspotScore = getTargetHotspotScore(targetHotspots);
       return {
         id: target.id,
         order: 0,
         target,
         hotspotScore,
-        orderingReasons: getOrderingReasons(target, hotspotScore),
+        orderingReasons: getOrderingReasons(target, hotspotScore, targetHotspots),
       };
     })
     .sort(compareReviewPathItems)
@@ -80,25 +81,29 @@ export function buildReviewWorkProgress(
   };
 }
 
-function getTargetHotspotScore(target: ReviewTarget, hotspots: HotspotScore[]) {
+function getTargetHotspots(target: ReviewTarget, hotspots: HotspotScore[]) {
   const pathSet = new Set(target.paths);
-  const matchingScores = hotspots
-    .filter((hotspot) => {
-      if (target.kind === "generated-cluster" && hotspot.kind === "generated-cluster") {
-        return samePathSet(target.paths, hotspot.paths ?? []);
-      }
-      return pathSet.has(hotspot.path);
-    })
-    .map((hotspot) => hotspot.score);
+  return hotspots.filter((hotspot) => {
+    if (target.kind === "generated-cluster" && hotspot.kind === "generated-cluster") {
+      return samePathSet(target.paths, hotspot.paths ?? []);
+    }
+    return pathSet.has(hotspot.path);
+  });
+}
+
+function getTargetHotspotScore(hotspots: HotspotScore[]) {
+  const matchingScores = hotspots.map((hotspot) => hotspot.score);
 
   return matchingScores.length > 0 ? Math.max(...matchingScores) : 0;
 }
 
-function getOrderingReasons(target: ReviewTarget, hotspotScore: number) {
+function getOrderingReasons(target: ReviewTarget, hotspotScore: number, hotspots: HotspotScore[]) {
   const reasons = [];
   if (hotspotScore > 0) {
     reasons.push(`Hotspot score ${hotspotScore}`);
   }
+  const checkReasons = hotspots.flatMap((hotspot) => hotspot.reasons.filter((reason) => reason.includes("failing check")));
+  reasons.push(...new Set(checkReasons));
   if (target.size.reviewThreads > 0) {
     reasons.push(`${target.size.reviewThreads} unresolved target thread${target.size.reviewThreads === 1 ? "" : "s"}`);
   }

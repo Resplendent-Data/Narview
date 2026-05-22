@@ -2426,9 +2426,23 @@ describe("App shell", () => {
         },
       ],
     });
-    const hotspots = scoreHotspots(files, [], {}, analysisIndex, [
+    const failingChecks: CachedPullRequestData["checks"] = [
       { name: "src/review/orchestrator.ts tests", status: "completed", conclusion: "failure", url: null },
-    ]);
+    ];
+    const hotspots = scoreHotspots(files, [], {}, analysisIndex, failingChecks);
+    const currentData = {
+      ...createOverviewFixture(),
+      fileSummaries: files,
+      reviewThreads: [],
+      checks: failingChecks,
+    };
+    const targets = buildReviewTargets({
+      analysisIndex,
+      attentionMap: buildAttentionMapPresentation(analysisIndex, currentData),
+      currentData,
+      hotspots,
+    });
+    const pathItems = buildReviewPathItems(targets, hotspots);
 
     expect(hotspots[0].path).toBe("src/review/orchestrator.ts");
     expect(hotspots[0].reasons).toEqual(
@@ -2439,6 +2453,9 @@ describe("App shell", () => {
         "1 related test change",
         "1 failing check",
       ]),
+    );
+    expect(pathItems.find((item) => item.target.paths.includes("src/review/orchestrator.ts"))?.orderingReasons).toContain(
+      "1 failing check",
     );
   });
 
@@ -3192,6 +3209,25 @@ describe("App shell", () => {
     });
     expect(summary.details[0]).toMatchObject({ name: "build", timingLabel: "2m 5s" });
     expect(summary.details[2]).toMatchObject({ name: "preview", timingLabel: "Running" });
+  });
+
+  it("keeps check details as link-outs and merge readiness as review context only", async () => {
+    const user = userEvent.setup();
+    vi.mocked(openUrl).mockClear();
+
+    render(<App />);
+
+    const liveChecks = screen.getByLabelText("Live checks");
+    expect(liveChecks).toHaveTextContent("Live Checks");
+    await user.click(within(liveChecks).getByRole("button", { name: /open build check details/i }));
+
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/acme/payments-web/actions/runs/1001");
+    expect(within(liveChecks).queryByText(/raw log/i)).not.toBeInTheDocument();
+
+    const mergeReadiness = screen.getByLabelText("Merge readiness context");
+    expect(mergeReadiness).toHaveTextContent("Merge readiness");
+    expect(mergeReadiness).toHaveTextContent("Visible blockers");
+    expect(screen.queryByRole("button", { name: /^merge/i })).not.toBeInTheDocument();
   });
 
   it("excludes skipped checks from failing checks count", () => {

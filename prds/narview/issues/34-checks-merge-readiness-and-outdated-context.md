@@ -1,7 +1,7 @@
 ---
 title: "Checks Merge Readiness And Outdated Context"
 type: AFK
-status: ready
+status: done
 blocked_by: ["30-review-thread-attachment-and-file-threads.md"]
 depends_on_story_ids: [62, 63]
 slice_order: 34
@@ -13,12 +13,12 @@ Carry Checks, Merge Readiness, and Outdated Review Thread context into the Atten
 
 ## Acceptance criteria
 
-- [ ] Checks and Merge Readiness remain visible in the Attention Map workflow.
-- [ ] Failing Checks can contribute context to relevant Review Targets when file or path association is available.
-- [ ] Detailed check views link out rather than becoming a full CI log viewer.
-- [ ] Outdated Review Threads remain visible, clearly marked, and associated with their best available target or fallback context.
-- [ ] Merge Readiness is review context only and does not expose merge actions.
-- [ ] Tests cover check summaries, failing check context, link-outs, Outdated thread display, and no merge controls.
+- [x] Checks and Merge Readiness remain visible in the Attention Map workflow.
+- [x] Failing Checks can contribute context to relevant Review Targets when file or path association is available.
+- [x] Detailed check views link out rather than becoming a full CI log viewer.
+- [x] Outdated Review Threads remain visible, clearly marked, and associated with their best available target or fallback context.
+- [x] Merge Readiness is review context only and does not expose merge actions.
+- [x] Tests cover check summaries, failing check context, link-outs, Outdated thread display, and no merge controls.
 
 ## Blocked by
 
