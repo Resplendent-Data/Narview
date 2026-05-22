@@ -126,6 +126,7 @@ export interface AttentionMapEdge {
 export interface AttentionMapPresentation {
   nodes: AttentionMapNode[];
   edges: AttentionMapEdge[];
+  usesLlm: false;
   summary: {
     files: number;
     symbolNodes: number;
@@ -370,6 +371,7 @@ export function buildAttentionMapPresentation(index: AnalysisIndex, currentData:
   return {
     nodes,
     edges,
+    usesLlm: false,
     summary: {
       files: fileNodeIds.size,
       symbolNodes: index.nodes.filter((node) => node.kind === "symbol").length,

@@ -1,9 +1,18 @@
+import {
+  buildAnalysisIndex,
+  buildAttentionMapPresentation,
+} from "./analysis-index";
+import type { AnalysisFileSource } from "./deep-analysis";
 import { buildLazyDiffState, getDefaultLoadedDiffHunkIds } from "./diff-viewer";
 import { buildFileChangeViews, defaultFileChangeFilters, filterFileChanges } from "./file-changes";
+import { buildHumanFeedbackPacket } from "./handoff-packet";
 import type { CachedFileSummary, CachedPullRequestData, CachedReviewThread } from "./pr-cache";
-import { buildReviewOverview } from "./review-overview";
+import { buildReviewOverview, scoreHotspots } from "./review-overview";
+import { buildReviewPathItems, moveReviewPathSelection } from "./review-path";
 import { getPullRequestKey } from "./review-session";
 import { buildReviewThreadViews, defaultReviewQueueFilters, filterReviewThreads } from "./review-queue";
+import { buildReviewTargets } from "./review-targets";
+import type { PullRequestAnalysisInput } from "./workspace";
 
 export interface BoundedRenderWindow<T> {
   items: T[];
@@ -18,6 +27,12 @@ export interface LargePullRequestFixtureOptions {
   fileCount?: number;
   threadCount?: number;
   hugeGeneratedLines?: number;
+  contextReferenceCount?: number;
+}
+
+export interface SyntheticLargeAnalysisFixture {
+  analysisInput: PullRequestAnalysisInput;
+  fileContents: AnalysisFileSource[];
 }
 
 export interface LargePrPerformanceReport {
@@ -26,11 +41,27 @@ export interface LargePrPerformanceReport {
   queueMs: number;
   fileMs: number;
   diffMs: number;
+  attentionMapMs: number;
+  reviewTargetMs: number;
+  reviewPathMs: number;
   renderedThreads: number;
   renderedFiles: number;
   renderedDiffLines: number;
   highlightedDiffLines: number;
+  analysisNodes: number;
+  attentionMapNodes: number;
+  attentionMapEdges: number;
+  contextNodes: number;
+  maxContextNodesPerFile: number;
+  contextOverflowFiles: number;
+  fallbackFiles: number;
+  generatedClusters: number;
+  reviewTargets: number;
+  reviewPathItems: number;
+  reviewPathMoves: number;
+  humanFeedbackPacketThreads: number;
   usableBeforeFullDiffContent: boolean;
+  usesLlm: false;
 }
 
 export function getBoundedRenderWindow<T>(
@@ -61,7 +92,8 @@ export function createSyntheticLargePullRequestFixture(
   const fileCount = options.fileCount ?? 1_200;
   const threadCount = options.threadCount ?? 650;
   const hugeGeneratedLines = options.hugeGeneratedLines ?? 250_000;
-  const fileSummaries = createSyntheticFiles(fileCount, hugeGeneratedLines);
+  const contextReferenceCount = options.contextReferenceCount ?? Math.min(80, Math.max(20, Math.floor(fileCount / 8)));
+  const fileSummaries = createSyntheticFiles(fileCount, hugeGeneratedLines, contextReferenceCount);
   const reviewThreads = createSyntheticThreads(threadCount, fileSummaries);
 
   return {
@@ -119,7 +151,50 @@ export function createSyntheticLargePullRequestFixture(
   };
 }
 
-export function measureLargePrUsability(cache: CachedPullRequestData): LargePrPerformanceReport {
+export function createSyntheticLargeAnalysisFixture(cache: CachedPullRequestData): SyntheticLargeAnalysisFixture {
+  const [owner = "acme", name = "large-pr"] = cache.metadata.repository.split("/");
+
+  return {
+    analysisInput: {
+      repository: {
+        owner,
+        name,
+        slug: cache.metadata.repository,
+      },
+      pullRequestNumber: cache.metadata.number,
+      state: "ready",
+      reviewClone: {
+        repository: {
+          owner,
+          name,
+          slug: cache.metadata.repository,
+        },
+        state: "ready",
+        storagePath: "app-data/review-clones/repositories/acme/large-pr",
+        storageRoot: "app-data/review-clones",
+        remoteUrl: "https://github.com/acme/large-pr.git",
+        message: null,
+        readOnly: true,
+        writePermission: false,
+        lastCheckedEpochMs: cache.fetchedAtEpochMs,
+      },
+      baseRef: cache.metadata.baseBranch,
+      headRef: cache.metadata.headBranch,
+      baseSha: "1111111111111111111111111111111111111111",
+      headSha: "2222222222222222222222222222222222222222",
+      mergeBaseSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      comparisonRef: `${cache.metadata.baseBranch ?? "main"}...${cache.metadata.headBranch ?? "head"}`,
+      checkoutMode: "read-only-analysis",
+      message: null,
+    },
+    fileContents: cache.fileSummaries.flatMap(createSyntheticFileContent),
+  };
+}
+
+export function measureLargePrUsability(
+  cache: CachedPullRequestData,
+  analysisFixture = createSyntheticLargeAnalysisFixture(cache),
+): LargePrPerformanceReport {
   const startedAt = now();
   const overviewStart = now();
   const overview = buildReviewOverview(cache);
@@ -152,26 +227,90 @@ export function measureLargePrUsability(cache: CachedPullRequestData): LargePrPe
   const diffLines = diffState?.hunks.flatMap((hunk) => hunk.lines) ?? [];
   const diffMs = now() - diffStart;
 
+  const attentionMapStart = now();
+  const analysisIndex = buildAnalysisIndex({
+    pullRequest: cache.pullRequest,
+    files: cache.fileSummaries,
+    analysisInput: analysisFixture.analysisInput,
+    fileContents: analysisFixture.fileContents,
+    nowEpochMs: cache.fetchedAtEpochMs,
+  });
+  const attentionMap = buildAttentionMapPresentation(analysisIndex, cache);
+  const hotspots = scoreHotspots(cache.fileSummaries, cache.reviewThreads, {}, analysisIndex, cache.checks);
+  const attentionMapMs = now() - attentionMapStart;
+
+  const reviewTargetStart = now();
+  const reviewTargets = buildReviewTargets({
+    analysisIndex,
+    attentionMap,
+    currentData: cache,
+    hotspots,
+  });
+  const reviewTargetMs = now() - reviewTargetStart;
+
+  const reviewPathStart = now();
+  const reviewPathItems = buildReviewPathItems(reviewTargets, hotspots);
+  let selectedTargetId: string | null = null;
+  const reviewPathMoves = Math.min(100, reviewPathItems.length);
+  for (let index = 0; index < reviewPathMoves; index += 1) {
+    selectedTargetId = moveReviewPathSelection(reviewPathItems, new Set(), selectedTargetId, 1);
+  }
+  const reviewPathMs = now() - reviewPathStart;
+
+  const humanFeedbackPacket = buildHumanFeedbackPacket({
+    pullRequest: cache.metadata,
+    threads: cache.reviewThreads,
+    files: cache.fileSummaries,
+    diffContextByPath: {},
+    generatedAt: new Date(cache.fetchedAtEpochMs).toISOString(),
+    githubDataFetchedAtEpochMs: cache.fetchedAtEpochMs,
+    sourceRevision: analysisFixture.analysisInput.headSha,
+  });
+  const contextNodesByFile = getContextNodeCountsByFile(analysisIndex.nodes);
+  const maxContextNodesPerFile = Math.max(0, ...contextNodesByFile.values());
+
   return {
     totalMs: now() - startedAt,
     overviewMs,
     queueMs,
     fileMs,
     diffMs,
+    attentionMapMs,
+    reviewTargetMs,
+    reviewPathMs,
     renderedThreads: threadWindow.rendered,
     renderedFiles: fileWindow.rendered,
     renderedDiffLines: diffLines.length,
     highlightedDiffLines: diffLines.filter((line) => line.highlighted).length,
+    analysisNodes: analysisIndex.nodes.length,
+    attentionMapNodes: attentionMap.nodes.length,
+    attentionMapEdges: attentionMap.edges.length,
+    contextNodes: analysisIndex.nodes.filter((node) => node.kind === "context").length,
+    maxContextNodesPerFile,
+    contextOverflowFiles: Object.values(analysisIndex.fileAnalyses).filter((analysis) => analysis.contextOverflowCount > 0).length,
+    fallbackFiles: analysisIndex.nodes.filter((node) => node.kind === "file-fallback").length,
+    generatedClusters: attentionMap.summary.generatedClusters,
+    reviewTargets: reviewTargets.length,
+    reviewPathItems: reviewPathItems.length,
+    reviewPathMoves,
+    humanFeedbackPacketThreads: humanFeedbackPacket.threads.length,
     usableBeforeFullDiffContent:
       overview.counts.changedFiles > 0 &&
       overview.counts.reviewThreads > 0 &&
       threadWindow.rendered > 0 &&
       fileWindow.rendered > 0 &&
+      attentionMap.nodes.length > 0 &&
+      reviewPathItems.length > 0 &&
       diffState?.fullFileLines === null,
+    usesLlm: false,
   };
 }
 
-function createSyntheticFiles(fileCount: number, hugeGeneratedLines: number): CachedFileSummary[] {
+function createSyntheticFiles(
+  fileCount: number,
+  hugeGeneratedLines: number,
+  contextReferenceCount: number,
+): CachedFileSummary[] {
   const statuses: CachedFileSummary["status"][] = ["modified", "added", "modified", "renamed", "binary"];
   const files: CachedFileSummary[] = [
     {
@@ -183,6 +322,28 @@ function createSyntheticFiles(fileCount: number, hugeGeneratedLines: number): Ca
   ];
 
   for (let index = 1; index < fileCount; index += 1) {
+    if (index <= contextReferenceCount) {
+      const group = Math.ceil(index / 2);
+      if (index % 2 === 1) {
+        files.push({
+          path: `src/domain/context-${group}.ts`,
+          additions: 2,
+          deletions: 1,
+          status: "modified",
+          patch: createContextImplementationPatch(group),
+        });
+      } else {
+        files.push({
+          path: `src/domain/context-${group}.test.ts`,
+          additions: 1,
+          deletions: 0,
+          status: "modified",
+          patch: createContextTestPatch(group),
+        });
+      }
+      continue;
+    }
+
     const status = statuses[index % statuses.length];
     const extension = index % 19 === 0 ? "png" : index % 23 === 0 ? "ipynb" : index % 7 === 0 ? "rs" : "ts";
     files.push({
@@ -194,6 +355,76 @@ function createSyntheticFiles(fileCount: number, hugeGeneratedLines: number): Ca
   }
 
   return files;
+}
+
+function createSyntheticFileContent(file: CachedFileSummary): AnalysisFileSource[] {
+  const implementationMatch = /^src\/domain\/context-(\d+)\.ts$/.exec(file.path);
+  if (implementationMatch?.[1]) {
+    return [
+      {
+        path: file.path,
+        state: "loaded",
+        content: createContextImplementationContent(Number(implementationMatch[1])),
+        message: null,
+      },
+    ];
+  }
+
+  const testMatch = /^src\/domain\/context-(\d+)\.test\.ts$/.exec(file.path);
+  if (testMatch?.[1]) {
+    return [
+      {
+        path: file.path,
+        state: "loaded",
+        content: createContextTestContent(Number(testMatch[1])),
+        message: null,
+      },
+    ];
+  }
+
+  return [];
+}
+
+function createContextImplementationPatch(index: number) {
+  return [
+    "@@ -1,8 +1,9 @@",
+    ` export function contextFeature${index}(input: string) {`,
+    `-  return contextHelper${index}A(input);`,
+    `+  if (input.length > 0) return contextHelper${index}A(input);`,
+    `+  return [contextHelper${index}B(), contextHelper${index}C(), contextHelper${index}D(), contextHelper${index}E()].join(":");`,
+    " }",
+    ` function contextHelper${index}A(input: string) { return input.trim(); }`,
+    ` function contextHelper${index}B() { return "b"; }`,
+  ].join("\n");
+}
+
+function createContextImplementationContent(index: number) {
+  return [
+    `export function contextFeature${index}(input: string) {`,
+    `  if (input.length > 0) return contextHelper${index}A(input);`,
+    `  return [contextHelper${index}B(), contextHelper${index}C(), contextHelper${index}D(), contextHelper${index}E()].join(":");`,
+    "}",
+    `function contextHelper${index}A(input: string) { return input.trim(); }`,
+    `function contextHelper${index}B() { return "b"; }`,
+    `function contextHelper${index}C() { return "c"; }`,
+    `function contextHelper${index}D() { return "d"; }`,
+    `function contextHelper${index}E() { return "e"; }`,
+  ].join("\n");
+}
+
+function createContextTestPatch(index: number) {
+  return [
+    "@@ -1,3 +1,4 @@",
+    ` import { contextFeature${index} } from "./context-${index}";`,
+    `+contextFeature${index}("ok");`,
+  ].join("\n");
+}
+
+function createContextTestContent(index: number) {
+  return [
+    `import { contextFeature${index} } from "./context-${index}";`,
+    `contextFeature${index}("ok");`,
+  ].join("\n");
 }
 
 function createSyntheticThreads(threadCount: number, files: CachedFileSummary[]): CachedReviewThread[] {
@@ -215,4 +446,15 @@ function createSyntheticThreads(threadCount: number, files: CachedFileSummary[])
 
 function now() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function getContextNodeCountsByFile(nodes: Array<{ kind: string; filePath: string }>) {
+  const counts = new Map<string, number>();
+  for (const node of nodes) {
+    if (node.kind !== "context") {
+      continue;
+    }
+    counts.set(node.filePath, (counts.get(node.filePath) ?? 0) + 1);
+  }
+  return counts;
 }

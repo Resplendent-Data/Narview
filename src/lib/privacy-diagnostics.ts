@@ -14,6 +14,7 @@ export interface DiagnosticsPreview {
     reviewSessions: ReviewSessionDiagnostics;
   };
   redaction: {
+    analysisIndex: "redacted";
     rawCode: "redacted";
     diffHunks: "redacted";
     reviewThreadBodies: "redacted";
@@ -54,7 +55,8 @@ export const telemetryPolicy: TelemetryPolicy = {
   remoteLogSinks: [],
 };
 
-const sensitiveKeyPattern = /(authorization|body|code|cookie|credential|diff|header|hunk|patch|request|response|secret|thread|token)/i;
+const sensitiveKeyPattern =
+  /(analysisIndex|attentionMap|authorization|body|code|cookie|credential|diff|fileContents|header|hunk|patch|request|response|reviewTarget|secret|sourceSignature|thread|token)/i;
 const secretLikePattern = /(bearer\s+[a-z0-9._-]+|gh[opsru]_[a-z0-9_]+|github_pat_[a-z0-9_]+|-----BEGIN [^-]+-----)/i;
 const codeLikePattern = /(^|\n)\s*(diff --git|@@|[-+]\s*(const|let|var|function|class|import|export)\b)/;
 
@@ -106,6 +108,7 @@ export function buildDiagnosticsPreview(input: {
       reviewSessions: input.reviewSessions,
     },
     redaction: {
+      analysisIndex: "redacted",
       rawCode: "redacted",
       diffHunks: "redacted",
       reviewThreadBodies: "redacted",

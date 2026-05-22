@@ -1,7 +1,7 @@
 ---
 title: "Privacy Performance And No-LLM Hardening"
 type: AFK
-status: ready
+status: done
 blocked_by: ["24-structural-hotspots-and-generated-clusters.md", "33-human-feedback-packets.md"]
 depends_on_story_ids: [17, 21, 22, 64]
 slice_order: 35
@@ -13,12 +13,12 @@ Harden the Attention Map workflow for privacy, large Pull Requests, and the LLM-
 
 ## Acceptance criteria
 
-- [ ] Large synthetic PR fixtures cover many nodes, generated clusters, context references, Review Threads, and fallback files.
-- [ ] Attention Map load and Review Path navigation meet responsive usability thresholds on large fixtures.
-- [ ] Context Nodes and generated clusters remain capped or collapsed under load.
-- [ ] Analysis Index storage, logs, and diagnostics avoid leaking OAuth tokens or sensitive review data beyond explicit user-controlled exports.
-- [ ] Attention Map generation, Hotspot ranking, Review Path ordering, and Human Feedback Packet construction perform no LLM calls.
-- [ ] Tests cover large fixture performance, cluster caps, index privacy, diagnostics redaction, and no-LLM enforcement.
+- [x] Large synthetic PR fixtures cover many nodes, generated clusters, context references, Review Threads, and fallback files.
+- [x] Attention Map load and Review Path navigation meet responsive usability thresholds on large fixtures.
+- [x] Context Nodes and generated clusters remain capped or collapsed under load.
+- [x] Analysis Index storage, logs, and diagnostics avoid leaking OAuth tokens or sensitive review data beyond explicit user-controlled exports.
+- [x] Attention Map generation, Hotspot ranking, Review Path ordering, and Human Feedback Packet construction perform no LLM calls.
+- [x] Tests cover large fixture performance, cluster caps, index privacy, diagnostics redaction, and no-LLM enforcement.
 
 ## Blocked by
 

@@ -33,6 +33,7 @@ import {
   selectHumanFeedbackThreads,
 } from "./lib/handoff-packet";
 import {
+  createSyntheticLargeAnalysisFixture,
   createSyntheticLargePullRequestFixture,
   getBoundedRenderWindow,
   measureLargePrUsability,
@@ -1338,6 +1339,41 @@ describe("App shell", () => {
     ).toBe(false);
   });
 
+  it("stores Analysis Index metadata without raw source, patches, or OAuth-like secrets", () => {
+    const files: CachedPullRequestData["fileSummaries"] = [
+      {
+        path: "src/auth/secret.ts",
+        additions: 2,
+        deletions: 1,
+        status: "modified",
+        patch:
+          "@@ -1,4 +1,5 @@\n export function rotateSecret() {\n-  return previousValue();\n+  const token = \"gho_secretabcdefghijklmnopqrstuvwxyz\";\n+  return nextValue(token);\n }",
+      },
+    ];
+    const index = buildAnalysisIndex({
+      pullRequest: readyPullRequest,
+      files,
+      analysisInput: readyAnalysisInput,
+      fileContents: [
+        {
+          path: "src/auth/secret.ts",
+          state: "loaded",
+          content:
+            "export function rotateSecret() {\n  const token = \"gho_secretabcdefghijklmnopqrstuvwxyz\";\n  return nextValue(token);\n}\nfunction nextValue(value: string) { return value; }\n",
+          message: null,
+        },
+      ],
+    });
+
+    writeAnalysisIndex(index);
+    const stored = window.localStorage.getItem(analysisIndexStorageKey) ?? "";
+
+    expect(stored).toContain("local-storage-outside-review-clone");
+    expect(stored).not.toContain("gho_secretabcdefghijklmnopqrstuvwxyz");
+    expect(stored).not.toContain("previousValue");
+    expect(stored).not.toContain("nextValue(token)");
+  });
+
   it("rebuilds the Attention Map presentation from the Analysis Index and current PR data", () => {
     const currentData = createOverviewFixture();
     const index = buildAnalysisIndex({
@@ -1350,6 +1386,7 @@ describe("App shell", () => {
     expect(presentation.summary.files).toBe(currentData.fileSummaries.length);
     expect(presentation.summary.hunkNodes).toBe(index.nodes.filter((node) => node.kind === "hunk").length);
     expect(presentation.summary.reviewThreads).toBe(currentData.reviewThreads.length);
+    expect(presentation.usesLlm).toBe(false);
     expect(presentation.edges.length).toBeGreaterThanOrEqual(index.nodes.length);
     expect(presentation.nodes.find((node) => node.id === "file:src/auth/session.ts")).toEqual(
       expect.objectContaining({
@@ -2238,6 +2275,7 @@ describe("App shell", () => {
 
     const preview = within(privacy).getByLabelText("Diagnostics preview");
     expect(preview).toHaveTextContent('"telemetry"');
+    expect(preview).toHaveTextContent('"analysisIndex": "redacted"');
     expect(preview).toHaveTextContent('"oauthTokens": "redacted"');
     expect(preview).not.toHaveTextContent("The rotated token path");
 
@@ -2254,6 +2292,10 @@ describe("App shell", () => {
       token: "gho_secretabcdefghijklmnopqrstuvwxyz",
       diffHunk: "@@ -1,1 +1,1 @@\n-  const oldValue = token;\n+  const newValue = token;",
       reviewThreadBody: "Raw review feedback should not leave diagnostics.",
+      analysisIndex: {
+        sourceSignature: "hash-only",
+        nodes: [{ label: "rotatedTokenPath", reason: "changed-symbol" }],
+      },
       nested: {
         requestHeaders: {
           authorization: "Bearer secret",
@@ -2265,6 +2307,7 @@ describe("App shell", () => {
       token: string;
       diffHunk: string;
       reviewThreadBody: string;
+      analysisIndex: string;
       nested: { requestHeaders: string; safeCount: number };
     };
     const preview = buildDiagnosticsPreview({
@@ -2280,8 +2323,10 @@ describe("App shell", () => {
     expect(redacted.token).toBe("[redacted]");
     expect(redacted.diffHunk).toBe("[redacted]");
     expect(redacted.reviewThreadBody).toBe("[redacted]");
+    expect(redacted.analysisIndex).toBe("[redacted]");
     expect(redacted.nested.requestHeaders).toBe("[redacted]");
     expect(redacted.nested.safeCount).toBe(4);
+    expect(exportText).toContain('"analysisIndex": "redacted"');
     expect(exportText).toContain('"rawCode": "redacted"');
     expect(hasTelemetryEmissionPaths()).toBe(false);
     expect(telemetryPolicy.analyticsSinks).toEqual([]);
@@ -3500,12 +3545,25 @@ describe("App shell", () => {
       threadCount: 600,
       hugeGeneratedLines: 1_000_000,
     });
+    const analysisFixture = createSyntheticLargeAnalysisFixture(fixture);
+    const index = buildAnalysisIndex({
+      pullRequest: fixture.pullRequest,
+      files: fixture.fileSummaries,
+      analysisInput: analysisFixture.analysisInput,
+      fileContents: analysisFixture.fileContents,
+    });
+    const presentation = buildAttentionMapPresentation(index, fixture);
     const changedLines = fixture.fileSummaries.reduce((total, file) => total + file.additions + file.deletions, 0);
 
     expect(fixture.fileSummaries).toHaveLength(1_000);
     expect(fixture.reviewThreads).toHaveLength(600);
     expect(fixture.fileSummaries.some((file) => file.path.includes("generated/huge-schema"))).toBe(true);
     expect(fixture.fileSummaries.some((file) => file.status === "binary")).toBe(true);
+    expect(analysisFixture.fileContents.length).toBeGreaterThan(20);
+    expect(index.nodes.filter((node) => node.kind === "context").length).toBeGreaterThan(0);
+    expect(index.nodes.filter((node) => node.kind === "file-fallback").length).toBeGreaterThan(0);
+    expect(presentation.summary.generatedClusters).toBe(1);
+    expect(presentation.usesLlm).toBe(false);
     expect(changedLines).toBeGreaterThan(1_000_000);
   });
 
@@ -3534,8 +3592,21 @@ describe("App shell", () => {
     expect(report.renderedFiles).toBeLessThanOrEqual(120);
     expect(report.renderedDiffLines).toBeLessThanOrEqual(16);
     expect(report.highlightedDiffLines).toBeLessThanOrEqual(report.renderedDiffLines);
-    expect(report.totalMs).toBeLessThan(500);
+    expect(report.analysisNodes).toBeGreaterThan(1_000);
+    expect(report.contextNodes).toBeGreaterThan(0);
+    expect(report.maxContextNodesPerFile).toBeLessThanOrEqual(3);
+    expect(report.contextOverflowFiles).toBeGreaterThan(0);
+    expect(report.fallbackFiles).toBeGreaterThan(0);
+    expect(report.generatedClusters).toBe(1);
+    expect(report.reviewTargets).toBeGreaterThan(0);
+    expect(report.reviewPathItems).toBe(report.reviewTargets);
+    expect(report.reviewPathMoves).toBeGreaterThan(0);
+    expect(report.humanFeedbackPacketThreads).toBeGreaterThan(0);
+    expect(report.usesLlm).toBe(false);
+    expect(report.totalMs).toBeLessThan(900);
     expect(report.queueMs).toBeLessThan(150);
+    expect(report.attentionMapMs).toBeLessThan(350);
+    expect(report.reviewPathMs).toBeLessThan(50);
   });
 
   it("renders bounded large Pull Request windows and rate-limit context in the app", async () => {
