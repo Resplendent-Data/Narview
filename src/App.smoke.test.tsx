@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import userEvent from "@testing-library/user-event";
 import { App } from "./App";
@@ -695,7 +695,7 @@ describe("App shell", () => {
     );
 
     const dialog = await openPullRequestsDialog(user);
-    await user.type(within(dialog).getByLabelText("Pull Request URL"), readyPullRequest.url);
+    fireEvent.change(within(dialog).getByLabelText("Pull Request URL"), { target: { value: readyPullRequest.url } });
     await user.click(within(dialog).getByRole("button", { name: /^open$/i }));
 
     const thread = await screen.findByLabelText("Active review thread");
@@ -3866,7 +3866,7 @@ describe("App shell", () => {
     expect(screen.queryByLabelText("Review thread queue")).not.toBeInTheDocument();
     await user.click(within(queueSummary).getByRole("button", { name: /browse threads/i }));
     const dialog = await screen.findByRole("dialog", { name: /review threads/i });
-    await user.type(within(dialog).getByLabelText("Search review threads"), "queue");
+    fireEvent.change(within(dialog).getByLabelText("Search review threads"), { target: { value: "queue" } });
     await user.click(within(dialog).getByRole("button", { name: /src\/review\/queue\.ts/i }));
 
     const diffViewer = screen.getByLabelText("Diff viewer");
@@ -4160,7 +4160,7 @@ describe("App shell", () => {
     });
     render(<App />);
 
-    await user.type(screen.getByLabelText("Custom handoff intent"), "Fix only the stale session cache issue");
+    fireEvent.change(screen.getByLabelText("Custom handoff intent"), { target: { value: "Fix only the stale session cache issue" } });
     await user.click(screen.getByRole("button", { name: /copy markdown/i }));
 
     expect(writeText).toHaveBeenCalledTimes(1);
