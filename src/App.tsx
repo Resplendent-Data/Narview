@@ -1546,6 +1546,24 @@ function getReviewTargetScoreLabel(score: number) {
   return `Score ${score}`;
 }
 
+function getPathFileName(path: string | null | undefined) {
+  if (!path) {
+    return "Unknown file";
+  }
+  return path.split("/").filter(Boolean).at(-1) ?? path;
+}
+
+function getPathDirectory(path: string | null | undefined, tailParts?: number) {
+  if (!path) {
+    return "";
+  }
+  const directory = path.split("/").filter(Boolean).slice(0, -1).join("/");
+  if (!directory) {
+    return "";
+  }
+  return tailParts ? getPathTail(directory, tailParts) : directory;
+}
+
 function getPathTail(path: string, parts: number) {
   const segments = path.split("/").filter(Boolean);
   return segments.slice(-parts).join("/") || path;
@@ -6799,13 +6817,22 @@ export function App({
       <Dialog.Root open={targetDiffDialogOpen} onOpenChange={setTargetDiffDialogOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm" />
-          <Dialog.Content className="fixed left-1/2 top-8 z-50 flex max-h-[90vh] w-[min(1180px,calc(100vw-2rem))] -translate-x-1/2 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl">
+          <Dialog.Content className="fixed left-1/2 top-4 z-50 flex max-h-[94vh] w-[min(1500px,calc(100vw-1rem))] -translate-x-1/2 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl">
             <div className="border-b border-border p-4">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <Dialog.Title className="text-base font-semibold">Review Target Diff</Dialog.Title>
-                  <Dialog.Description className="mt-1 truncate text-sm text-muted-foreground">
-                    {selectedReviewPathItem?.target.title ?? selectedFileDiffState?.filePath ?? "Select a Review Target first."}
+                  <Dialog.Description className="mt-1 min-w-0 text-sm">
+                    <span className="block break-words font-medium leading-snug text-foreground">
+                      {selectedReviewPathItem
+                        ? getReviewTargetPrimaryLabel(selectedReviewPathItem.target)
+                        : getPathFileName(selectedFileDiffState?.filePath ?? activeThreadFile)}
+                    </span>
+                    <span className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">
+                      {selectedReviewPathItem
+                        ? getReviewTargetScopeLabel(selectedReviewPathItem.target)
+                        : (selectedFileDiffState?.filePath ?? activeThreadFile ?? "Select a Review Target first.")}
+                    </span>
                   </Dialog.Description>
                 </div>
                 <Dialog.Close asChild>
@@ -6815,14 +6842,21 @@ export function App({
                 </Dialog.Close>
               </div>
             </div>
-            <div className="grid min-h-0 flex-1 grid-cols-[300px_minmax(0,1fr)]">
+            <div className="grid min-h-0 flex-1 grid-cols-[270px_minmax(0,1fr)]">
               <aside className="pane-scroll-y min-h-0 border-r border-border p-3" aria-label="Diff target context">
                 {selectedReviewPathItem ? (
                   <div className="space-y-3">
                     <div className="rounded-md border border-border bg-background p-3 text-sm">
                       <div className="flex items-start justify-between gap-2">
-                        <p className="min-w-0 truncate font-semibold">{selectedReviewPathItem.target.title}</p>
-                        <Badge variant={selectedReviewPathItem.hotspotScore > 0 ? "warning" : "muted"}>
+                        <div className="min-w-0">
+                          <p className="break-words font-semibold leading-snug">
+                            {getReviewTargetPrimaryLabel(selectedReviewPathItem.target)}
+                          </p>
+                          <p className="mt-1 break-words font-mono text-xs text-muted-foreground">
+                            {getReviewTargetScopeLabel(selectedReviewPathItem.target)}
+                          </p>
+                        </div>
+                        <Badge className="self-start" variant={selectedReviewPathItem.hotspotScore > 0 ? "warning" : "muted"}>
                           {selectedReviewPathItem.hotspotScore > 0 ? getReviewTargetScoreLabel(selectedReviewPathItem.hotspotScore) : "No score"}
                         </Badge>
                       </div>
@@ -6838,9 +6872,11 @@ export function App({
                           )}
                           key={path}
                           onClick={() => selectFilePathInDiff(path)}
+                          title={path}
                           type="button"
                         >
-                          <span className="block truncate">{path}</span>
+                          <span className="block break-words font-semibold leading-snug">{getPathFileName(path)}</span>
+                          <span className="mt-1 block truncate text-[11px] text-muted-foreground">{getPathDirectory(path, 5)}</span>
                         </button>
                       ))}
                     </div>
@@ -6866,12 +6902,17 @@ export function App({
                 <section className="diff-shell rounded-md border border-border bg-background" aria-label="Diff dialog viewer">
                   <div className="diff-file-header flex items-center justify-between gap-3 border-b border-border px-3 py-2">
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold">{selectedFileDiffState?.filePath ?? activeThreadFile}</p>
+                      <p className="break-words text-sm font-semibold leading-snug" title={selectedFileDiffState?.filePath ?? activeThreadFile ?? undefined}>
+                        {getPathFileName(selectedFileDiffState?.filePath ?? activeThreadFile)}
+                      </p>
+                      <p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={selectedFileDiffState?.filePath ?? activeThreadFile ?? undefined}>
+                        {selectedFileDiffState?.filePath ?? activeThreadFile}
+                      </p>
                       <p className="mt-1 text-xs text-muted-foreground">
                         {selectedFileDiffState?.language ?? "text"} · {selectedFileDiffState?.kind ?? "text"}
                       </p>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2">
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
                       {selectedFileChange && (
                         <Badge variant={selectedFileChange.viewed ? "success" : "muted"}>
                           {selectedFileChange.viewed ? "File viewed" : "File unviewed"}

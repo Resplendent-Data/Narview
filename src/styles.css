@@ -285,18 +285,18 @@
 
   .diff-shell {
     --diff-surface: hsl(220 20% 98%);
-    --diff-surface-raised: hsl(220 16% 95%);
-    --diff-line-bg: hsl(0 0% 100%);
-    --diff-gutter-bg: hsl(220 17% 96%);
-    --diff-gutter-fg: hsl(220 9% 48%);
-    --diff-border: hsl(220 13% 84%);
+    --diff-surface-raised: hsl(220 18% 96%);
+    --diff-line-bg: hsl(0 0% 99%);
+    --diff-gutter-bg: hsl(220 18% 95%);
+    --diff-gutter-fg: hsl(220 10% 43%);
+    --diff-border: hsl(220 14% 80%);
     --diff-code-fg: hsl(222 18% 17%);
-    --diff-add-bg: hsl(145 55% 95% / 0.86);
-    --diff-add-gutter: hsl(145 48% 91% / 0.9);
-    --diff-add-marker: hsl(151 58% 29%);
-    --diff-del-bg: hsl(356 78% 97% / 0.9);
-    --diff-del-gutter: hsl(356 65% 93% / 0.92);
-    --diff-del-marker: hsl(356 60% 40%);
+    --diff-add-bg: hsl(150 45% 96%);
+    --diff-add-gutter: hsl(150 42% 88%);
+    --diff-add-marker: hsl(151 64% 25%);
+    --diff-del-bg: hsl(356 72% 97%);
+    --diff-del-gutter: hsl(356 62% 91%);
+    --diff-del-marker: hsl(356 66% 36%);
     --diff-placeholder-bg: hsl(220 18% 97%);
     --diff-hover: hsl(214 68% 92% / 0.5);
     background: var(--diff-surface);
@@ -310,10 +310,10 @@
     --diff-gutter-fg: hsl(217 9% 51%);
     --diff-border: hsl(220 12% 24%);
     --diff-code-fg: hsl(214 16% 80%);
-    --diff-add-bg: hsl(150 48% 15% / 0.52);
+    --diff-add-bg: hsl(150 42% 14% / 0.56);
     --diff-add-gutter: hsl(150 43% 13% / 0.74);
     --diff-add-marker: hsl(146 55% 56%);
-    --diff-del-bg: hsl(356 47% 16% / 0.54);
+    --diff-del-bg: hsl(356 45% 15% / 0.58);
     --diff-del-gutter: hsl(356 43% 13% / 0.76);
     --diff-del-marker: hsl(356 64% 67%);
     --diff-placeholder-bg: hsl(220 14% 15%);
