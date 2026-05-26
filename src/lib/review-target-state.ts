@@ -1,4 +1,5 @@
 import type { ReviewTarget } from "./review-targets";
+import { setLocalStorageItem } from "./local-storage";
 
 export interface ReviewTargetRecoveryContext {
   pullRequestKey: string;
@@ -50,7 +51,7 @@ export function readReviewTargetStateStore(): ReviewTargetStateStore {
 
 export function writeReviewTargetStateStore(store: ReviewTargetStateStore) {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(reviewTargetStorageKey, JSON.stringify(store));
+    setLocalStorageItem(reviewTargetStorageKey, JSON.stringify(store));
   }
 }
 

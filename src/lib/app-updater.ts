@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Update } from "@tauri-apps/plugin-updater";
+import { setLocalStorageItem } from "./local-storage";
 
 export type AppUpdateClient = {
   isDesktopRuntime: () => boolean;
@@ -71,7 +72,7 @@ function writeLastUpdateCheckAt(timestamp: number) {
     return;
   }
 
-  window.localStorage.setItem(lastUpdateCheckStorageKey, String(timestamp));
+  setLocalStorageItem(lastUpdateCheckStorageKey, String(timestamp));
 }
 
 function getUpdateErrorMessage(error: unknown) {

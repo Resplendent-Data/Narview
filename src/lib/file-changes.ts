@@ -1,4 +1,5 @@
 import type { CachedFileSummary } from "./pr-cache";
+import { setLocalStorageItem } from "./local-storage";
 
 export type FileViewedFilter = "all" | "viewed" | "unviewed";
 export type FileKind = "text" | "image" | "binary" | "non-text";
@@ -76,7 +77,7 @@ export function readFileChangeStore(): FileChangeStore {
 
 export function writeFileChangeStore(store: FileChangeStore) {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(fileChangeStorageKey, JSON.stringify(store));
+    setLocalStorageItem(fileChangeStorageKey, JSON.stringify(store));
   }
 }
 

@@ -178,7 +178,27 @@ export function readCacheStore(): PullRequestCacheStore {
 
 export function writeCacheStore(store: PullRequestCacheStore) {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(prCacheStorageKey, JSON.stringify(store));
+    try {
+      window.localStorage.setItem(prCacheStorageKey, JSON.stringify(store));
+    } catch (error) {
+      console.warn("Narview could not persist the full Pull Request cache; compacting cached diff content.", error);
+      const compacted = evictCache(compactCacheForQuota(store), {
+        maxEntries: Math.min(defaultCacheBounds.maxEntries, 10),
+        maxBytes: Math.min(defaultCacheBounds.maxBytes, 2 * 1024 * 1024),
+      });
+
+      try {
+        window.localStorage.removeItem(prCacheStorageKey);
+        window.localStorage.setItem(prCacheStorageKey, JSON.stringify(compacted));
+      } catch (fallbackError) {
+        console.warn("Narview could not persist the compacted Pull Request cache; clearing cached GitHub data.", fallbackError);
+        try {
+          window.localStorage.removeItem(prCacheStorageKey);
+        } catch {
+          // Storage is best-effort cache only; startup must not depend on it.
+        }
+      }
+    }
   }
 }
 
@@ -304,6 +324,24 @@ export function evictCache(store: PullRequestCacheStore, bounds = defaultCacheBo
   }
 
   return next;
+}
+
+function compactCacheForQuota(store: PullRequestCacheStore): PullRequestCacheStore {
+  return {
+    version: 1,
+    entries: Object.fromEntries(
+      Object.entries(store.entries).map(([key, entry]) => [
+        key,
+        {
+          ...entry,
+          fileSummaries: entry.fileSummaries.map((file) => {
+            const { patch: _patch, ...summary } = file;
+            return summary;
+          }),
+        },
+      ]),
+    ),
+  };
 }
 
 function estimateStoreBytes(store: PullRequestCacheStore) {

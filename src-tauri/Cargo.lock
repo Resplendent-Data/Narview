@@ -2267,7 +2267,7 @@ dependencies = [
 
 [[package]]
 name = "narview"
-version = "0.1.0-rc.10"
+version = "0.1.0-rc.11"
 dependencies = [
  "keyring",
  "reqwest 0.12.28",

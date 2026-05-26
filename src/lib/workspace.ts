@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CachedCheckRun, CachedPullRequestData, CachedRateLimit } from "./pr-cache";
+import { setLocalStorageItem } from "./local-storage";
 
 export interface WorkspaceRepository {
   owner: string;
@@ -143,7 +144,7 @@ function readLocalRepositories(): WorkspaceRepository[] {
 
 function writeLocalRepositories(repositories: WorkspaceRepository[]) {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(storageKey, JSON.stringify(repositories));
+    setLocalStorageItem(storageKey, JSON.stringify(repositories));
   }
 }
 

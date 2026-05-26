@@ -1,4 +1,5 @@
 import type { PullRequestSummary } from "./workspace";
+import { setLocalStorageItem } from "./local-storage";
 
 export interface ReviewSessionSnapshot {
   activeQueueId: string;
@@ -83,7 +84,7 @@ export function readReviewSessionStore(): SessionStore {
 
 export function writeReviewSessionStore(store: SessionStore) {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(reviewSessionStorageKey, JSON.stringify(store));
+    setLocalStorageItem(reviewSessionStorageKey, JSON.stringify(store));
   }
 }
 

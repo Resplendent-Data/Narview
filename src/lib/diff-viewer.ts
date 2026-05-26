@@ -1,5 +1,6 @@
 import type { CachedFileSummary } from "./pr-cache";
 import { getFileKind, type FileKind } from "./file-changes";
+import { setLocalStorageItem } from "./local-storage";
 
 export type DiffMode = "unified" | "side-by-side";
 export type DiffLineKind = "context" | "addition" | "deletion";
@@ -75,7 +76,7 @@ export function readDiffModePreference(): DiffMode {
 
 export function writeDiffModePreference(mode: DiffMode) {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(diffViewerStorageKey, JSON.stringify({ version: 1, mode }));
+    setLocalStorageItem(diffViewerStorageKey, JSON.stringify({ version: 1, mode }));
   }
 }
 

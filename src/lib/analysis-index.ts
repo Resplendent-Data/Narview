@@ -8,6 +8,7 @@ import {
 } from "./deep-analysis";
 import { getFileKind, type FileKind } from "./file-changes";
 import { isGeneratedOrLowSignalPath } from "./generated-files";
+import { setLocalStorageItem } from "./local-storage";
 import type { CachedFileSummary, CachedPullRequestData } from "./pr-cache";
 import { attachReviewThreadsToNodes } from "./review-thread-attachments";
 import { getPullRequestKey } from "./review-session";
@@ -174,7 +175,7 @@ export function writeAnalysisIndex(index: AnalysisIndex, store = readAnalysisInd
   };
 
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(analysisIndexStorageKey, JSON.stringify(next));
+    setLocalStorageItem(analysisIndexStorageKey, JSON.stringify(next));
   }
 
   return next;

@@ -7,6 +7,7 @@ const files = {
   tauriConfig: "src-tauri/tauri.conf.json",
   releaseTemplate: "src-tauri/tauri.release.conf.template.json",
   releaseDocs: "docs/release/auto-updates.md",
+  viteConfig: "vite.config.ts",
 };
 
 function assert(condition, message) {
@@ -20,7 +21,7 @@ function versionFromCargo(toml) {
   return packageSection.match(/version\s*=\s*"([^"]+)"/)?.[1];
 }
 
-const [workflow, packageJsonRaw, cargoToml, tauriConfigRaw, releaseTemplateRaw, releaseDocs] = await Promise.all(
+const [workflow, packageJsonRaw, cargoToml, tauriConfigRaw, releaseTemplateRaw, releaseDocs, viteConfig] = await Promise.all(
   Object.values(files).map((file) => readFile(file, "utf8")),
 );
 
@@ -56,6 +57,10 @@ assert(!workflow.includes("APPLE_CERTIFICATE"), "Release workflow must not requi
 assert(!workflow.includes("APPLE_API_KEY_PATH"), "Release workflow must not require macOS notarization secrets yet.");
 assert(workflow.includes("npm run test:release-config"), "Release workflow must run release dry-run checks.");
 assert(workflow.includes("npm run test:smoke"), "Release workflow must run smoke tests before publishing.");
+assert(
+  /base\s*:\s*["']\.\/["']/.test(viteConfig),
+  "Vite must use relative asset URLs so packaged Tauri updates can load bundled web assets.",
+);
 
 assert(
   packageJson.dependencies?.["@tauri-apps/plugin-updater"],

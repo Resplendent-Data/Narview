@@ -1,4 +1,5 @@
 import type { CachedReviewThread } from "./pr-cache";
+import { setLocalStorageItem } from "./local-storage";
 
 export type ReviewThreadOrigin = "coderabbit" | "human";
 export type ReviewOriginFilter = "all" | ReviewThreadOrigin;
@@ -76,7 +77,7 @@ export function readReviewQueueStore(): ReviewQueueStore {
 
 export function writeReviewQueueStore(store: ReviewQueueStore) {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(reviewQueueStorageKey, JSON.stringify(store));
+    setLocalStorageItem(reviewQueueStorageKey, JSON.stringify(store));
   }
 }
 
