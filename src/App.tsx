@@ -617,7 +617,7 @@ function ReviewTargetFlow({
   onOpenTarget,
 }: ReviewTargetFlowProps) {
   const visualItems = useMemo(() => getReviewTargetVisualItems(items), [items]);
-  const denseBoard = visualItems.length > 120;
+  const denseBoard = isDenseReviewTargetBoard(visualItems.length);
   const layoutItems = useMemo(
     () => getReviewTargetLayoutItems(visualItems, needsReReviewTargetIds),
     [needsReReviewTargetIds, visualItems],
@@ -684,35 +684,40 @@ function ReviewTargetFlowCanvas({
       void flow.fitView({
         nodes: focusNodeIds.map((id) => ({ id })),
         padding: 0.34,
-        duration: 180,
+        duration: denseBoard ? 0 : 180,
       });
     });
-  }, [edges, flow, nodes, selectedTargetId]);
+  }, [denseBoard, edges, flow, nodes, selectedTargetId]);
 
   return (
     <div
       aria-label="Review target graph"
-      className="h-full min-h-full overflow-hidden bg-background"
+      className={cn("review-target-flow h-full min-h-full overflow-hidden bg-background", denseBoard && "review-target-flow--dense")}
       data-edge-count={edges.length}
       data-focused-target-id={selectedTargetId ?? ""}
     >
       <ReactFlow
         colorMode="system"
         edges={edges}
+        edgesFocusable={false}
+        elementsSelectable={false}
         fitView
+        fitViewOptions={{ padding: 0.2 }}
         maxZoom={1.8}
         minZoom={0.25}
         nodes={nodes}
         nodesConnectable={false}
         nodesDraggable={false}
+        nodesFocusable={false}
         onlyRenderVisibleElements={denseBoard}
         nodeTypes={reviewTargetNodeTypes}
         onNodeDoubleClick={(_, node) => onOpenTarget(node.id)}
         onNodeClick={(_, node) => onSelectTarget(node.id)}
         panOnScroll
         proOptions={{ hideAttribution: true }}
+        selectNodesOnDrag={false}
       >
-        <Background gap={18} />
+        <Background gap={denseBoard ? 32 : 18} />
         <Controls showInteractive={false} />
         {!denseBoard && <MiniMap pannable={false} zoomable={false} nodeStrokeWidth={2} />}
       </ReactFlow>
@@ -751,7 +756,7 @@ function getReviewTargetLayoutItems(
   visualItems: ReviewPathItem[],
   needsReReviewTargetIds: Set<string>,
 ): ReviewTargetLayoutItem[] {
-  const denseBoard = visualItems.length > 120;
+  const denseBoard = isDenseReviewTargetBoard(visualItems.length);
   const prominentLimit = denseBoard ? 18 : 24;
   const hotspotLimit = denseBoard ? 78 : 70;
 
@@ -900,6 +905,7 @@ function buildReviewTargetRelationshipEdges(
   selectedTargetId: string | null,
   targetCount: number,
 ) {
+  const denseBoard = isDenseReviewTargetBoard(targetCount);
   const selectedNeighborIds = getReviewTargetNeighborIds(groups, selectedTargetId);
   const visibleGroups = getVisibleReviewTargetRelationshipGroups(groups, selectedTargetId, selectedNeighborIds, targetCount);
 
@@ -921,8 +927,8 @@ function buildReviewTargetRelationshipEdges(
       sourceHandle: handles.sourceHandle,
       target: group.target,
       targetHandle: handles.targetHandle,
-      animated: selected,
-      interactionWidth: 18,
+      animated: false,
+      interactionWidth: denseBoard ? 8 : 18,
       type: "default",
       zIndex: selected ? 2 : nearSelected ? 1 : 0,
       label: selected && group.count > 1 ? String(group.count) : undefined,
@@ -940,7 +946,7 @@ function buildReviewTargetRelationshipEdges(
             : moduleOnly
               ? "hsl(42 92% 50%)"
               : "hsl(var(--muted-foreground))",
-        strokeDasharray: pathOnly ? "2 8" : moduleOnly ? "6 6" : undefined,
+        strokeDasharray: denseBoard && !selected ? undefined : pathOnly ? "2 8" : moduleOnly ? "6 6" : undefined,
         strokeLinecap: "round",
         strokeOpacity: opacity,
         strokeWidth: width,
@@ -955,7 +961,7 @@ function getVisibleReviewTargetRelationshipGroups(
   selectedNeighborIds: Set<string>,
   targetCount: number,
 ) {
-  if (targetCount <= 120 || groups.length <= 360) {
+  if (!isDenseReviewTargetBoard(targetCount) || groups.length <= 240) {
     return groups;
   }
 
@@ -992,9 +998,13 @@ function getVisibleReviewTargetRelationshipGroups(
 
 function getDenseReviewTargetEdgeBudget(targetCount: number, selected: boolean) {
   if (targetCount > 260) {
-    return selected ? 260 : 320;
+    return selected ? 180 : 220;
   }
-  return selected ? 300 : 360;
+  return selected ? 220 : 260;
+}
+
+function isDenseReviewTargetBoard(targetCount: number) {
+  return targetCount > 120;
 }
 
 function getReviewTargetNeighborIds(groups: ReviewTargetRelationshipGroup[], selectedTargetId: string | null) {

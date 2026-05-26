@@ -3818,7 +3818,9 @@ describe("App shell", () => {
     expect((await screen.findAllByText("acme/large-pr #9001")).length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Review queue summary")).toHaveTextContent("140 matching filters");
     expect(screen.getByLabelText("File explorer")).toHaveTextContent("0/240 viewed");
-    expect(Number(screen.getByLabelText("Review target graph").getAttribute("data-edge-count") ?? "0")).toBeLessThanOrEqual(360);
+    const reviewTargetGraph = screen.getByLabelText("Review target graph");
+    expect(reviewTargetGraph).toHaveClass("review-target-flow--dense");
+    expect(Number(reviewTargetGraph.getAttribute("data-edge-count") ?? "0")).toBeLessThanOrEqual(260);
     const dialog = await openPullRequestsDialog(userEvent.setup());
     expect(within(dialog).getByText(/GitHub rate limit reached/)).toBeInTheDocument();
   });
