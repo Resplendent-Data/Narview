@@ -285,14 +285,47 @@ const handoffIntentOptions = [
 const reviewThreadRenderLimit = 80;
 const fullFileRenderLimit = 320;
 
+const fallbackRepository: WorkspaceRepository = {
+  owner: "acme",
+  name: "payments-web",
+  slug: "acme/payments-web",
+};
+
 const fallbackPullRequest: PullRequestSummary = {
-  repository: "acme/payments-web",
+  repository: fallbackRepository.slug,
   number: 482,
   title: selectedThread.title,
   authorLogin: "coderabbitai",
   isDraft: false,
   updatedAt: "2026-05-18T12:00:00Z",
   url: "https://github.com/acme/payments-web/pull/482",
+};
+
+const fallbackReviewCloneStatus: ReviewCloneStatus = {
+  repository: fallbackRepository,
+  state: "ready",
+  storagePath: "Narview demo Pull Request fixture",
+  storageRoot: "Narview demo data",
+  remoteUrl: "https://github.com/acme/payments-web.git",
+  message: "Demo Pull Request data is ready for local review.",
+  readOnly: true,
+  writePermission: false,
+  lastCheckedEpochMs: 1_800_000_000_000,
+};
+
+const fallbackAnalysisInput: PullRequestAnalysisInput = {
+  repository: fallbackRepository,
+  pullRequestNumber: fallbackPullRequest.number,
+  state: "ready",
+  reviewClone: fallbackReviewCloneStatus,
+  baseRef: "refs/narview/demo/base",
+  headRef: "refs/narview/demo/head",
+  baseSha: "1111111111111111111111111111111111111111",
+  headSha: "2222222222222222222222222222222222222222",
+  mergeBaseSha: "1111111111111111111111111111111111111111",
+  comparisonRef: "1111111111111111111111111111111111111111",
+  checkoutMode: "demo-fixture",
+  message: "Demo Pull Request data is ready for local review.",
 };
 
 const repositoryHotspotOverrides: Record<string, RepositoryHotspotOverride> = {
@@ -2571,6 +2604,10 @@ function commandMatchesQuery(command: CommandPaletteItem, query: string) {
     .every((term) => haystack.includes(term));
 }
 
+function isFallbackPullRequest(pullRequest: PullRequestSummary) {
+  return pullRequest.repository === fallbackPullRequest.repository && pullRequest.number === fallbackPullRequest.number;
+}
+
 function createOverviewCache(pullRequest: PullRequestSummary, cached?: CachedPullRequestData): CachedPullRequestData {
   const normalizedCached = cached
     ? {
@@ -2585,7 +2622,7 @@ function createOverviewCache(pullRequest: PullRequestSummary, cached?: CachedPul
     return normalizedCached;
   }
 
-  if (pullRequest.repository === fallbackPullRequest.repository && pullRequest.number === fallbackPullRequest.number) {
+  if (isFallbackPullRequest(pullRequest)) {
     return createDemoOverviewCache(pullRequest, cached);
   }
 
@@ -2852,40 +2889,59 @@ export function App({
     fallbackPullRequest;
   const selectedPullRequestReviewKey = getPullRequestKey(selectedPullRequest);
   const selectedRepositoryKey = selectedPullRequest.repository.toLowerCase();
+  const selectedPullRequestIsDemo = isFallbackPullRequest(selectedPullRequest);
   const reviewCloneRepositorySlugs = useMemo(
-    () => Array.from(new Set([...repositories.map((repository) => repository.slug), selectedPullRequest.repository])).sort(),
-    [repositories, selectedPullRequest.repository],
+    () =>
+      Array.from(
+        new Set([
+          ...repositories.map((repository) => repository.slug),
+          ...(selectedPullRequestIsDemo ? [] : [selectedPullRequest.repository]),
+        ]),
+      ).sort(),
+    [repositories, selectedPullRequest.repository, selectedPullRequestIsDemo],
   );
   const selectedReviewCloneStatus =
-    reviewCloneStatuses[selectedRepositoryKey] ??
-    createUnavailableReviewCloneStatus(
-      selectedPullRequest.repository,
-      "Review Clone status has not been checked yet.",
-    );
+    selectedPullRequestIsDemo
+      ? fallbackReviewCloneStatus
+      : (reviewCloneStatuses[selectedRepositoryKey] ??
+        createUnavailableReviewCloneStatus(
+            selectedPullRequest.repository,
+            "Review Clone status has not been checked yet.",
+          ));
   const selectedReviewCloneBusy = reviewCloneBusyKey === selectedRepositoryKey || selectedReviewCloneStatus.state === "cloning";
   const reviewCloneBadge = getReviewCloneBadge(selectedReviewCloneStatus.state);
   const reviewCloneWriteBadge = selectedReviewCloneStatus.writePermission
     ? ({ label: "GitHub writes available", variant: "success" as const })
     : ({ label: "Read-Only Mode", variant: "warning" as const });
   const customThreadActionClient = threadActionClient !== tauriThreadActionClient;
-  const canPublishReviewThreads = selectedReviewCloneStatus.writePermission || customThreadActionClient;
-  const reviewThreadWriteDisabledReason = canPublishReviewThreads
-    ? null
-    : "Read-Only Mode: GitHub write access is needed to publish line-level and file-level Review Threads. Inspection, Attention Map navigation, and local Reviewed state still work.";
   const selectedPullRequestDisplay = `${selectedPullRequest.repository} #${selectedPullRequest.number}`;
   const selectedPullRequestTitle = selectedPullRequest.title.trim() || "Untitled Pull Request";
   const activePullRequestKey = routedPullRequests.length > 0 ? getPullRequestKey(selectedPullRequest) : null;
   const selectedAnalysisInputStatus =
     activePullRequestKey && analysisInputStatuses[activePullRequestKey]
       ? analysisInputStatuses[activePullRequestKey]
-      : createUnavailablePullRequestAnalysisInput(
-          selectedPullRequest,
-          "Pull Request head has not been prepared in the Review Clone yet.",
-        );
+      : selectedPullRequestIsDemo
+        ? fallbackAnalysisInput
+        : createUnavailablePullRequestAnalysisInput(
+            selectedPullRequest,
+            "Pull Request head has not been prepared in the Review Clone yet.",
+          );
   const selectedAnalysisInputBusy = activePullRequestKey !== null && analysisInputBusyKey === activePullRequestKey;
   const analysisInputBadge = getAnalysisInputBadge(
     selectedAnalysisInputBusy ? "preparing" : selectedAnalysisInputStatus.state,
   );
+  const reviewCloneReady = selectedAnalysisInputStatus.state === "ready";
+  const reviewCloneRequirementMessage = selectedAnalysisInputBusy
+    ? "Preparing the Pull Request head in the app-managed Review Clone."
+    : selectedAnalysisInputStatus.message ??
+      selectedReviewCloneStatus.message ??
+      "Review Clone preparation is required before Narview can build the Attention Map and Review Path.";
+  const canPublishReviewThreads = reviewCloneReady && (selectedReviewCloneStatus.writePermission || customThreadActionClient);
+  const reviewThreadWriteDisabledReason = canPublishReviewThreads
+    ? null
+    : !reviewCloneReady
+      ? "Review Clone preparation is required before publishing line-level and file-level Review Threads."
+      : "Read-Only Mode: GitHub write access is needed to publish line-level and file-level Review Threads. Inspection, Attention Map navigation, and local Reviewed state still work.";
   const cacheStore = useMemo(() => readCacheStore(), [cacheSummary]);
   const selectedCacheEntry = activePullRequestKey ? cacheStore.entries[activePullRequestKey] : null;
   const selectedPullRequestPinned = selectedCacheEntry?.pinned ?? false;
@@ -2945,13 +3001,15 @@ export function App({
   const selectedBaseBranch = reviewOverviewCache.metadata.baseBranch ?? selectedAnalysisInputStatus.baseRef;
   const reviewTargets = useMemo(
     () =>
-      buildReviewTargets({
-        analysisIndex,
-        attentionMap: attentionMapPresentation,
-        currentData: reviewOverviewCache,
-        hotspots: reviewOverview.hotspots,
-      }),
-    [analysisIndex, attentionMapPresentation, reviewOverview.hotspots, reviewOverviewCache],
+      reviewCloneReady
+        ? buildReviewTargets({
+            analysisIndex,
+            attentionMap: attentionMapPresentation,
+            currentData: reviewOverviewCache,
+            hotspots: reviewOverview.hotspots,
+          })
+        : [],
+    [analysisIndex, attentionMapPresentation, reviewCloneReady, reviewOverview.hotspots, reviewOverviewCache],
   );
   const reviewTargetStore = useMemo(() => readReviewTargetStateStore(), [reviewTargetRevision]);
   const reviewTargetReviewStates = useMemo(
@@ -2974,7 +3032,7 @@ export function App({
   const selectedReviewTargetInspector = useMemo(
     () =>
       buildReviewTargetInspectorModel({
-        target: selectedReviewPathItem?.target ?? null,
+        target: reviewCloneReady ? (selectedReviewPathItem?.target ?? null) : null,
         analysisIndex,
         pullRequest: selectedPullRequest,
         files: reviewOverviewCache.fileSummaries,
@@ -2985,6 +3043,7 @@ export function App({
       analysisIndex,
       effectiveReviewThreads,
       reviewOverviewCache.fileSummaries,
+      reviewCloneReady,
       selectedAnalysisFileContents,
       selectedPullRequest,
       selectedReviewPathItem,
@@ -4133,6 +4192,39 @@ export function App({
     }
   };
 
+  const prepareActivePullRequestReviewClone = async () => {
+    if (!activePullRequestKey) {
+      return;
+    }
+
+    setAnalysisInputBusyKey(activePullRequestKey);
+    setReviewCloneBusyKey(selectedRepositoryKey);
+    setReviewCloneMessage(null);
+    try {
+      const status = await workspaceClient.preparePullRequestReviewClone(selectedPullRequest);
+      const pullRequestKey = getPullRequestKey(selectedPullRequest);
+      setAnalysisInputStatuses((current) => ({
+        ...current,
+        [pullRequestKey]: status,
+      }));
+      setReviewCloneStatuses((current) => ({
+        ...current,
+        [status.reviewClone.repository.slug.toLowerCase()]: status.reviewClone,
+      }));
+      setReviewCloneMessage(status.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAnalysisInputStatuses((current) => ({
+        ...current,
+        [activePullRequestKey]: createUnavailablePullRequestAnalysisInput(selectedPullRequest, message),
+      }));
+      setReviewCloneMessage(message);
+    } finally {
+      setAnalysisInputBusyKey((current) => (current === activePullRequestKey ? null : current));
+      setReviewCloneBusyKey((current) => (current === selectedRepositoryKey ? null : current));
+    }
+  };
+
   const ensureReviewCloneForRepository = async (repository: string) => {
     const repositoryKey = repository.toLowerCase();
     setReviewCloneBusyKey(repositoryKey);
@@ -4144,6 +4236,14 @@ export function App({
         [status.repository.slug.toLowerCase()]: status,
       }));
       setReviewCloneMessage(status.message ?? `Review Clone ${getReviewCloneBadge(status.state).label.toLowerCase()}.`);
+      if (
+        status.state === "ready" &&
+        repositoryKey === selectedRepositoryKey &&
+        activePullRequestKey &&
+        selectedAnalysisInputStatus.state !== "ready"
+      ) {
+        await prepareActivePullRequestReviewClone();
+      }
     } catch (error) {
       setReviewCloneMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -4267,9 +4367,10 @@ export function App({
   };
 
   const openReviewTargetDiff = (targetId = selectedReviewTargetId) => {
-    if (targetId) {
-      selectReviewTarget(targetId);
+    if (!reviewCloneReady || !targetId) {
+      return;
     }
+    selectReviewTarget(targetId);
     setTargetDiffDialogOpen(true);
   };
 
@@ -5679,10 +5780,13 @@ export function App({
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => void ensureReviewCloneForRepository(selectedPullRequest.repository)}
-                    disabled={selectedReviewCloneBusy}
+                    onClick={() => void prepareActivePullRequestReviewClone()}
+                    disabled={selectedAnalysisInputBusy || selectedReviewCloneBusy}
                   >
-                    <RefreshCw className={cn("h-3.5 w-3.5", selectedReviewCloneBusy && "animate-spin")} aria-hidden="true" />
+                    <RefreshCw
+                      className={cn("h-3.5 w-3.5", (selectedAnalysisInputBusy || selectedReviewCloneBusy) && "animate-spin")}
+                      aria-hidden="true"
+                    />
                     {getReviewCloneActionLabel(selectedReviewCloneStatus.state)}
                   </Button>
                 </div>
@@ -5700,7 +5804,7 @@ export function App({
                     <Badge variant={reviewCloneWriteBadge.variant}>{reviewCloneWriteBadge.label}</Badge>
                   </div>
                 </div>
-                {!selectedReviewCloneStatus.writePermission && (
+                {reviewCloneReady && !selectedReviewCloneStatus.writePermission && (
                   <p className="mt-2 rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300" role="status">
                     GitHub write access is needed to publish line-level and file-level Review Threads. You can still inspect this Pull Request, navigate the Attention Map, and update local Reviewed state.
                   </p>
@@ -5739,12 +5843,21 @@ export function App({
                         <Badge variant="muted">Index v{analysisIndex.analysisVersion}</Badge>
                       </div>
                       <p className="mt-1 truncate text-xs text-muted-foreground">
-                        Head {analysisIndex.headSha === "head-unavailable" ? "pending" : analysisIndex.headSha.slice(0, 7)} ·{" "}
-                        {attentionMapPresentation.summary.files} files · {attentionMapPresentation.summary.relationships} edges
+                        {reviewCloneReady
+                          ? `Head ${analysisIndex.headSha === "head-unavailable" ? "pending" : analysisIndex.headSha.slice(0, 7)} · ${attentionMapPresentation.summary.files} files · ${attentionMapPresentation.summary.relationships} edges`
+                          : "Review Clone required for Attention Map and Review Path"}
                       </p>
                     </div>
-                    <Badge variant={attentionMapPresentation.summary.fallbackNodes > 0 ? "warning" : "success"}>
-                      {attentionMapPresentation.nodes.length} nodes · {reviewTargets.length} targets
+                    <Badge
+                      variant={
+                        reviewCloneReady
+                          ? attentionMapPresentation.summary.fallbackNodes > 0
+                            ? "warning"
+                            : "success"
+                          : analysisInputBadge.variant
+                      }
+                    >
+                      {reviewCloneReady ? `${attentionMapPresentation.nodes.length} nodes · ${reviewTargets.length} targets` : analysisInputBadge.label}
                     </Badge>
                   </div>
                 </div>
@@ -5757,56 +5870,108 @@ export function App({
                       <Badge variant="muted">Index v{analysisIndex.analysisVersion}</Badge>
                     </div>
                     <p className="mt-1 truncate text-xs text-muted-foreground">
-                      Head {analysisIndex.headSha === "head-unavailable" ? "pending" : analysisIndex.headSha.slice(0, 7)} ·{" "}
-                      {analysisIndex.storageScope === "local-storage-outside-review-clone" ? "Stored outside Review Clone" : "Stored"}
+                      {reviewCloneReady
+                        ? `Head ${analysisIndex.headSha === "head-unavailable" ? "pending" : analysisIndex.headSha.slice(0, 7)} · ${
+                            analysisIndex.storageScope === "local-storage-outside-review-clone" ? "Stored outside Review Clone" : "Stored"
+                          }`
+                        : "Review Clone required for Attention Map and Review Path"}
                     </p>
                   </div>
-                  <Badge variant={attentionMapPresentation.summary.fallbackNodes > 0 ? "warning" : "success"}>
-                    {attentionMapPresentation.nodes.length} nodes · {reviewTargets.length} targets
+                  <Badge
+                    variant={
+                      reviewCloneReady
+                        ? attentionMapPresentation.summary.fallbackNodes > 0
+                          ? "warning"
+                          : "success"
+                        : analysisInputBadge.variant
+                    }
+                  >
+                    {reviewCloneReady ? `${attentionMapPresentation.nodes.length} nodes · ${reviewTargets.length} targets` : analysisInputBadge.label}
                   </Badge>
                 </div>
-                <div className="mt-3 grid grid-cols-3 gap-2 text-xs lg:grid-cols-7">
-                  <div className="rounded-md bg-muted p-2">
-                    <p className="text-muted-foreground">Files</p>
-                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.files}</p>
+                {reviewCloneReady && (
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs lg:grid-cols-7">
+                    <div className="rounded-md bg-muted p-2">
+                      <p className="text-muted-foreground">Files</p>
+                      <p className="mt-1 font-semibold">{attentionMapPresentation.summary.files}</p>
+                    </div>
+                    <div className="rounded-md bg-muted p-2">
+                      <p className="text-muted-foreground">Symbols</p>
+                      <p className="mt-1 font-semibold">{attentionMapPresentation.summary.symbolNodes}</p>
+                    </div>
+                    <div className="rounded-md bg-muted p-2">
+                      <p className="text-muted-foreground">Context</p>
+                      <p className="mt-1 font-semibold">{attentionMapPresentation.summary.contextNodes}</p>
+                    </div>
+                    <div className="rounded-md bg-muted p-2">
+                      <p className="text-muted-foreground">Hunks</p>
+                      <p className="mt-1 font-semibold">{attentionMapPresentation.summary.hunkNodes}</p>
+                    </div>
+                    <div className="rounded-md bg-muted p-2">
+                      <p className="text-muted-foreground">Fallbacks</p>
+                      <p className="mt-1 font-semibold">{attentionMapPresentation.summary.fallbackNodes}</p>
+                    </div>
+                    <div className="rounded-md bg-muted p-2">
+                      <p className="text-muted-foreground">Clusters</p>
+                      <p className="mt-1 font-semibold">{attentionMapPresentation.summary.generatedClusters}</p>
+                    </div>
+                    <div className="rounded-md bg-muted p-2">
+                      <p className="text-muted-foreground">Edges</p>
+                      <p className="mt-1 font-semibold">{attentionMapPresentation.summary.relationships}</p>
+                    </div>
                   </div>
-                  <div className="rounded-md bg-muted p-2">
-                    <p className="text-muted-foreground">Symbols</p>
-                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.symbolNodes}</p>
-                  </div>
-                  <div className="rounded-md bg-muted p-2">
-                    <p className="text-muted-foreground">Context</p>
-                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.contextNodes}</p>
-                  </div>
-                  <div className="rounded-md bg-muted p-2">
-                    <p className="text-muted-foreground">Hunks</p>
-                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.hunkNodes}</p>
-                  </div>
-                  <div className="rounded-md bg-muted p-2">
-                    <p className="text-muted-foreground">Fallbacks</p>
-                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.fallbackNodes}</p>
-                  </div>
-                  <div className="rounded-md bg-muted p-2">
-                    <p className="text-muted-foreground">Clusters</p>
-                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.generatedClusters}</p>
-                  </div>
-                  <div className="rounded-md bg-muted p-2">
-                    <p className="text-muted-foreground">Edges</p>
-                    <p className="mt-1 font-semibold">{attentionMapPresentation.summary.relationships}</p>
-                  </div>
-                </div>
+                )}
                 </div>
                 <div className="absolute inset-0">
-                  <ReviewTargetFlow
-                    attentionEdges={attentionMapPresentation.edges}
-                    items={reviewPathItems}
-                    needsReReviewTargetIds={needsReReviewTargetIds}
-                    onOpenTarget={openReviewTargetDiff}
-                    onSelectTarget={selectReviewTarget}
-                    reviewedTargetIds={reviewedTargetIds}
-                    selectedTargetId={selectedReviewTargetId}
-                  />
-                  <aside aria-label="Review Path" className="absolute bottom-4 right-4 top-[5rem] z-20 flex w-[min(24rem,calc(100vw-2rem))] min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card/95 p-3 shadow-xl backdrop-blur xl:top-4">
+                  {!reviewCloneReady ? (
+                    <div className="flex h-full items-center justify-center p-6">
+                      <div className="max-w-xl rounded-lg border border-border bg-card p-4 shadow-xl" aria-label="Review Clone required" role="status">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <h3 className="text-base font-semibold">Review Clone Required</h3>
+                            <p className="mt-2 text-sm text-muted-foreground">{reviewCloneRequirementMessage}</p>
+                          </div>
+                          <Badge variant={analysisInputBadge.variant}>{analysisInputBadge.label}</Badge>
+                        </div>
+                        <div className="mt-4 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+                          <div className="rounded-md bg-muted p-2">
+                            <p>Repository</p>
+                            <p className="mt-1 truncate font-medium text-foreground">{selectedPullRequest.repository}</p>
+                          </div>
+                          <div className="rounded-md bg-muted p-2">
+                            <p>Storage</p>
+                            <p className="mt-1 truncate font-medium text-foreground">{selectedReviewCloneStatus.storagePath}</p>
+                          </div>
+                        </div>
+                        <Button
+                          className="mt-4"
+                          onClick={() => void prepareActivePullRequestReviewClone()}
+                          disabled={selectedAnalysisInputBusy || selectedReviewCloneBusy}
+                          size="sm"
+                          variant="outline"
+                        >
+                          <RefreshCw
+                            className={cn("h-3.5 w-3.5", (selectedAnalysisInputBusy || selectedReviewCloneBusy) && "animate-spin")}
+                            aria-hidden="true"
+                          />
+                          {selectedAnalysisInputBusy || selectedReviewCloneBusy
+                            ? "Preparing clone..."
+                            : getReviewCloneActionLabel(selectedReviewCloneStatus.state)}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <ReviewTargetFlow
+                        attentionEdges={attentionMapPresentation.edges}
+                        items={reviewPathItems}
+                        needsReReviewTargetIds={needsReReviewTargetIds}
+                        onOpenTarget={openReviewTargetDiff}
+                        onSelectTarget={selectReviewTarget}
+                        reviewedTargetIds={reviewedTargetIds}
+                        selectedTargetId={selectedReviewTargetId}
+                      />
+                      <aside aria-label="Review Path" className="absolute bottom-4 right-4 top-[5rem] z-20 flex w-[min(24rem,calc(100vw-2rem))] min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card/95 p-3 shadow-xl backdrop-blur xl:top-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <h3 className="text-sm font-semibold">Review Path</h3>
@@ -5933,7 +6098,9 @@ export function App({
                         </div>
                       </details>
                     )}
-                  </aside>
+                      </aside>
+                    </>
+                  )}
                 </div>
               </section>
 

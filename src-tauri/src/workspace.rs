@@ -1471,6 +1471,7 @@ fn ensure_review_clone_at(
         ));
     }
 
+    let clone_path = review_clone_repository_path(root, repository);
     let existing =
         inspect_review_clone_at(repository, root, remote_url.to_string(), write_permission);
     if existing.state == ReviewCloneHealthState::Ready {
@@ -1493,11 +1494,16 @@ fn ensure_review_clone_at(
         ));
     }
 
-    if existing.state != ReviewCloneHealthState::NotCloned {
+    if existing.state == ReviewCloneHealthState::Failed {
+        if clone_path.is_dir() {
+            fs::remove_dir_all(&clone_path).ok();
+        } else {
+            fs::remove_file(&clone_path).ok();
+        }
+    } else if existing.state != ReviewCloneHealthState::NotCloned {
         return Ok(existing);
     }
 
-    let clone_path = review_clone_repository_path(root, repository);
     let lock_path = review_clone_lock_path(root, repository);
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)
@@ -1554,6 +1560,9 @@ fn prepare_pull_request_review_clone_at(
             ReviewCloneHealthState::Unavailable => PullRequestAnalysisInputState::Unavailable,
             _ => PullRequestAnalysisInputState::Failed,
         };
+        let message = clone_status.message.clone().unwrap_or_else(|| {
+            "Review Clone is not ready for Pull Request head preparation.".to_string()
+        });
         return Ok(pull_request_analysis_response(
             repository,
             number,
@@ -1566,7 +1575,7 @@ fn prepare_pull_request_review_clone_at(
             None,
             None,
             None,
-            Some("Review Clone is not ready for Pull Request head preparation.".to_string()),
+            Some(message),
         ));
     }
 
@@ -2481,6 +2490,43 @@ mod tests {
         assert!(metadata_path.exists());
         assert!(!metadata_path.starts_with(&clone_path));
         assert!(!clone_path.join("analysis-index").exists());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ensure_review_clone_retries_after_failed_checkout_state() {
+        if !git_available() {
+            return;
+        }
+
+        let root = test_review_clone_root();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.git");
+        let init_output = Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&source)
+            .output()
+            .unwrap();
+        if !init_output.status.success() {
+            fs::remove_dir_all(root).ok();
+            return;
+        }
+
+        let repository = WorkspaceRepository::new("Acme", "Api");
+        let remote_url = source.to_string_lossy().to_string();
+        let clone_path = review_clone_repository_path(&root, &repository);
+        fs::create_dir_all(&clone_path).unwrap();
+        assert_eq!(
+            inspect_review_clone_at(&repository, &root, remote_url.clone(), false).state,
+            ReviewCloneHealthState::Failed,
+        );
+
+        let retried = ensure_review_clone_at(&repository, &root, &remote_url, None, false).unwrap();
+
+        assert_eq!(retried.state, ReviewCloneHealthState::Ready);
+        assert!(clone_path.join(".git").exists());
 
         fs::remove_dir_all(root).ok();
     }

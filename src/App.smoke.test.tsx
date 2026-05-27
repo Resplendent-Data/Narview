@@ -1236,7 +1236,7 @@ describe("App shell", () => {
     expect(analysisInput).toHaveTextContent("Compare 1111111");
   });
 
-  it("keeps GitHub review data visible when Pull Request head preparation is unavailable", async () => {
+  it("keeps GitHub review data visible but requires a Review Clone for Review Path work", async () => {
     const unavailableInput: PullRequestAnalysisInput = {
       ...readyAnalysisInput,
       state: "unavailable",
@@ -1260,6 +1260,9 @@ describe("App shell", () => {
     expect((await screen.findAllByText("Add checkout guard")).length).toBeGreaterThan(0);
     const analysisInput = await screen.findByLabelText("Pull Request analysis input");
     await waitFor(() => expect(analysisInput).toHaveTextContent("Unavailable"));
+    expect(screen.getByLabelText("Review Clone required")).toHaveTextContent("Could not fetch the Pull Request head ref.");
+    expect(screen.queryByLabelText("Review Path")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /diff/i })).toBeDisabled();
   });
 
   it("builds an Analysis Index with parsed hunks and deterministic fallbacks", () => {
