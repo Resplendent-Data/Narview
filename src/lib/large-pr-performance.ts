@@ -249,7 +249,7 @@ export function measureLargePrUsability(
   const reviewTargetMs = now() - reviewTargetStart;
 
   const reviewPathStart = now();
-  const reviewPathItems = buildReviewPathItems(reviewTargets, hotspots);
+  const reviewPathItems = buildReviewPathItems(reviewTargets, hotspots, { relationships: analysisIndex.relationships });
   let selectedTargetId: string | null = null;
   const reviewPathMoves = Math.min(100, reviewPathItems.length);
   for (let index = 0; index < reviewPathMoves; index += 1) {

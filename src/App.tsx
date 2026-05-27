@@ -26,7 +26,9 @@ import {
 import "@xyflow/react/dist/style.css";
 import {
   Check,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Columns2,
   Command,
   Copy,
@@ -69,9 +71,12 @@ import { appReleaseDownloadUrl, type AppUpdateClient, useAppUpdater } from "./li
 import { type AuthClient, type AuthSession, type OAuthStartResponse, tauriAuthClient } from "./lib/auth";
 import {
   buildLazyDiffState,
+  diffContextExpansionLineCount,
   getDefaultLoadedDiffHunkIds,
   readDiffModePreference,
   writeDiffModePreference,
+  type DiffHunkExpansion,
+  type DiffHunkView,
   type DiffLine,
   type DiffMode,
 } from "./lib/diff-viewer";
@@ -170,6 +175,7 @@ import {
   idleRefreshStatus,
   createUnavailablePullRequestAnalysisInput,
   createUnavailableReviewCloneStatus,
+  type AnalysisFileContent,
   type PullRequestAnalysisFilesResponse,
   type PullRequestAnalysisInput,
   type PullRequestAnalysisInputState,
@@ -211,6 +217,17 @@ type QueueButton = {
   tone: "danger" | "warning" | "info" | "muted";
   filters: ReviewQueueFilters;
 };
+
+type DiffHunkExpansionDirection = "before" | "after" | "both";
+
+function getLoadedAnalysisFileContent(files: AnalysisFileContent[] | undefined, path: string | null | undefined) {
+  if (!files || !path) {
+    return null;
+  }
+
+  const source = files.find((file) => file.path === path);
+  return source?.state === "loaded" ? source.content : null;
+}
 
 type FileExplorerRow =
   | {
@@ -2076,6 +2093,94 @@ function ReviewTargetInspector({
   );
 }
 
+function DiffHunkContextControls({
+  hunk,
+  onExpand,
+  unavailableReason,
+}: {
+  hunk: DiffHunkView;
+  onExpand: (direction: DiffHunkExpansionDirection) => void;
+  unavailableReason?: string;
+}) {
+  if (!hunk.loaded) {
+    return null;
+  }
+
+  if (!hunk.expandable) {
+    return unavailableReason ? <Badge variant="muted">{unavailableReason}</Badge> : null;
+  }
+
+  const expandedLineCount = hunk.contextBefore + hunk.contextAfter;
+  if (!hunk.canExpandBefore && !hunk.canExpandAfter) {
+    return <Badge variant="muted">Context expanded</Badge>;
+  }
+
+  return (
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+      {expandedLineCount > 0 && <Badge variant="muted">+{expandedLineCount} context</Badge>}
+      <Button
+        aria-label={`Expand context above ${hunk.header}`}
+        disabled={!hunk.canExpandBefore}
+        onClick={() => onExpand("before")}
+        size="sm"
+        variant="outline"
+      >
+        <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+        Up
+      </Button>
+      <Button
+        aria-label={`Expand context below ${hunk.header}`}
+        disabled={!hunk.canExpandAfter}
+        onClick={() => onExpand("after")}
+        size="sm"
+        variant="outline"
+      >
+        <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+        Down
+      </Button>
+    </div>
+  );
+}
+
+function PullRequestBranchCopyControl({
+  baseBranch,
+  copyMessage,
+  headBranch,
+  onCopy,
+}: {
+  baseBranch: string | null;
+  copyMessage: string | null;
+  headBranch: string | null;
+  onCopy: () => void;
+}) {
+  const branchLabel = headBranch ? `${headBranch}${baseBranch ? ` -> ${baseBranch}` : ""}` : "Branch unavailable";
+
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <Badge variant={headBranch ? "info" : "muted"}>Branch</Badge>
+      <span className="min-w-0 max-w-full truncate font-mono" title={branchLabel}>
+        {branchLabel}
+      </span>
+      <Button
+        aria-label={headBranch ? `Copy branch ${headBranch}` : "Copy branch unavailable"}
+        disabled={!headBranch}
+        onClick={onCopy}
+        size="sm"
+        type="button"
+        variant="outline"
+      >
+        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+        Copy branch
+      </Button>
+      {copyMessage && (
+        <span className="rounded-md bg-muted px-2 py-1 text-muted-foreground" role="status">
+          {copyMessage}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function StartReviewThreadPanel({
   body,
   fileAnchor,
@@ -2661,12 +2766,14 @@ export function App({
   const [diffMode, setDiffMode] = useState<DiffMode>(readDiffModePreference);
   const [loadedDiffHunks, setLoadedDiffHunks] = useState<Record<string, string[]>>({});
   const [expandedDiffHunks, setExpandedDiffHunks] = useState<Record<string, string[]>>({});
+  const [expandedDiffHunkContexts, setExpandedDiffHunkContexts] = useState<Record<string, Record<string, DiffHunkExpansion>>>({});
   const [fullFileDiffs, setFullFileDiffs] = useState<Record<string, boolean>>({});
   const [handoffPacketMode, setHandoffPacketMode] = useState<HandoffPacketMode>("selected-review-threads");
   const [humanPacketIncludeCodeRabbit, setHumanPacketIncludeCodeRabbit] = useState(false);
   const [handoffIntentPreset, setHandoffIntentPreset] = useState("Fix selected feedback");
   const [handoffCustomIntent, setHandoffCustomIntent] = useState("");
   const [handoffCopyMessage, setHandoffCopyMessage] = useState<string | null>(null);
+  const [branchCopyMessage, setBranchCopyMessage] = useState<string | null>(null);
   const [threadStateOverrides, setThreadStateOverrides] = useState<Record<string, CachedReviewThread["state"]>>({});
   const [replyDraft, setReplyDraft] = useState("");
   const [newThreadMode, setNewThreadMode] = useState<"line" | "file">("line");
@@ -2834,6 +2941,8 @@ export function App({
       ),
     [analysisIndex, reviewOverviewCache, repositoryHotspotOverrides, selectedPullRequest.repository],
   );
+  const selectedHeadBranch = reviewOverviewCache.metadata.headBranch ?? selectedAnalysisInputStatus.headRef;
+  const selectedBaseBranch = reviewOverviewCache.metadata.baseBranch ?? selectedAnalysisInputStatus.baseRef;
   const reviewTargets = useMemo(
     () =>
       buildReviewTargets({
@@ -2858,8 +2967,8 @@ export function App({
     [currentUserKey, reviewTargetStore, reviewTargets],
   );
   const reviewPathItems = useMemo(
-    () => buildReviewPathItems(reviewTargets, reviewOverview.hotspots),
-    [reviewOverview.hotspots, reviewTargets],
+    () => buildReviewPathItems(reviewTargets, reviewOverview.hotspots, { relationships: analysisIndex.relationships }),
+    [analysisIndex.relationships, reviewOverview.hotspots, reviewTargets],
   );
   const selectedReviewPathItem = reviewPathItems.find((item) => item.id === selectedReviewTargetId) ?? null;
   const selectedReviewTargetInspector = useMemo(
@@ -3105,6 +3214,9 @@ export function App({
   const threadResolveAction: ThreadWriteAction = activeThreadState === "resolved" ? "unresolve" : "resolve";
   const replyCanSubmit =
     Boolean(selectedReviewThread) && canPublishReviewThreads && threadActionBusy === null && replyDraft.trim().length > 0;
+  const selectedFileSourceContent = getLoadedAnalysisFileContent(selectedAnalysisFileContents?.files, selectedFileChange?.file.path);
+  const diffContextUnavailableReason =
+    selectedFileChange?.file.patch && selectedFileSourceContent === null ? "More context needs Review Clone" : undefined;
   const selectedFileDiffState = selectedFileChange
     ? buildLazyDiffState(selectedFileChange.file, {
         mode: diffMode,
@@ -3112,7 +3224,9 @@ export function App({
         pullRequestNumber: selectedPullRequest.number,
         loadedHunkIds: loadedDiffHunks[selectedFileChange.id],
         expandedHunkIds: expandedDiffHunks[selectedFileChange.id],
+        expandedHunkContexts: expandedDiffHunkContexts[selectedFileChange.id],
         fullFileLoaded: fullFileDiffs[selectedFileChange.id],
+        sourceContent: selectedFileSourceContent,
       })
     : null;
   const diffDialogLineAnchors = selectedFileDiffState
@@ -3187,7 +3301,9 @@ export function App({
         pullRequestNumber: selectedPullRequest.number,
         loadedHunkIds: loadedDiffHunks[fileView.id] ?? getDefaultLoadedDiffHunkIds(fileView.file),
         expandedHunkIds: expandedDiffHunks[fileView.id],
+        expandedHunkContexts: expandedDiffHunkContexts[fileView.id],
         fullFileLoaded: fullFileDiffs[fileView.id],
+        sourceContent: getLoadedAnalysisFileContent(selectedAnalysisFileContents?.files, fileView.file.path),
       });
       return [view.thread.filePath, state.fullFileLines ?? state.hunks.flatMap((hunk) => hunk.lines)];
     }),
@@ -3637,6 +3753,10 @@ export function App({
   useEffect(() => {
     setThreadActionResult(null);
   }, [selectedReviewThread?.id]);
+
+  useEffect(() => {
+    setBranchCopyMessage(null);
+  }, [activePullRequestKey]);
 
   const themeLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
   const authBadge = getAuthBadge(authSession);
@@ -4253,7 +4373,23 @@ export function App({
     }));
   };
 
-  const expandDiffHunk = (fileChangeId: string, hunkId: string) => {
+  const expandDiffHunk = (fileChangeId: string, hunkId: string, direction: DiffHunkExpansionDirection = "both") => {
+    setExpandedDiffHunkContexts((current) => {
+      const fileContext = current[fileChangeId] ?? {};
+      const hunkContext = fileContext[hunkId] ?? { before: 0, after: 0 };
+      const nextContext = {
+        before: hunkContext.before + (direction === "before" || direction === "both" ? diffContextExpansionLineCount : 0),
+        after: hunkContext.after + (direction === "after" || direction === "both" ? diffContextExpansionLineCount : 0),
+      };
+
+      return {
+        ...current,
+        [fileChangeId]: {
+          ...fileContext,
+          [hunkId]: nextContext,
+        },
+      };
+    });
     setExpandedDiffHunks((current) => ({
       ...current,
       [fileChangeId]: Array.from(new Set([...(current[fileChangeId] ?? []), hunkId])),
@@ -4270,6 +4406,25 @@ export function App({
   const copyHandoffMarkdown = async () => {
     await navigator.clipboard?.writeText(handoffMarkdown);
     setHandoffCopyMessage(`Copied ${handoffPacket.threads.length} thread${handoffPacket.threads.length === 1 ? "" : "s"} to Markdown.`);
+  };
+
+  const copyPullRequestHeadBranch = async () => {
+    if (!selectedHeadBranch) {
+      setBranchCopyMessage("Branch unavailable.");
+      return;
+    }
+
+    if (!navigator.clipboard) {
+      setBranchCopyMessage("Copy unavailable. Select the branch and copy it manually.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(selectedHeadBranch);
+      setBranchCopyMessage(`Copied ${selectedHeadBranch}.`);
+    } catch {
+      setBranchCopyMessage("Copy unavailable. Select the branch and copy it manually.");
+    }
   };
 
   const handleSetReviewThreadReviewed = (threadId: string, reviewed: boolean) => {
@@ -5920,13 +6075,13 @@ export function App({
                             <Button size="sm" variant="outline" onClick={() => loadDiffHunk(selectedFileChange.id, selectedFileChange.file, hunk.id)}>
                               Load hunk
                             </Button>
-                          ) : hunk.expandable && !hunk.expanded ? (
-                            <Button size="sm" variant="outline" onClick={() => expandDiffHunk(selectedFileChange.id, hunk.id)}>
-                              Expand context
-                            </Button>
-                          ) : hunk.expandable ? (
-                            <Badge variant="muted">Context expanded</Badge>
-                          ) : null}
+                          ) : (
+                            <DiffHunkContextControls
+                              hunk={hunk}
+                              onExpand={(direction) => expandDiffHunk(selectedFileChange.id, hunk.id, direction)}
+                              unavailableReason={diffContextUnavailableReason}
+                            />
+                          )}
                         </div>
                         {hunk.loaded ? (
                           diffMode === "unified" ? (
@@ -6832,17 +6987,27 @@ export function App({
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <Dialog.Title className="text-base font-semibold">Review Target Diff</Dialog.Title>
-                  <Dialog.Description className="mt-1 min-w-0 text-sm">
-                    <span className="block break-words font-medium leading-snug text-foreground">
-                      {selectedReviewPathItem
-                        ? getReviewTargetPrimaryLabel(selectedReviewPathItem.target)
-                        : getPathFileName(selectedFileDiffState?.filePath ?? activeThreadFile)}
-                    </span>
-                    <span className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">
-                      {selectedReviewPathItem
-                        ? getReviewTargetScopeLabel(selectedReviewPathItem.target)
-                        : (selectedFileDiffState?.filePath ?? activeThreadFile ?? "Select a Review Target first.")}
-                    </span>
+                  <Dialog.Description asChild>
+                    <div className="mt-1 min-w-0 text-sm">
+                      <span className="block break-words font-medium leading-snug text-foreground">
+                        {selectedReviewPathItem
+                          ? getReviewTargetPrimaryLabel(selectedReviewPathItem.target)
+                          : getPathFileName(selectedFileDiffState?.filePath ?? activeThreadFile)}
+                      </span>
+                      <span className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">
+                        {selectedReviewPathItem
+                          ? getReviewTargetScopeLabel(selectedReviewPathItem.target)
+                          : (selectedFileDiffState?.filePath ?? activeThreadFile ?? "Select a Review Target first.")}
+                      </span>
+                      <div className="mt-2">
+                        <PullRequestBranchCopyControl
+                          baseBranch={selectedBaseBranch}
+                          copyMessage={branchCopyMessage}
+                          headBranch={selectedHeadBranch}
+                          onCopy={() => void copyPullRequestHeadBranch()}
+                        />
+                      </div>
+                    </div>
                   </Dialog.Description>
                 </div>
                 <Dialog.Close asChild>
@@ -6970,13 +7135,13 @@ export function App({
                               <Button size="sm" variant="outline" onClick={() => loadDiffHunk(selectedFileChange.id, selectedFileChange.file, hunk.id)}>
                                 Load hunk
                               </Button>
-                            ) : hunk.expandable && !hunk.expanded ? (
-                              <Button size="sm" variant="outline" onClick={() => expandDiffHunk(selectedFileChange.id, hunk.id)}>
-                                Expand context
-                              </Button>
-                            ) : hunk.expandable ? (
-                              <Badge variant="muted">Context expanded</Badge>
-                            ) : null}
+                            ) : (
+                              <DiffHunkContextControls
+                                hunk={hunk}
+                                onExpand={(direction) => expandDiffHunk(selectedFileChange.id, hunk.id, direction)}
+                                unavailableReason={diffContextUnavailableReason}
+                              />
+                            )}
                           </div>
                           {hunk.loaded ? (
                             <div className="diff-code-grid font-mono text-xs">

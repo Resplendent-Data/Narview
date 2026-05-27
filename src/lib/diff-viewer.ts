@@ -20,6 +20,10 @@ export interface DiffHunkView {
   loaded: boolean;
   expandable: boolean;
   expanded: boolean;
+  canExpandBefore: boolean;
+  canExpandAfter: boolean;
+  contextBefore: number;
+  contextAfter: number;
   lines: DiffLine[];
 }
 
@@ -33,13 +37,20 @@ export interface LazyDiffState {
   fullFileLines: DiffLine[] | null;
 }
 
+export interface DiffHunkExpansion {
+  before: number;
+  after: number;
+}
+
 export interface LazyDiffOptions {
   mode: DiffMode;
   repository: string;
   pullRequestNumber: number;
   loadedHunkIds?: string[];
   expandedHunkIds?: string[];
+  expandedHunkContexts?: Record<string, DiffHunkExpansion>;
   fullFileLoaded?: boolean;
+  sourceContent?: string | null;
 }
 
 export interface HighlightWindow {
@@ -54,7 +65,13 @@ interface HunkDescriptor {
   startLine: number;
 }
 
+interface PatchHunkView extends DiffHunkView {
+  oldStart: number | null;
+  newStart: number | null;
+}
+
 export const diffViewerStorageKey = "narview.diffViewerPreferences.v1";
+export const diffContextExpansionLineCount = 20;
 
 export function readDiffModePreference(): DiffMode {
   if (typeof window === "undefined") {
@@ -113,19 +130,26 @@ export function buildLazyDiffState(file: CachedFileSummary, options: LazyDiffOpt
     };
   }
 
+  const sourceLines = typeof options.sourceContent === "string" ? splitSourceLines(options.sourceContent) : null;
   const patchHunks = file.patch ? parsePatch(file.patch, file.path) : [];
   if (patchHunks.length > 0) {
     const loaded = new Set([...getDefaultLoadedDiffHunkIds(file), ...(options.loadedHunkIds ?? [])]);
     const hunks = patchHunks.map((hunk) => {
       const isLoaded = loaded.has(hunk.id);
+      const expansion = options.expandedHunkContexts?.[hunk.id] ?? { before: 0, after: 0 };
+      const expandedHunk = sourceLines && isLoaded ? expandPatchHunkWithSourceContext(hunk, sourceLines, expansion) : hunk;
 
       return {
-        id: hunk.id,
-        header: hunk.header,
+        id: expandedHunk.id,
+        header: expandedHunk.header,
         loaded: isLoaded,
-        expandable: false,
-        expanded: false,
-        lines: isLoaded ? highlightLoadedDiffLines(hunk.lines, file.path) : [],
+        expandable: Boolean(sourceLines && isLoaded),
+        expanded: expandedHunk.contextBefore > 0 || expandedHunk.contextAfter > 0,
+        canExpandBefore: Boolean(sourceLines && isLoaded && expandedHunk.canExpandBefore),
+        canExpandAfter: Boolean(sourceLines && isLoaded && expandedHunk.canExpandAfter),
+        contextBefore: sourceLines && isLoaded ? expandedHunk.contextBefore : 0,
+        contextAfter: sourceLines && isLoaded ? expandedHunk.contextAfter : 0,
+        lines: isLoaded ? highlightLoadedDiffLines(expandedHunk.lines, file.path) : [],
       };
     });
 
@@ -136,7 +160,11 @@ export function buildLazyDiffState(file: CachedFileSummary, options: LazyDiffOpt
       language,
       githubUrl,
       hunks,
-      fullFileLines: options.fullFileLoaded ? highlightLoadedDiffLines(patchHunks.flatMap((hunk) => hunk.lines), file.path) : null,
+      fullFileLines: options.fullFileLoaded
+        ? sourceLines
+          ? highlightLoadedDiffLines(buildSourceFullFileLines(sourceLines), file.path)
+          : highlightLoadedDiffLines(patchHunks.flatMap((hunk) => hunk.lines), file.path)
+        : null,
     };
   }
 
@@ -166,6 +194,10 @@ export function buildLazyDiffState(file: CachedFileSummary, options: LazyDiffOpt
       loaded: isLoaded,
       expandable: isLoaded,
       expanded: isExpanded,
+      canExpandBefore: isLoaded && !isExpanded,
+      canExpandAfter: isLoaded && !isExpanded,
+      contextBefore: isExpanded ? 2 : 0,
+      contextAfter: isExpanded ? 2 : 0,
       lines: highlightLoadedDiffLines(rawLines, file.path),
     };
   });
@@ -261,20 +293,22 @@ function getDiffHunkDescriptors(file: CachedFileSummary): HunkDescriptor[] {
   ];
 }
 
-function parsePatch(patch: string, filePath: string): DiffHunkView[] {
-  const hunks: DiffHunkView[] = [];
+function parsePatch(patch: string, filePath: string): PatchHunkView[] {
+  const hunks: PatchHunkView[] = [];
   let current: { id: string; header: string; lines: DiffLine[]; oldLine: number; newLine: number } | null = null;
 
   for (const rawLine of patch.split("\n")) {
     if (rawLine.startsWith("@@")) {
       const match = rawLine.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      const oldStart = match ? Number(match[1]) : null;
+      const newStart = match ? Number(match[2]) : null;
       const hunkIndex = hunks.length + 1;
       current = {
         id: `${filePath}:hunk-${hunkIndex}`,
         header: rawLine,
         lines: [],
-        oldLine: match ? Number(match[1]) : 0,
-        newLine: match ? Number(match[2]) : 0,
+        oldLine: oldStart ?? 0,
+        newLine: newStart ?? 0,
       };
       hunks.push({
         id: current.id,
@@ -282,7 +316,13 @@ function parsePatch(patch: string, filePath: string): DiffHunkView[] {
         loaded: false,
         expandable: false,
         expanded: false,
+        canExpandBefore: false,
+        canExpandAfter: false,
+        contextBefore: 0,
+        contextAfter: 0,
         lines: current.lines,
+        oldStart,
+        newStart,
       });
       continue;
     }
@@ -308,6 +348,72 @@ function parsePatch(patch: string, filePath: string): DiffHunkView[] {
   }
 
   return hunks;
+}
+
+function expandPatchHunkWithSourceContext(
+  hunk: PatchHunkView,
+  sourceLines: string[],
+  requested: DiffHunkExpansion,
+): PatchHunkView {
+  const firstNewLine = hunk.lines.find((line) => line.newLine !== null)?.newLine ?? hunk.newStart;
+  const lastNewLine = findLastDiffLine(hunk.lines, "new") ?? hunk.newStart;
+  const firstOldLine = hunk.lines.find((line) => line.oldLine !== null)?.oldLine ?? hunk.oldStart;
+  const lastOldLine = findLastDiffLine(hunk.lines, "old") ?? hunk.oldStart;
+
+  if (firstNewLine === null || lastNewLine === null || sourceLines.length === 0) {
+    return {
+      ...hunk,
+      expandable: false,
+      canExpandBefore: false,
+      canExpandAfter: false,
+      contextBefore: 0,
+      contextAfter: 0,
+    };
+  }
+
+  const contextBefore = Math.min(Math.max(requested.before, 0), Math.max(firstNewLine - 1, 0));
+  const contextAfter = Math.min(Math.max(requested.after, 0), Math.max(sourceLines.length - lastNewLine, 0));
+  const beforeLines = Array.from({ length: contextBefore }, (_, index) => {
+    const newLine = firstNewLine - contextBefore + index;
+    const oldLine = firstOldLine === null ? null : firstOldLine - contextBefore + index;
+    return createLine(oldLine !== null && oldLine > 0 ? oldLine : null, newLine, "context", sourceLines[newLine - 1] ?? "");
+  });
+  const afterLines = Array.from({ length: contextAfter }, (_, index) => {
+    const newLine = lastNewLine + index + 1;
+    const oldLine = lastOldLine === null ? null : lastOldLine + index + 1;
+    return createLine(oldLine !== null && oldLine > 0 ? oldLine : null, newLine, "context", sourceLines[newLine - 1] ?? "");
+  });
+
+  return {
+    ...hunk,
+    expandable: true,
+    expanded: contextBefore > 0 || contextAfter > 0,
+    canExpandBefore: firstNewLine - contextBefore > 1,
+    canExpandAfter: lastNewLine + contextAfter < sourceLines.length,
+    contextBefore,
+    contextAfter,
+    lines: [...beforeLines, ...hunk.lines, ...afterLines],
+  };
+}
+
+function findLastDiffLine(lines: DiffLine[], side: "old" | "new") {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const lineNumber = side === "old" ? lines[index].oldLine : lines[index].newLine;
+    if (lineNumber !== null) {
+      return lineNumber;
+    }
+  }
+
+  return null;
+}
+
+function splitSourceLines(content: string) {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  return lines.length > 1 && lines.at(-1) === "" ? lines.slice(0, -1) : lines;
+}
+
+function buildSourceFullFileLines(sourceLines: string[]) {
+  return sourceLines.map((content, index) => createLine(index + 1, index + 1, "context", content));
 }
 
 function buildHunkLines(file: CachedFileSummary, descriptor: HunkDescriptor, index: number, expanded: boolean): DiffLine[] {

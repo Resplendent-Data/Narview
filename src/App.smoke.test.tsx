@@ -3642,6 +3642,50 @@ describe("App shell", () => {
     expect(state.fullFileLines).toBeNull();
   });
 
+  it("expands real patch hunks upward and downward from loaded head file content", () => {
+    const sourceContent = Array.from({ length: 30 }, (_, index) =>
+      index === 10 ? "const value = next;" : `source line ${index + 1}`,
+    ).join("\n");
+    const state = buildLazyDiffState(
+      {
+        path: "src/review/session.ts",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        patch: "@@ -10,3 +10,3 @@ function updateSession()\n source line 10\n-const value = previous;\n+const value = next;\n source line 12",
+      },
+      {
+        mode: "unified",
+        repository: "Resplendent-Data/Narview",
+        pullRequestNumber: 12,
+        expandedHunkContexts: {
+          "src/review/session.ts:hunk-1": { before: 2, after: 3 },
+        },
+        fullFileLoaded: true,
+        sourceContent,
+      },
+    );
+
+    expect(state.hunks[0]).toMatchObject({
+      contextBefore: 2,
+      contextAfter: 3,
+      canExpandBefore: true,
+      canExpandAfter: true,
+    });
+    expect(state.hunks[0].lines.map((line) => line.content)).toEqual([
+      "source line 8",
+      "source line 9",
+      "source line 10",
+      "const value = previous;",
+      "const value = next;",
+      "source line 12",
+      "source line 13",
+      "source line 14",
+      "source line 15",
+    ]);
+    expect(state.fullFileLines).toHaveLength(30);
+  });
+
   it("keeps syntax metadata on deep rows in long cached hunks", () => {
     const patchLines = [
       "@@ -104,0 +128,45 @@ async def _load_run_user_message(",
