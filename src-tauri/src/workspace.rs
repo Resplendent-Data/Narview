@@ -4,6 +4,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use reqwest::{header::HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -2039,11 +2041,13 @@ fn apply_git_auth_env(command: &mut Command, token: Option<&str>) {
         command
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader")
-            .env(
-                "GIT_CONFIG_VALUE_0",
-                format!("AUTHORIZATION: bearer {token}"),
-            );
+            .env("GIT_CONFIG_VALUE_0", git_http_auth_header(token));
     }
+}
+
+fn git_http_auth_header(token: &str) -> String {
+    let credentials = BASE64_STANDARD.encode(format!("x-access-token:{token}"));
+    format!("AUTHORIZATION: Basic {credentials}")
 }
 
 fn git_available() -> bool {
@@ -2254,6 +2258,18 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn git_http_auth_header_uses_basic_token_credentials() {
+        let header = git_http_auth_header("gho_testtoken");
+
+        assert_eq!(
+            header,
+            "AUTHORIZATION: Basic eC1hY2Nlc3MtdG9rZW46Z2hvX3Rlc3R0b2tlbg==",
+        );
+        assert!(!header.to_ascii_lowercase().contains("bearer"));
+        assert!(!header.contains("gho_testtoken"));
     }
 
     struct TestPullRequestRepos {
