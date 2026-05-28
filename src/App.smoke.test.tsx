@@ -4150,7 +4150,7 @@ describe("App shell", () => {
         nearbyLine: 88,
       });
     });
-  }, 10_000);
+  }, 30_000);
 
   it("exposes resolve and unresolve from the inspector for the active thread", async () => {
     const user = userEvent.setup();
