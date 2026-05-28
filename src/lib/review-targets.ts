@@ -294,7 +294,7 @@ function createNodeGroupTarget(
   return {
     id: `target:${stableHash(stableKey)}`,
     stableKey,
-    fingerprint: buildNodeGroupFingerprint(stableKey, sortedNodes, edgeReasons),
+    fingerprint: buildNodeGroupFingerprint(stableKey, sortedNodes, edgeReasons, attachedThreads),
     kind: "node-group",
     title: getTargetTitle(sortedNodes, paths),
     priority: reviewThreads > 0 ? "high" : fallback ? "normal" : "normal",
@@ -517,7 +517,12 @@ function generatedClusterIsJustified(hotspot: HotspotScore) {
   return hotspot.unresolvedThreads > 0 || hotspot.reasons.some((reason) => reason.includes("failing check"));
 }
 
-function buildNodeGroupFingerprint(stableKey: string, nodes: AttentionNode[], edges: GroupEdge[]) {
+function buildNodeGroupFingerprint(
+  stableKey: string,
+  nodes: AttentionNode[],
+  edges: GroupEdge[],
+  threads: CachedReviewThread[],
+) {
   return stableHash(
     JSON.stringify({
       stableKey,
@@ -545,8 +550,26 @@ function buildNodeGroupFingerprint(stableKey: string, nodes: AttentionNode[], ed
         reason: edge.reason,
         strength: edge.strength,
       })),
+      reviewThreads: threads.map(buildAttachedThreadFingerprintPayload),
     }),
   );
+}
+
+function buildAttachedThreadFingerprintPayload(thread: CachedReviewThread) {
+  return {
+    id: thread.id,
+    authorLogin: thread.authorLogin,
+    filePath: thread.filePath,
+    line: thread.line,
+    body: thread.body,
+    updatedAt: thread.updatedAt,
+    comments: thread.comments?.map((comment) => ({
+      id: comment.id,
+      authorLogin: comment.authorLogin,
+      body: comment.body,
+      updatedAt: comment.updatedAt,
+    })),
+  };
 }
 
 function buildThreadGroupFingerprint(stableKey: string, threads: CachedReviewThread[]) {

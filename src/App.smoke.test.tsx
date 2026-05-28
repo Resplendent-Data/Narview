@@ -3325,6 +3325,102 @@ describe("App shell", () => {
     });
   });
 
+  it("marks reviewed node-group targets for re-review when attached GitHub feedback changes", () => {
+    const pullRequestKey = "Resplendent-Data/Narview#12";
+    const node = createSyntheticAttentionNode({
+      id: "src/session.ts:symbol:rotateSession",
+      filePath: "src/session.ts",
+      label: "rotateSession",
+      lineStart: 10,
+      lineEnd: 20,
+    });
+    const index = createReviewTargetIndex([node]);
+    const baseData: CachedPullRequestData = {
+      ...createOverviewFixture(),
+      fileSummaries: [{ path: "src/session.ts", additions: 4, deletions: 1, status: "modified" }],
+      reviewThreads: [],
+    };
+    const buildTargets = (reviewThreads: CachedPullRequestData["reviewThreads"]) =>
+      buildReviewTargets({
+        analysisIndex: index,
+        attentionMap: buildAttentionMapPresentation(index, { ...baseData, reviewThreads }),
+        currentData: { ...baseData, reviewThreads },
+      });
+    const initialTargets = buildTargets([]);
+    const initialTarget = initialTargets.find((target) => target.nodeIds.includes(node.id));
+    expect(initialTarget).toMatchObject({
+      kind: "node-group",
+      reviewThreadIds: [],
+    });
+
+    syncReviewTargets("octocat", pullRequestKey, initialTargets);
+    setReviewTargetReviewed("octocat", initialTarget?.id ?? "", true, 1_800_000_000_000);
+
+    const newThread = {
+      id: "thread-new-feedback",
+      authorLogin: "monalisa",
+      filePath: "src/session.ts",
+      line: 12,
+      state: "unresolved" as const,
+      body: "Please verify the refreshed session branch.",
+      updatedAt: "2026-05-18T12:00:00Z",
+    };
+    const targetsWithNewThread = buildTargets([newThread]);
+    const targetWithNewThread = targetsWithNewThread.find((target) => target.nodeIds.includes(node.id));
+    expect(targetWithNewThread).toMatchObject({
+      kind: "node-group",
+      reviewThreadIds: ["thread-new-feedback"],
+    });
+
+    syncReviewTargets("octocat", pullRequestKey, targetsWithNewThread);
+    expect(buildReviewTargetReviewStates("octocat", targetsWithNewThread, readReviewTargetStateStore())).toMatchObject({
+      [targetWithNewThread?.id ?? "missing-target"]: "needs-re-review",
+    });
+    expect(buildReviewedTargetIdSet("octocat", targetsWithNewThread, readReviewTargetStateStore()).has(targetWithNewThread?.id ?? "")).toBe(
+      false,
+    );
+
+    clearReviewTargetStateStore();
+
+    const initialComment = {
+      id: "comment-initial",
+      authorLogin: "monalisa",
+      body: "Please verify the refreshed session branch.",
+      updatedAt: "2026-05-18T12:00:00Z",
+      url: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r1",
+    };
+    const threadWithInitialComment = {
+      ...newThread,
+      comments: [initialComment],
+    };
+    const targetsWithInitialComment = buildTargets([threadWithInitialComment]);
+    const targetWithInitialComment = targetsWithInitialComment.find((target) => target.nodeIds.includes(node.id));
+
+    syncReviewTargets("octocat", pullRequestKey, targetsWithInitialComment);
+    setReviewTargetReviewed("octocat", targetWithInitialComment?.id ?? "", true, 1_800_000_000_001);
+
+    const threadWithReply = {
+      ...threadWithInitialComment,
+      comments: [
+        initialComment,
+        {
+          id: "comment-reply",
+          authorLogin: "octocat",
+          body: "Good catch, this should also cover token expiry.",
+          updatedAt: "2026-05-18T12:05:00Z",
+          url: "https://github.com/Resplendent-Data/Narview/pull/12#discussion_r2",
+        },
+      ],
+    };
+    const targetsWithReply = buildTargets([threadWithReply]);
+    const targetWithReply = targetsWithReply.find((target) => target.nodeIds.includes(node.id));
+
+    syncReviewTargets("octocat", pullRequestKey, targetsWithReply);
+    expect(buildReviewTargetReviewStates("octocat", targetsWithReply, readReviewTargetStateStore())).toMatchObject({
+      [targetWithReply?.id ?? "missing-target"]: "needs-re-review",
+    });
+  });
+
   it("builds Review Target inspector content from head symbols, base diff, related tests, and fallback hunks", () => {
     const currentData: CachedPullRequestData = {
       ...createOverviewFixture(),
