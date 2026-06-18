@@ -57,6 +57,44 @@ pub struct CreatedReviewThreadComment {
     url: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileViewedActionResponse {
+    ok: bool,
+    path: String,
+    viewer_viewed_state: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingReviewResponse {
+    pull_request_id: String,
+    pull_request_review_id: String,
+    state: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingReviewThreadResponse {
+    pull_request_id: String,
+    pull_request_review_id: String,
+    state: String,
+    message: String,
+    thread: Option<CreatedReviewThread>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSubmitResponse {
+    ok: bool,
+    pull_request_review_id: String,
+    state: String,
+    url: Option<String>,
+    message: String,
+}
+
 #[tauri::command]
 pub async fn reply_review_thread(
     auth_state: State<'_, AuthState>,
@@ -271,6 +309,361 @@ pub async fn start_review_thread(
     })
 }
 
+#[tauri::command]
+pub async fn set_file_viewed(
+    auth_state: State<'_, AuthState>,
+    workspace_state: State<'_, WorkspaceState>,
+    repository: String,
+    pull_request_number: u64,
+    path: String,
+    viewed: bool,
+) -> Result<FileViewedActionResponse, ThreadActionError> {
+    if path.trim().is_empty() {
+        return Err(ThreadActionError::new(
+            "github-viewed-file-validation-error",
+            "File path is required.",
+        ));
+    }
+
+    let (owner, name) = parse_repository_slug(&repository)?;
+    let token = github_token(&auth_state)?;
+    let pull_request_id = fetch_pull_request_id(
+        &workspace_state.http,
+        &token,
+        &owner,
+        &name,
+        pull_request_number,
+    )
+    .await?;
+    let action = if viewed {
+        "markFileAsViewed"
+    } else {
+        "unmarkFileAsViewed"
+    };
+    let mutation = if viewed {
+        "mutation MarkFileViewed($input: MarkFileAsViewedInput!) { markFileAsViewed(input: $input) { pullRequest { id } } }"
+    } else {
+        "mutation UnmarkFileViewed($input: UnmarkFileAsViewedInput!) { unmarkFileAsViewed(input: $input) { pullRequest { id } } }"
+    };
+
+    let _data = send_graphql(
+        &workspace_state.http,
+        &token,
+        action,
+        json!({
+            "query": mutation,
+            "variables": {
+                "input": {
+                    "pullRequestId": pull_request_id,
+                    "path": path.trim(),
+                }
+            }
+        }),
+    )
+    .await?;
+
+    Ok(FileViewedActionResponse {
+        ok: true,
+        path: path.trim().to_string(),
+        viewer_viewed_state: if viewed { "VIEWED" } else { "UNVIEWED" }.to_string(),
+        message: if viewed {
+            "File marked viewed on GitHub.".to_string()
+        } else {
+            "File marked unviewed on GitHub.".to_string()
+        },
+    })
+}
+
+#[tauri::command]
+pub async fn ensure_pending_review(
+    auth_state: State<'_, AuthState>,
+    workspace_state: State<'_, WorkspaceState>,
+    repository: String,
+    pull_request_number: u64,
+) -> Result<PendingReviewResponse, ThreadActionError> {
+    let (owner, name) = parse_repository_slug(&repository)?;
+    let token = github_token(&auth_state)?;
+
+    ensure_pending_review_for_pull_request(
+        &workspace_state.http,
+        &token,
+        &owner,
+        &name,
+        pull_request_number,
+        None,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn add_pending_review_thread(
+    auth_state: State<'_, AuthState>,
+    workspace_state: State<'_, WorkspaceState>,
+    repository: String,
+    pull_request_number: u64,
+    pull_request_review_id: Option<String>,
+    subject_type: String,
+    path: Option<String>,
+    body: String,
+    line: Option<u64>,
+    side: Option<String>,
+    start_line: Option<u64>,
+    start_side: Option<String>,
+    reply_to_thread_id: Option<String>,
+) -> Result<PendingReviewThreadResponse, ThreadActionError> {
+    let trimmed_body = body.trim();
+    if trimmed_body.is_empty() {
+        return Err(ThreadActionError::new(
+            "github-review-validation-error",
+            "Draft comment body is required.",
+        ));
+    }
+
+    let (owner, name) = parse_repository_slug(&repository)?;
+    let token = github_token(&auth_state)?;
+    let subject = subject_type.trim().to_ascii_uppercase();
+
+    if subject == "REPLY" {
+        let thread_id = reply_to_thread_id.ok_or_else(|| {
+            ThreadActionError::new(
+                "github-review-validation-error",
+                "Reply draft requires a Review Thread id.",
+            )
+        })?;
+        let pending = ensure_pending_review_for_pull_request(
+            &workspace_state.http,
+            &token,
+            &owner,
+            &name,
+            pull_request_number,
+            pull_request_review_id,
+        )
+        .await?;
+        let _data = send_graphql(
+            &workspace_state.http,
+            &token,
+            "reply",
+            json!({
+                "query": "mutation ReplyReviewThread($threadId: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id url } } }",
+                "variables": {
+                    "threadId": thread_id,
+                    "body": trimmed_body,
+                }
+            }),
+        )
+        .await?;
+
+        return Ok(PendingReviewThreadResponse {
+            pull_request_id: pending.pull_request_id,
+            pull_request_review_id: pending.pull_request_review_id,
+            state: pending.state,
+            message: "Reply added to GitHub Review Thread.".to_string(),
+            thread: None,
+        });
+    }
+
+    let pending = ensure_pending_review_for_pull_request(
+        &workspace_state.http,
+        &token,
+        &owner,
+        &name,
+        pull_request_number,
+        pull_request_review_id,
+    )
+    .await?;
+    let path = path
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ThreadActionError::new(
+                "github-review-validation-error",
+                "Draft review comments require a file path.",
+            )
+        })?;
+
+    let mut input = serde_json::Map::new();
+    input.insert(
+        "pullRequestReviewId".to_string(),
+        json!(pending.pull_request_review_id.clone()),
+    );
+    input.insert("body".to_string(), json!(trimmed_body));
+    input.insert("path".to_string(), json!(path));
+
+    if subject == "FILE" {
+        input.insert("subjectType".to_string(), json!("FILE"));
+    } else if subject == "LINE" {
+        let line = line.ok_or_else(|| {
+            ThreadActionError::new(
+                "github-review-validation-error",
+                "Line-level draft comments require a changed line anchor.",
+            )
+        })?;
+        let side = side
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| value == "LEFT" || value == "RIGHT")
+            .ok_or_else(|| {
+                ThreadActionError::new(
+                    "github-review-validation-error",
+                    "Line-level draft comments require a LEFT or RIGHT diff side.",
+                )
+            })?;
+
+        input.insert("subjectType".to_string(), json!("LINE"));
+        input.insert("line".to_string(), json!(line));
+        input.insert("side".to_string(), json!(side));
+        if let Some(start_line) = start_line {
+            input.insert("startLine".to_string(), json!(start_line));
+        }
+        if let Some(start_side) = start_side
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| value == "LEFT" || value == "RIGHT")
+        {
+            input.insert("startSide".to_string(), json!(start_side));
+        }
+    } else {
+        return Err(ThreadActionError::new(
+            "github-review-validation-error",
+            "Draft review subject type must be LINE, FILE, or REPLY.",
+        ));
+    }
+
+    let data = send_graphql(
+        &workspace_state.http,
+        &token,
+        "add pending review thread",
+        json!({
+            "query": "mutation AddPendingReviewThread($input: AddPullRequestReviewThreadInput!) { addPullRequestReviewThread(input: $input) { thread { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { id author { login } body updatedAt url } } } } }",
+            "variables": {
+                "input": serde_json::Value::Object(input),
+            }
+        }),
+    )
+    .await?;
+
+    let thread = data
+        .pointer("/addPullRequestReviewThread/thread")
+        .map(created_review_thread_from_value)
+        .transpose()?;
+
+    Ok(PendingReviewThreadResponse {
+        pull_request_id: pending.pull_request_id,
+        pull_request_review_id: pending.pull_request_review_id,
+        state: pending.state,
+        message: "Draft comment added to pending GitHub review.".to_string(),
+        thread,
+    })
+}
+
+#[tauri::command]
+pub async fn submit_pending_review(
+    auth_state: State<'_, AuthState>,
+    workspace_state: State<'_, WorkspaceState>,
+    repository: String,
+    pull_request_number: u64,
+    pull_request_review_id: String,
+    event: String,
+    body: String,
+) -> Result<ReviewSubmitResponse, ThreadActionError> {
+    let (_owner, _name) = parse_repository_slug(&repository)?;
+    let _ = pull_request_number;
+    let token = github_token(&auth_state)?;
+    let event = event.trim().to_ascii_uppercase();
+    if !matches!(event.as_str(), "COMMENT" | "APPROVE" | "REQUEST_CHANGES") {
+        return Err(ThreadActionError::new(
+            "github-review-validation-error",
+            "Review event must be COMMENT, APPROVE, or REQUEST_CHANGES.",
+        ));
+    }
+    if (event == "COMMENT" || event == "REQUEST_CHANGES") && body.trim().is_empty() {
+        return Err(ThreadActionError::new(
+            "github-review-validation-error",
+            "A review summary is required for this review event.",
+        ));
+    }
+
+    let data = send_graphql(
+        &workspace_state.http,
+        &token,
+        "submit pending review",
+        json!({
+            "query": "mutation SubmitPendingReview($input: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $input) { pullRequestReview { id state url } } }",
+            "variables": {
+                "input": {
+                    "pullRequestReviewId": pull_request_review_id,
+                    "event": event,
+                    "body": body.trim(),
+                }
+            }
+        }),
+    )
+    .await?;
+
+    Ok(ReviewSubmitResponse {
+        ok: true,
+        pull_request_review_id: required_string(
+            &data,
+            "/submitPullRequestReview/pullRequestReview/id",
+            "Pull Request Review id",
+        )?,
+        state: data
+            .pointer("/submitPullRequestReview/pullRequestReview/state")
+            .and_then(Value::as_str)
+            .unwrap_or("SUBMITTED")
+            .to_string(),
+        url: data
+            .pointer("/submitPullRequestReview/pullRequestReview/url")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        message: "Pending review submitted to GitHub.".to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn discard_pending_review(
+    auth_state: State<'_, AuthState>,
+    workspace_state: State<'_, WorkspaceState>,
+    repository: String,
+    pull_request_number: u64,
+    pull_request_review_id: String,
+) -> Result<ReviewSubmitResponse, ThreadActionError> {
+    let (_owner, _name) = parse_repository_slug(&repository)?;
+    let _ = pull_request_number;
+    let token = github_token(&auth_state)?;
+    let data = send_graphql(
+        &workspace_state.http,
+        &token,
+        "discard pending review",
+        json!({
+            "query": "mutation DiscardPendingReview($input: DeletePullRequestReviewInput!) { deletePullRequestReview(input: $input) { pullRequestReview { id state url } } }",
+            "variables": {
+                "input": {
+                    "pullRequestReviewId": pull_request_review_id,
+                }
+            }
+        }),
+    )
+    .await?;
+
+    Ok(ReviewSubmitResponse {
+        ok: true,
+        pull_request_review_id: data
+            .pointer("/deletePullRequestReview/pullRequestReview/id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        state: data
+            .pointer("/deletePullRequestReview/pullRequestReview/state")
+            .and_then(Value::as_str)
+            .unwrap_or("DELETED")
+            .to_string(),
+        url: data
+            .pointer("/deletePullRequestReview/pullRequestReview/url")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        message: "Pending review discarded.".to_string(),
+    })
+}
+
 fn github_token(auth_state: &AuthState) -> Result<String, ThreadActionError> {
     let token = auth_state
         .github_token()
@@ -326,6 +719,99 @@ async fn fetch_pull_request_id(
                 "GitHub returned no Pull Request id for this Review Thread.",
             )
         })
+}
+
+async fn ensure_pending_review_for_pull_request(
+    http: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u64,
+    preferred_review_id: Option<String>,
+) -> Result<PendingReviewResponse, ThreadActionError> {
+    let data = send_graphql(
+        http,
+        token,
+        "load Pull Request pending review",
+        json!({
+            "query": "query NarviewPendingReview($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id viewerLatestReview { id state } } } }",
+            "variables": {
+                "owner": owner,
+                "name": name,
+                "number": number as i64,
+            }
+        }),
+    )
+    .await?;
+
+    let pull_request_id = data
+        .pointer("/repository/pullRequest/id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            ThreadActionError::new(
+                "github-review-response-error",
+                "GitHub returned no Pull Request id for this pending review.",
+            )
+        })?;
+
+    if let Some(review_id) = preferred_review_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(PendingReviewResponse {
+            pull_request_id,
+            pull_request_review_id: review_id,
+            state: "PENDING".to_string(),
+            message: "Using existing pending GitHub review.".to_string(),
+        });
+    }
+
+    let latest_review_id = data
+        .pointer("/repository/pullRequest/viewerLatestReview/id")
+        .and_then(Value::as_str);
+    let latest_review_state = data
+        .pointer("/repository/pullRequest/viewerLatestReview/state")
+        .and_then(Value::as_str);
+
+    if let (Some(review_id), Some("PENDING")) = (latest_review_id, latest_review_state) {
+        return Ok(PendingReviewResponse {
+            pull_request_id,
+            pull_request_review_id: review_id.to_string(),
+            state: "PENDING".to_string(),
+            message: "Reusing pending GitHub review.".to_string(),
+        });
+    }
+
+    let data = send_graphql(
+        http,
+        token,
+        "create pending review",
+        json!({
+            "query": "mutation CreatePendingReview($input: AddPullRequestReviewInput!) { addPullRequestReview(input: $input) { pullRequestReview { id state } } }",
+            "variables": {
+                "input": {
+                    "pullRequestId": pull_request_id.clone(),
+                }
+            }
+        }),
+    )
+    .await?;
+
+    Ok(PendingReviewResponse {
+        pull_request_id,
+        pull_request_review_id: required_string(
+            &data,
+            "/addPullRequestReview/pullRequestReview/id",
+            "Pull Request Review id",
+        )?,
+        state: data
+            .pointer("/addPullRequestReview/pullRequestReview/state")
+            .and_then(Value::as_str)
+            .unwrap_or("PENDING")
+            .to_string(),
+        message: "Created pending GitHub review.".to_string(),
+    })
 }
 
 fn parse_repository_slug(repository: &str) -> Result<(String, String), ThreadActionError> {

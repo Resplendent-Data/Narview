@@ -25,10 +25,12 @@ export interface CachedReviewThread {
 
 export interface CachedFileSummary {
   path: string;
+  previousPath?: string | null;
   additions: number;
   deletions: number;
   status: "added" | "modified" | "removed" | "renamed" | "binary";
   patch?: string | null;
+  viewerViewedState?: "VIEWED" | "UNVIEWED" | "UNKNOWN" | string | null;
 }
 
 export interface CachedCheckRun {
@@ -53,8 +55,10 @@ export interface CachedPullRequestData {
     repository: string;
     number: number;
     authorLogin: string | null;
+    nodeId?: string | null;
     baseBranch: string | null;
     headBranch: string | null;
+    headSha?: string | null;
     mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | null;
     mergeStateStatus:
       | "BEHIND"
@@ -137,8 +141,10 @@ export function createCachedPullRequest(pullRequest: PullRequestSummary, nowEpoc
       repository: pullRequest.repository,
       number: pullRequest.number,
       authorLogin: pullRequest.authorLogin,
+      nodeId: null,
       baseBranch: null,
       headBranch: null,
+      headSha: null,
       mergeable: null,
       mergeStateStatus: null,
       reviewDecision: null,
@@ -248,8 +254,10 @@ export function upsertCachedPullRequest(
       repository: pullRequest.repository,
       number: pullRequest.number,
       authorLogin: pullRequest.authorLogin,
+      nodeId: existing.metadata.nodeId ?? null,
       baseBranch: existing.metadata.baseBranch,
       headBranch: existing.metadata.headBranch,
+      headSha: existing.metadata.headSha ?? null,
       mergeable: existing.metadata.mergeable,
       mergeStateStatus: existing.metadata.mergeStateStatus,
       reviewDecision: existing.metadata.reviewDecision,

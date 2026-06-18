@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -87,8 +88,10 @@ pub struct PullRequestMetadata {
     repository: String,
     number: u64,
     author_login: Option<String>,
+    node_id: Option<String>,
     base_branch: Option<String>,
     head_branch: Option<String>,
+    head_sha: Option<String>,
     mergeable: Option<String>,
     merge_state_status: Option<String>,
     review_decision: Option<String>,
@@ -124,10 +127,12 @@ pub struct CachedReviewThreadComment {
 #[serde(rename_all = "camelCase")]
 pub struct CachedFileSummary {
     path: String,
+    previous_path: Option<String>,
     additions: u64,
     deletions: u64,
     status: String,
     patch: Option<String>,
+    viewer_viewed_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -551,6 +556,15 @@ pub async fn fetch_pull_request_data(
         fetch_pull_request_detail(&workspace_state.http, &token, &repository, number).await?;
     let mut file_summaries =
         fetch_pull_request_files(&workspace_state.http, &token, &repository, number).await?;
+    let viewed_states =
+        fetch_pull_request_viewed_states(&workspace_state.http, &token, &repository, number)
+            .await?;
+    for file in &mut file_summaries {
+        file.viewer_viewed_state = viewed_states
+            .get(&file.path)
+            .cloned()
+            .or_else(|| Some("UNKNOWN".to_string()));
+    }
     trim_cached_patches(&mut file_summaries);
     let review_threads = fetch_review_threads(
         &workspace_state.http,
@@ -578,8 +592,10 @@ pub async fn fetch_pull_request_data(
         repository: repository.slug,
         number,
         author_login: detail.author_login,
+        node_id: detail.node_id,
         base_branch: detail.base_branch,
         head_branch: detail.head_branch,
+        head_sha: Some(detail.head_sha),
         mergeable: detail.mergeable,
         merge_state_status: detail.merge_state_status,
         review_decision: detail.review_decision,
@@ -770,6 +786,7 @@ struct PullRequestDetail {
     title: String,
     description: Option<String>,
     author_login: Option<String>,
+    node_id: Option<String>,
     base_branch: Option<String>,
     base_sha: String,
     base_repo_clone_url: Option<String>,
@@ -815,6 +832,7 @@ async fn fetch_pull_request_detail(
         title: detail.title,
         description: detail.body,
         author_login: detail.user.map(|user| user.login),
+        node_id: detail.node_id,
         base_branch: Some(detail.base.git_ref),
         base_sha: detail.base.sha,
         base_repo_clone_url: detail.base.repo.as_ref().map(|repo| repo.clone_url.clone()),
@@ -867,10 +885,12 @@ async fn fetch_pull_request_files(
 
         files.extend(page_files.into_iter().map(|file| CachedFileSummary {
             path: file.filename,
+            previous_path: file.previous_filename,
             additions: file.additions,
             deletions: file.deletions,
             status: normalize_file_status(&file.status, file.patch.is_none()),
             patch: file.patch,
+            viewer_viewed_state: None,
         }));
 
         if page_len < 100 {
@@ -879,6 +899,142 @@ async fn fetch_pull_request_files(
     }
 
     Ok(files)
+}
+
+async fn fetch_pull_request_viewed_states(
+    http: &reqwest::Client,
+    token: &str,
+    repository: &WorkspaceRepository,
+    number: u64,
+) -> Result<HashMap<String, String>, WorkspaceCommandError> {
+    let mut states = HashMap::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let body = json!({
+            "query": "query NarviewViewedFiles($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { files(first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { path viewerViewedState } } } } }",
+            "variables": {
+                "owner": repository.owner,
+                "name": repository.name,
+                "number": number as i64,
+                "cursor": cursor.clone(),
+            }
+        });
+
+        let data = send_workspace_graphql(
+            http,
+            token,
+            "load Pull Request viewed file state",
+            "github-viewed-files",
+            body,
+        )
+        .await?;
+
+        let Some(connection) = data.pointer("/repository/pullRequest/files") else {
+            return Ok(states);
+        };
+
+        if let Some(nodes) = connection
+            .pointer("/nodes")
+            .and_then(serde_json::Value::as_array)
+        {
+            for node in nodes {
+                let path = node.pointer("/path").and_then(serde_json::Value::as_str);
+                let viewed_state = node
+                    .pointer("/viewerViewedState")
+                    .and_then(serde_json::Value::as_str);
+
+                if let (Some(path), Some(viewed_state)) = (path, viewed_state) {
+                    states.insert(path.to_string(), viewed_state.to_string());
+                }
+            }
+        }
+
+        let has_next_page = connection
+            .pointer("/pageInfo/hasNextPage")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if !has_next_page {
+            break;
+        }
+
+        cursor = connection
+            .pointer("/pageInfo/endCursor")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string);
+    }
+
+    Ok(states)
+}
+
+async fn send_workspace_graphql(
+    http: &reqwest::Client,
+    token: &str,
+    operation: &str,
+    code_prefix: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, WorkspaceCommandError> {
+    let response = http
+        .post(GITHUB_GRAPHQL_URL)
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "Narview")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| {
+            WorkspaceCommandError::new(
+                format!("{code_prefix}-network-error"),
+                format!("Could not {operation}: {error}"),
+            )
+        })?;
+
+    if !response.status().is_success() {
+        return Err(WorkspaceCommandError::new(
+            format!("{code_prefix}-http-error"),
+            format!(
+                "GitHub rejected {operation} with HTTP {}.",
+                response.status()
+            ),
+        ));
+    }
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| {
+            WorkspaceCommandError::new(
+                format!("{code_prefix}-response-error"),
+                format!("Could not read GitHub GraphQL response: {error}"),
+            )
+        })?;
+
+    if let Some(errors) = payload.get("errors").and_then(serde_json::Value::as_array) {
+        if !errors.is_empty() {
+            let message = errors
+                .iter()
+                .filter_map(|error| error.get("message").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("; ");
+
+            return Err(WorkspaceCommandError::new(
+                format!("{code_prefix}-graphql-error"),
+                if message.is_empty() {
+                    "GitHub returned an unknown GraphQL error.".to_string()
+                } else {
+                    message
+                },
+            ));
+        }
+    }
+
+    payload.get("data").cloned().ok_or_else(|| {
+        WorkspaceCommandError::new(
+            format!("{code_prefix}-response-error"),
+            "GitHub returned no GraphQL data.",
+        )
+    })
 }
 
 fn trim_cached_patches(files: &mut [CachedFileSummary]) {
@@ -1125,6 +1281,7 @@ struct GithubUser {
 
 #[derive(Debug, Deserialize)]
 struct GithubPullRequestDetail {
+    node_id: Option<String>,
     title: String,
     body: Option<String>,
     draft: Option<bool>,
@@ -1162,6 +1319,7 @@ struct GithubRepositoryRef {
 #[derive(Debug, Deserialize)]
 struct GithubPullRequestFile {
     filename: String,
+    previous_filename: Option<String>,
     status: String,
     additions: u64,
     deletions: u64,
@@ -2349,6 +2507,7 @@ mod tests {
             title: "Test PR".to_string(),
             description: None,
             author_login: Some("octocat".to_string()),
+            node_id: Some("PR_test".to_string()),
             base_branch: Some("main".to_string()),
             base_sha: repos.base_sha.clone(),
             base_repo_clone_url: Some(repos.base_remote.clone()),

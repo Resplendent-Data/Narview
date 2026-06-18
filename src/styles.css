@@ -585,6 +585,49 @@
     color: hsl(var(--muted-foreground));
     font-style: italic;
   }
+
+  .diff-token-identifier {
+    color: hsl(248 52% 52%);
+  }
+
+  .dark .diff-token-identifier {
+    color: hsl(250 72% 76%);
+  }
+
+  .diff-token-punctuation {
+    color: hsl(220 9% 46%);
+  }
+
+  .dark .diff-token-punctuation {
+    color: hsl(218 10% 60%);
+  }
+
+  .diff-token-plain {
+    color: var(--diff-code-fg);
+  }
+
+  .diff-token-symbol {
+    background: transparent;
+    border: 0;
+    border-radius: 0.2rem;
+    cursor: pointer;
+    display: inline;
+    font: inherit;
+    letter-spacing: inherit;
+    margin: 0;
+    padding: 0 0.05rem;
+    text-align: inherit;
+  }
+
+  .diff-token-symbol:hover,
+  .diff-token-symbol:focus-visible {
+    background: hsl(var(--ring) / 0.12);
+    color: hsl(var(--primary));
+    outline: 1px solid hsl(var(--ring) / 0.42);
+    outline-offset: 1px;
+    text-decoration: underline;
+    text-underline-offset: 0.16rem;
+  }
 }
 
 @layer utilities {

@@ -41,6 +41,11 @@ pub fn run() {
             thread_actions::reply_review_thread,
             thread_actions::resolve_review_thread,
             thread_actions::unresolve_review_thread,
+            thread_actions::set_file_viewed,
+            thread_actions::ensure_pending_review,
+            thread_actions::add_pending_review_thread,
+            thread_actions::submit_pending_review,
+            thread_actions::discard_pending_review,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Narview");
