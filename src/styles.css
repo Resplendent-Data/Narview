@@ -308,15 +308,16 @@
     --diff-surface: hsl(220 20% 98%);
     --diff-surface-raised: hsl(220 18% 96%);
     --diff-line-bg: hsl(0 0% 99%);
-    --diff-gutter-bg: hsl(220 18% 95%);
+    --diff-gutter-bg: hsl(220 18% 96%);
     --diff-gutter-fg: hsl(220 10% 43%);
-    --diff-border: hsl(220 14% 80%);
+    --diff-border: hsl(220 13% 88%);
+    --diff-column-rule: hsl(220 13% 80% / 0.42);
     --diff-code-fg: hsl(222 18% 17%);
-    --diff-add-bg: hsl(150 45% 96%);
-    --diff-add-gutter: hsl(150 42% 88%);
+    --diff-add-bg: hsl(151 48% 96%);
+    --diff-add-gutter: hsl(151 44% 91%);
     --diff-add-marker: hsl(151 64% 25%);
-    --diff-del-bg: hsl(356 72% 97%);
-    --diff-del-gutter: hsl(356 62% 91%);
+    --diff-del-bg: hsl(356 76% 97.5%);
+    --diff-del-gutter: hsl(356 66% 94%);
     --diff-del-marker: hsl(356 66% 36%);
     --diff-placeholder-bg: hsl(220 18% 97%);
     --diff-hover: hsl(214 68% 92% / 0.5);
@@ -329,7 +330,8 @@
     --diff-line-bg: hsl(220 15% 13%);
     --diff-gutter-bg: hsl(220 15% 12%);
     --diff-gutter-fg: hsl(217 9% 51%);
-    --diff-border: hsl(220 12% 24%);
+    --diff-border: hsl(220 12% 26%);
+    --diff-column-rule: hsl(220 12% 34% / 0.42);
     --diff-code-fg: hsl(214 16% 80%);
     --diff-add-bg: hsl(150 42% 14% / 0.56);
     --diff-add-gutter: hsl(150 43% 13% / 0.74);
@@ -373,7 +375,8 @@
       "Courier New", monospace;
     font-size: 0.8125rem;
     font-weight: 400;
-    line-height: 1.5;
+    line-height: 1.55;
+    padding-block: 0.2rem;
   }
 
   .diff-code-line {
@@ -384,7 +387,7 @@
   }
 
   .diff-row {
-    border-color: var(--diff-border);
+    --diff-comment-left: 7rem;
     min-height: 1.55rem;
     min-width: 100%;
     width: max-content;
@@ -407,34 +410,49 @@
       inset 0 0 0 9999px hsl(var(--primary) / 0.1);
   }
 
-  .diff-comment-gutter {
-    background: var(--diff-gutter-bg);
-    border-right: 1px solid var(--diff-border);
-    color: var(--diff-gutter-fg);
-    user-select: none;
-  }
-
   .diff-line-comment-button {
     align-items: center;
     background: hsl(var(--background));
     border: 1px solid hsl(var(--border));
     border-radius: 999px;
+    box-shadow: 0 1px 4px hsl(220 15% 20% / 0.12);
     color: hsl(var(--muted-foreground));
     display: inline-flex;
-    height: 1.15rem;
+    height: 1.25rem;
     justify-content: center;
+    left: var(--diff-comment-left);
     opacity: 0;
+    pointer-events: none;
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
     transition:
       border-color 120ms ease,
       color 120ms ease,
       opacity 120ms ease;
-    width: 1.15rem;
+    user-select: none;
+    width: 1.25rem;
+    z-index: 8;
   }
 
   .diff-row:hover .diff-line-comment-button,
+  .diff-side-row:hover .diff-line-comment-button,
   .diff-row-line-selected .diff-line-comment-button,
+  .diff-line-comment-button-visible,
+  .diff-line-comment-button-active,
   .diff-line-comment-button:focus-visible {
     opacity: 1;
+    pointer-events: auto;
+  }
+
+  .diff-line-comment-button-visible {
+    background: hsl(var(--primary));
+    border-color: hsl(var(--primary));
+    box-shadow:
+      0 0 0 2px hsl(var(--background)),
+      0 0 0 4px hsl(var(--primary) / 0.28),
+      0 4px 12px hsl(var(--primary) / 0.28);
+    color: hsl(var(--primary-foreground));
   }
 
   .diff-line-comment-button:hover:not(:disabled),
@@ -461,15 +479,46 @@
   }
 
   .diff-inline-comment-composer {
-    background: hsl(var(--card));
+    background:
+      linear-gradient(90deg, hsl(var(--primary) / 0.08), transparent 24rem),
+      color-mix(in srgb, hsl(var(--card)) 96%, hsl(var(--primary)) 4%);
+    border-bottom: 1px solid var(--diff-border);
+    border-top: 1px solid var(--diff-border);
+    box-shadow: inset 3px 0 0 hsl(var(--primary));
+    min-width: 100%;
+    padding: 0.85rem 1rem 0.95rem 8rem;
+    width: max(100%, 56rem);
   }
 
-  .diff-inline-thread .markdown-body {
+  .diff-inline-comment-viewer {
+    background:
+      linear-gradient(90deg, hsl(var(--ring) / 0.08), transparent 24rem),
+      color-mix(in srgb, hsl(var(--card)) 96%, hsl(var(--ring)) 4%);
+    border-bottom: 1px solid var(--diff-border);
+    border-top: 1px solid var(--diff-border);
+    box-shadow: inset 3px 0 0 hsl(var(--ring));
+    min-width: 100%;
+    padding: 0.85rem 1rem 0.95rem 8rem;
+    width: max(100%, 56rem);
+  }
+
+  .diff-inline-comment-card {
+    background: hsl(var(--background));
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.5rem;
+    box-shadow: 0 8px 24px hsl(220 18% 18% / 0.1);
+    color: hsl(var(--foreground));
+    max-width: 48rem;
+    overflow: hidden;
+  }
+
+  .diff-inline-thread .markdown-body,
+  .diff-inline-comment-viewer .markdown-body {
     max-width: 76rem;
   }
 
   .diff-side-row {
-    border-color: var(--diff-border);
+    --diff-comment-left: 4rem;
     grid-template-columns: minmax(24rem, max-content) minmax(24rem, max-content);
     min-height: 1.55rem;
     min-width: 100%;
@@ -477,14 +526,12 @@
   }
 
   .diff-side-cell {
-    border-color: var(--diff-border);
     grid-template-columns: 52px 24px max-content;
     min-width: 100%;
   }
 
   .diff-gutter {
     background: var(--diff-gutter-bg);
-    border-right: 1px solid var(--diff-border);
     color: var(--diff-gutter-fg);
     font-variant-numeric: tabular-nums;
     opacity: 0.88;
@@ -493,9 +540,9 @@
 
   .diff-marker {
     background: color-mix(in srgb, var(--diff-gutter-bg) 88%, transparent);
-    border-right: 1px solid var(--diff-border);
     color: var(--diff-gutter-fg);
     font-weight: 700;
+    box-shadow: inset 1px 0 0 var(--diff-column-rule);
     user-select: none;
   }
 

@@ -77,6 +77,28 @@ pub struct PendingReviewResponse {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct PendingReviewDraftComment {
+    id: String,
+    author_login: Option<String>,
+    file_path: Option<String>,
+    line: Option<u64>,
+    body: String,
+    updated_at: String,
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingReviewSnapshot {
+    pull_request_id: String,
+    pull_request_review_id: String,
+    state: String,
+    message: String,
+    drafts: Vec<PendingReviewDraftComment>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingReviewThreadResponse {
     pull_request_id: String,
     pull_request_review_id: String,
@@ -393,6 +415,39 @@ pub async fn ensure_pending_review(
         None,
     )
     .await
+}
+
+#[tauri::command]
+pub async fn find_pending_review(
+    auth_state: State<'_, AuthState>,
+    workspace_state: State<'_, WorkspaceState>,
+    repository: String,
+    pull_request_number: u64,
+) -> Result<Option<PendingReviewSnapshot>, ThreadActionError> {
+    let (owner, name) = parse_repository_slug(&repository)?;
+    let token = github_token(&auth_state)?;
+    let data = load_pending_review_data(
+        &workspace_state.http,
+        &token,
+        &owner,
+        &name,
+        pull_request_number,
+    )
+    .await?;
+    let pull_request_id = pull_request_id_from_pending_review_data(&data)?;
+
+    Ok(viewer_pending_review_value(&data).and_then(|review| {
+        review
+            .pointer("/id")
+            .and_then(Value::as_str)
+            .map(|review_id| PendingReviewSnapshot {
+                pull_request_id,
+                pull_request_review_id: review_id.to_string(),
+                state: "PENDING".to_string(),
+                message: "Reconnected to pending GitHub review.".to_string(),
+                drafts: pending_review_drafts_from_value(review),
+            })
+    }))
 }
 
 #[tauri::command]
@@ -729,31 +784,9 @@ async fn ensure_pending_review_for_pull_request(
     number: u64,
     preferred_review_id: Option<String>,
 ) -> Result<PendingReviewResponse, ThreadActionError> {
-    let data = send_graphql(
-        http,
-        token,
-        "load Pull Request pending review",
-        json!({
-            "query": "query NarviewPendingReview($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id viewerLatestReview { id state } } } }",
-            "variables": {
-                "owner": owner,
-                "name": name,
-                "number": number as i64,
-            }
-        }),
-    )
-    .await?;
+    let data = load_pending_review_data(http, token, owner, name, number).await?;
 
-    let pull_request_id = data
-        .pointer("/repository/pullRequest/id")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .ok_or_else(|| {
-            ThreadActionError::new(
-                "github-review-response-error",
-                "GitHub returned no Pull Request id for this pending review.",
-            )
-        })?;
+    let pull_request_id = pull_request_id_from_pending_review_data(&data)?;
 
     if let Some(review_id) = preferred_review_id
         .map(|value| value.trim().to_string())
@@ -767,23 +800,16 @@ async fn ensure_pending_review_for_pull_request(
         });
     }
 
-    let latest_review_id = data
-        .pointer("/repository/pullRequest/viewerLatestReview/id")
-        .and_then(Value::as_str);
-    let latest_review_state = data
-        .pointer("/repository/pullRequest/viewerLatestReview/state")
-        .and_then(Value::as_str);
-
-    if let (Some(review_id), Some("PENDING")) = (latest_review_id, latest_review_state) {
+    if let Some(review_id) = viewer_pending_review_id(&data) {
         return Ok(PendingReviewResponse {
             pull_request_id,
-            pull_request_review_id: review_id.to_string(),
+            pull_request_review_id: review_id,
             state: "PENDING".to_string(),
             message: "Reusing pending GitHub review.".to_string(),
         });
     }
 
-    let data = send_graphql(
+    let data = match send_graphql(
         http,
         token,
         "create pending review",
@@ -796,7 +822,23 @@ async fn ensure_pending_review_for_pull_request(
             }
         }),
     )
-    .await?;
+    .await
+    {
+        Ok(data) => data,
+        Err(error) if error.message.contains("one pending review") => {
+            let data = load_pending_review_data(http, token, owner, name, number).await?;
+            if let Some(review_id) = viewer_pending_review_id(&data) {
+                return Ok(PendingReviewResponse {
+                    pull_request_id,
+                    pull_request_review_id: review_id,
+                    state: "PENDING".to_string(),
+                    message: "Reusing pending GitHub review.".to_string(),
+                });
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
 
     Ok(PendingReviewResponse {
         pull_request_id,
@@ -812,6 +854,108 @@ async fn ensure_pending_review_for_pull_request(
             .to_string(),
         message: "Created pending GitHub review.".to_string(),
     })
+}
+
+async fn load_pending_review_data(
+    http: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: u64,
+) -> Result<Value, ThreadActionError> {
+    send_graphql(
+        http,
+        token,
+        "load Pull Request pending review",
+        json!({
+            "query": "query NarviewPendingReview($owner: String!, $name: String!, $number: Int!) { viewer { login } repository(owner: $owner, name: $name) { pullRequest(number: $number) { id viewerLatestReview { id state comments(first: 100) { nodes { id author { login } body path line originalLine updatedAt url } } } reviews(first: 100, states: [PENDING]) { nodes { id state author { login } comments(first: 100) { nodes { id author { login } body path line originalLine updatedAt url } } } } } } }",
+            "variables": {
+                "owner": owner,
+                "name": name,
+                "number": number as i64,
+            }
+        }),
+    )
+    .await
+}
+
+fn pull_request_id_from_pending_review_data(data: &Value) -> Result<String, ThreadActionError> {
+    data.pointer("/repository/pullRequest/id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            ThreadActionError::new(
+                "github-review-response-error",
+                "GitHub returned no Pull Request id for this pending review.",
+            )
+        })
+}
+
+fn viewer_pending_review_id(data: &Value) -> Option<String> {
+    viewer_pending_review_value(data)
+        .and_then(|review| review.pointer("/id").and_then(Value::as_str))
+        .map(ToString::to_string)
+}
+
+fn viewer_pending_review_value(data: &Value) -> Option<&Value> {
+    if let Some(latest_review) = data.pointer("/repository/pullRequest/viewerLatestReview") {
+        if latest_review.pointer("/state").and_then(Value::as_str) == Some("PENDING") {
+            return Some(latest_review);
+        }
+    }
+
+    let viewer_login = data.pointer("/viewer/login").and_then(Value::as_str)?;
+    data.pointer("/repository/pullRequest/reviews/nodes")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|review| {
+            review.pointer("/state").and_then(Value::as_str) == Some("PENDING")
+                && review.pointer("/author/login").and_then(Value::as_str) == Some(viewer_login)
+        })
+}
+
+fn pending_review_drafts_from_value(value: &Value) -> Vec<PendingReviewDraftComment> {
+    value
+        .pointer("/comments/nodes")
+        .and_then(Value::as_array)
+        .map(|nodes| nodes.iter().map(pending_review_draft_from_value).collect())
+        .unwrap_or_default()
+}
+
+fn pending_review_draft_from_value(value: &Value) -> PendingReviewDraftComment {
+    PendingReviewDraftComment {
+        id: value
+            .pointer("/id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown-pending-review-comment")
+            .to_string(),
+        author_login: value
+            .pointer("/author/login")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        file_path: value
+            .pointer("/path")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        line: value
+            .pointer("/line")
+            .or_else(|| value.pointer("/originalLine"))
+            .and_then(Value::as_u64),
+        body: value
+            .pointer("/body")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        updated_at: value
+            .pointer("/updatedAt")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        url: value
+            .pointer("/url")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    }
 }
 
 fn parse_repository_slug(repository: &str) -> Result<(String, String), ThreadActionError> {
@@ -996,4 +1140,88 @@ async fn send_graphql(
             "GitHub returned no Review Thread data.",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_pending_review_from_viewer_latest_review() {
+        let data = json!({
+            "viewer": { "login": "malachibazar" },
+            "repository": {
+                "pullRequest": {
+                    "id": "PR_1",
+                    "viewerLatestReview": {
+                        "id": "PRR_latest",
+                        "state": "PENDING",
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "id": "PRRC_1",
+                                    "author": { "login": "malachibazar" },
+                                    "body": "Looks odd.",
+                                    "path": "src/slave.py",
+                                    "line": 886,
+                                    "originalLine": null,
+                                    "updatedAt": "2026-06-18T12:20:00Z",
+                                    "url": "https://github.com/o/r/pull/1#discussion_r1"
+                                }
+                            ]
+                        }
+                    },
+                    "reviews": { "nodes": [] }
+                }
+            }
+        });
+
+        let review = viewer_pending_review_value(&data).expect("pending review");
+        assert_eq!(
+            review.pointer("/id").and_then(Value::as_str),
+            Some("PRR_latest")
+        );
+        assert_eq!(
+            viewer_pending_review_id(&data).as_deref(),
+            Some("PRR_latest")
+        );
+        let drafts = pending_review_drafts_from_value(review);
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].file_path.as_deref(), Some("src/slave.py"));
+        assert_eq!(drafts[0].line, Some(886));
+    }
+
+    #[test]
+    fn finds_pending_review_from_review_nodes_when_latest_review_is_null() {
+        let data = json!({
+            "viewer": { "login": "malachibazar" },
+            "repository": {
+                "pullRequest": {
+                    "id": "PR_1",
+                    "viewerLatestReview": null,
+                    "reviews": {
+                        "nodes": [
+                            {
+                                "id": "PRR_other",
+                                "state": "PENDING",
+                                "author": { "login": "someone-else" },
+                                "comments": { "nodes": [] }
+                            },
+                            {
+                                "id": "PRR_viewer",
+                                "state": "PENDING",
+                                "author": { "login": "malachibazar" },
+                                "comments": { "nodes": [] }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            viewer_pending_review_id(&data).as_deref(),
+            Some("PRR_viewer")
+        );
+    }
 }

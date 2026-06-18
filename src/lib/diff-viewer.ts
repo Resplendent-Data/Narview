@@ -12,6 +12,7 @@ export interface DiffLine {
   content: string;
   highlighted: boolean;
   language: string;
+  sourceContext?: boolean;
 }
 
 export interface DiffHunkView {
@@ -24,6 +25,9 @@ export interface DiffHunkView {
   canExpandAfter: boolean;
   contextBefore: number;
   contextAfter: number;
+  sourceHunkIds?: string[];
+  expandBeforeHunkId?: string;
+  expandAfterHunkId?: string;
   lines: DiffLine[];
 }
 
@@ -134,24 +138,29 @@ export function buildLazyDiffState(file: CachedFileSummary, options: LazyDiffOpt
   const patchHunks = file.patch ? parsePatch(file.patch, file.path) : [];
   if (patchHunks.length > 0) {
     const loaded = new Set([...getDefaultLoadedDiffHunkIds(file), ...(options.loadedHunkIds ?? [])]);
-    const hunks = patchHunks.map((hunk) => {
-      const isLoaded = loaded.has(hunk.id);
-      const expansion = options.expandedHunkContexts?.[hunk.id] ?? { before: 0, after: 0 };
-      const expandedHunk = sourceLines && isLoaded ? expandPatchHunkWithSourceContext(hunk, sourceLines, expansion) : hunk;
+    const hunks = mergeOverlappingDiffHunks(
+      patchHunks.map((hunk) => {
+        const isLoaded = loaded.has(hunk.id);
+        const expansion = options.expandedHunkContexts?.[hunk.id] ?? { before: 0, after: 0 };
+        const expandedHunk = sourceLines && isLoaded ? expandPatchHunkWithSourceContext(hunk, sourceLines, expansion) : hunk;
 
-      return {
-        id: expandedHunk.id,
-        header: expandedHunk.header,
-        loaded: isLoaded,
-        expandable: Boolean(sourceLines && isLoaded),
-        expanded: expandedHunk.contextBefore > 0 || expandedHunk.contextAfter > 0,
-        canExpandBefore: Boolean(sourceLines && isLoaded && expandedHunk.canExpandBefore),
-        canExpandAfter: Boolean(sourceLines && isLoaded && expandedHunk.canExpandAfter),
-        contextBefore: sourceLines && isLoaded ? expandedHunk.contextBefore : 0,
-        contextAfter: sourceLines && isLoaded ? expandedHunk.contextAfter : 0,
-        lines: isLoaded ? highlightLoadedDiffLines(expandedHunk.lines, file.path) : [],
-      };
-    });
+        return {
+          id: expandedHunk.id,
+          header: expandedHunk.header,
+          loaded: isLoaded,
+          expandable: Boolean(sourceLines && isLoaded),
+          expanded: expandedHunk.contextBefore > 0 || expandedHunk.contextAfter > 0,
+          canExpandBefore: Boolean(sourceLines && isLoaded && expandedHunk.canExpandBefore),
+          canExpandAfter: Boolean(sourceLines && isLoaded && expandedHunk.canExpandAfter),
+          contextBefore: sourceLines && isLoaded ? expandedHunk.contextBefore : 0,
+          contextAfter: sourceLines && isLoaded ? expandedHunk.contextAfter : 0,
+          sourceHunkIds: [expandedHunk.id],
+          expandBeforeHunkId: expandedHunk.id,
+          expandAfterHunkId: expandedHunk.id,
+          lines: isLoaded ? highlightLoadedDiffLines(expandedHunk.lines, file.path) : [],
+        };
+      }),
+    );
 
     return {
       filePath: file.path,
@@ -234,6 +243,141 @@ function highlightLoadedDiffLines(lines: DiffLine[], filePath: string) {
     highlighted: true,
     language,
   }));
+}
+
+function mergeOverlappingDiffHunks(hunks: DiffHunkView[]) {
+  const merged: DiffHunkView[] = [];
+
+  for (const hunk of hunks) {
+    const previous = merged.at(-1);
+    if (!previous || !hunksOverlap(previous, hunk)) {
+      merged.push(hunk);
+      continue;
+    }
+
+    merged[merged.length - 1] = mergeDiffHunks(previous, hunk);
+  }
+
+  return merged;
+}
+
+function hunksOverlap(left: DiffHunkView, right: DiffHunkView) {
+  const leftRange = getVisibleHunkRange(left);
+  const rightRange = getVisibleHunkRange(right);
+
+  return Boolean(leftRange && rightRange && rightRange.start <= leftRange.end + 1);
+}
+
+function mergeDiffHunks(left: DiffHunkView, right: DiffHunkView): DiffHunkView {
+  const leftRange = getVisibleHunkRange(left);
+  const rightRange = getVisibleHunkRange(right);
+  const startOwner = !leftRange || (rightRange && rightRange.start < leftRange.start) ? right : left;
+  const endOwner = !leftRange || (rightRange && rightRange.end > leftRange.end) ? right : left;
+  const sourceHunkIds = [...(left.sourceHunkIds ?? [left.id]), ...(right.sourceHunkIds ?? [right.id])];
+
+  return {
+    id: sourceHunkIds.join("+"),
+    header: startOwner.header,
+    loaded: left.loaded || right.loaded,
+    expandable: left.expandable || right.expandable,
+    expanded: left.expanded || right.expanded,
+    canExpandBefore: startOwner.canExpandBefore,
+    canExpandAfter: endOwner.canExpandAfter,
+    contextBefore: startOwner.contextBefore,
+    contextAfter: endOwner.contextAfter,
+    sourceHunkIds,
+    expandBeforeHunkId: getExpandBeforeHunkId(startOwner),
+    expandAfterHunkId: getExpandAfterHunkId(endOwner),
+    lines: mergeDiffHunkLines(left.lines, right.lines),
+  };
+}
+
+function mergeDiffHunkLines(left: DiffLine[], right: DiffLine[]) {
+  const rightPatchRange = getPatchLineRange(right) ?? getLineRange(right);
+  if (!rightPatchRange) {
+    return dedupeDiffLines([...left, ...right]);
+  }
+
+  const leftRange = getLineRange(left);
+  const beforeLines: DiffLine[] = [];
+  const afterLines: DiffLine[] = [];
+
+  for (const line of left) {
+    const position = getDiffLineSortPosition(line);
+    if (line.sourceContext && position >= rightPatchRange.start && position <= rightPatchRange.end) {
+      continue;
+    }
+
+    if (position > rightPatchRange.end) {
+      afterLines.push(line);
+    } else {
+      beforeLines.push(line);
+    }
+  }
+
+  const rightLines = right.filter((line) => {
+    if (!line.sourceContext || !leftRange) {
+      return true;
+    }
+
+    const position = getDiffLineSortPosition(line);
+    return position < leftRange.start || position > leftRange.end;
+  });
+
+  return dedupeDiffLines([...beforeLines, ...rightLines, ...afterLines]);
+}
+
+function getVisibleHunkRange(hunk: DiffHunkView) {
+  return getLineRange(hunk.lines);
+}
+
+function getLineRange(lines: DiffLine[]) {
+  const lineNumbers = lines.flatMap((line) => [line.newLine, line.oldLine]).filter((lineNumber): lineNumber is number => lineNumber !== null);
+  if (lineNumbers.length === 0) {
+    return null;
+  }
+
+  return {
+    start: Math.min(...lineNumbers),
+    end: Math.max(...lineNumbers),
+  };
+}
+
+function getPatchLineRange(lines: DiffLine[]) {
+  return getLineRange(lines.filter((line) => !line.sourceContext));
+}
+
+function dedupeDiffLines(lines: DiffLine[]) {
+  const deduped = new Map<string, DiffLine>();
+
+  for (const line of lines) {
+    const key = getDiffLineMergeKey(line);
+    if (!deduped.has(key)) {
+      deduped.set(key, line);
+    }
+  }
+
+  return [...deduped.values()];
+}
+
+function getDiffLineMergeKey(line: DiffLine) {
+  if (line.kind === "context") {
+    return `context:${line.newLine ?? line.oldLine ?? "unknown"}:${line.content}`;
+  }
+
+  return `${line.kind}:${line.oldLine ?? ""}:${line.newLine ?? ""}:${line.content}`;
+}
+
+function getDiffLineSortPosition(line: DiffLine) {
+  return line.newLine ?? line.oldLine ?? Number.MAX_SAFE_INTEGER;
+}
+
+function getExpandBeforeHunkId(hunk: DiffHunkView) {
+  return hunk.expandBeforeHunkId ?? hunk.sourceHunkIds?.[0] ?? hunk.id;
+}
+
+function getExpandAfterHunkId(hunk: DiffHunkView) {
+  return hunk.expandAfterHunkId ?? hunk.sourceHunkIds?.at(-1) ?? hunk.id;
 }
 
 export function getLanguageForPath(path: string) {
@@ -376,12 +520,12 @@ function expandPatchHunkWithSourceContext(
   const beforeLines = Array.from({ length: contextBefore }, (_, index) => {
     const newLine = firstNewLine - contextBefore + index;
     const oldLine = firstOldLine === null ? null : firstOldLine - contextBefore + index;
-    return createLine(oldLine !== null && oldLine > 0 ? oldLine : null, newLine, "context", sourceLines[newLine - 1] ?? "");
+    return createLine(oldLine !== null && oldLine > 0 ? oldLine : null, newLine, "context", sourceLines[newLine - 1] ?? "", true);
   });
   const afterLines = Array.from({ length: contextAfter }, (_, index) => {
     const newLine = lastNewLine + index + 1;
     const oldLine = lastOldLine === null ? null : lastOldLine + index + 1;
-    return createLine(oldLine !== null && oldLine > 0 ? oldLine : null, newLine, "context", sourceLines[newLine - 1] ?? "");
+    return createLine(oldLine !== null && oldLine > 0 ? oldLine : null, newLine, "context", sourceLines[newLine - 1] ?? "", true);
   });
 
   return {
@@ -464,7 +608,7 @@ function buildFullFileLines(file: CachedFileSummary, language: string): DiffLine
   return lines.map((line) => ({ ...line, highlighted: true, language }));
 }
 
-function createLine(oldLine: number | null, newLine: number | null, kind: DiffLineKind, content: string): DiffLine {
+function createLine(oldLine: number | null, newLine: number | null, kind: DiffLineKind, content: string, sourceContext = false): DiffLine {
   return {
     oldLine,
     newLine,
@@ -472,6 +616,7 @@ function createLine(oldLine: number | null, newLine: number | null, kind: DiffLi
     content,
     highlighted: false,
     language: "text",
+    sourceContext,
   };
 }
 

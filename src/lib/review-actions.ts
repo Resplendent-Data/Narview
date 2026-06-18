@@ -23,6 +23,20 @@ export interface PendingReview {
   message: string;
 }
 
+export interface PendingReviewDraft {
+  id: string;
+  authorLogin: string | null;
+  filePath: string | null;
+  line: number | null;
+  body: string;
+  updatedAt: string;
+  url: string | null;
+}
+
+export interface PendingReviewSnapshot extends PendingReview {
+  drafts: PendingReviewDraft[];
+}
+
 export interface AddPendingReviewThreadInput extends PullRequestIdentity {
   pullRequestReviewId?: string | null;
   subjectType: PendingReviewSubjectType;
@@ -66,6 +80,7 @@ export interface ReviewSubmitResult {
 
 export interface ReviewActionClient {
   setFileViewed: (input: SetFileViewedInput) => Promise<FileViewedActionResult>;
+  findPendingReview: (input: PullRequestIdentity) => Promise<PendingReviewSnapshot | null>;
   ensurePendingReview: (input: PullRequestIdentity) => Promise<PendingReview>;
   addPendingReviewThread: (input: AddPendingReviewThreadInput) => Promise<PendingReviewThreadResult>;
   submitPendingReview: (input: SubmitPendingReviewInput) => Promise<ReviewSubmitResult>;
@@ -119,6 +134,13 @@ export const tauriReviewActionClient: ReviewActionClient = {
 
   async ensurePendingReview(input) {
     return invoke<PendingReview>("ensure_pending_review", {
+      repository: input.repository,
+      pullRequestNumber: input.pullRequestNumber,
+    });
+  },
+
+  async findPendingReview(input) {
+    return invoke<PendingReviewSnapshot | null>("find_pending_review", {
       repository: input.repository,
       pullRequestNumber: input.pullRequestNumber,
     });
@@ -180,6 +202,9 @@ export const offlineReviewActionClient: ReviewActionClient = {
   },
   async ensurePendingReview() {
     throw new Error("A live GitHub connection is required to create a pending review.");
+  },
+  async findPendingReview() {
+    return null;
   },
   async addPendingReviewThread(input) {
     const validation = validatePendingReviewThreadInput(input);

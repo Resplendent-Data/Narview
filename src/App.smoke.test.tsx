@@ -8,6 +8,7 @@ import { createCachedPullRequest, type CachedPullRequestData, type CachedReviewT
 import type {
   AddPendingReviewThreadInput,
   DiscardPendingReviewInput,
+  FileViewedActionResult,
   ReviewActionClient,
   SetFileViewedInput,
   SubmitPendingReviewInput,
@@ -114,6 +115,7 @@ function createReviewActionClient(overrides: Partial<ReviewActionClient> = {}): 
       viewerViewedState: input.viewed ? "VIEWED" : "UNVIEWED",
       message: input.viewed ? "File marked viewed on GitHub." : "File marked unviewed on GitHub.",
     })),
+    findPendingReview: vi.fn().mockResolvedValue(null),
     ensurePendingReview: vi.fn().mockResolvedValue({
       pullRequestId: "PR_42",
       pullRequestReviewId: "PRR_42",
@@ -187,6 +189,14 @@ function createUpdaterClient(overrides: Partial<AppUpdateClient> = {}): AppUpdat
     relaunch: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
 }
 
 function createReviewStackFixture(): CachedPullRequestData {
@@ -307,6 +317,31 @@ describe("Review stack workspace", () => {
     expect(await screen.findByText(/Marked 1 file viewed on GitHub/)).toBeInTheDocument();
   });
 
+  it("keeps the review composer usable while stack viewed sync runs in the background", async () => {
+    const user = userEvent.setup();
+    const viewedSync = createDeferred<FileViewedActionResult>();
+    const reviewActionClient = createReviewActionClient({
+      setFileViewed: vi.fn().mockReturnValue(viewedSync.promise),
+    });
+    renderStackApp({ reviewActionClient });
+
+    await user.click(await screen.findByRole("button", { name: "src/billing/checkout.ts" }));
+    const lineCommentButtons = await screen.findAllByRole("button", { name: /comment on src\/billing\/checkout.ts:2/i });
+    await user.click(lineCommentButtons[0]);
+    await user.type(await screen.findByLabelText("Inline draft review comment"), "Looks good.");
+    await user.click(screen.getByRole("button", { name: /Mark all files in Contracts, schema, and setup viewed/i }));
+
+    expect(await screen.findByText(/Marking 1 file viewed in the background/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Add To Review/i })).toBeEnabled();
+
+    viewedSync.resolve({
+      ok: true,
+      path: "schemas/billing.graphql",
+      viewerViewedState: "VIEWED",
+      message: "File marked viewed on GitHub.",
+    });
+  });
+
   it("rolls back only files that fail during stack viewed sync", async () => {
     const fixture = createReviewStackFixture();
     const expandedFixture: CachedPullRequestData = {
@@ -397,6 +432,37 @@ describe("Review stack workspace", () => {
     });
   });
 
+  it("collapses viewed files by default and lets users expand them", async () => {
+    const user = userEvent.setup();
+    const fixture = createReviewStackFixture();
+    const viewedCheckoutFixture: CachedPullRequestData = {
+      ...fixture,
+      fileSummaries: fixture.fileSummaries.map((file) =>
+        file.path === "src/billing/checkout.ts"
+          ? {
+              ...file,
+              viewerViewedState: "VIEWED",
+            }
+          : file,
+      ),
+    };
+
+    renderStackApp({
+      workspaceClient: {
+        fetchPullRequestData: vi.fn().mockResolvedValue(viewedCheckoutFixture),
+      },
+    });
+
+    await user.click((await screen.findAllByRole("button", { name: /checkout.ts/i }))[0]);
+
+    expect(await screen.findByText("Viewed file collapsed")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Diff for src/billing/checkout.ts")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Show diff for src\/billing\/checkout.ts/i }));
+
+    expect(await screen.findByLabelText("Diff for src/billing/checkout.ts")).toBeInTheDocument();
+  });
+
   it("filters All Files and toggles focus mode", async () => {
     const user = userEvent.setup();
     renderStackApp();
@@ -415,6 +481,17 @@ describe("Review stack workspace", () => {
     expect(screen.getByLabelText("Review stacks")).toBeInTheDocument();
   });
 
+  it("opens the pull request in GitHub with the O shortcut", async () => {
+    renderStackApp();
+
+    await screen.findByText("Core: src/billing");
+    fireEvent.keyDown(window, { key: "o" });
+
+    await waitFor(() => {
+      expect(openUrl).toHaveBeenCalledWith("https://github.com/Resplendent-Data/Narview/pull/42");
+    });
+  });
+
   it("opens symbol references and definitions from highlighted code", async () => {
     const user = userEvent.setup();
     renderStackApp();
@@ -425,7 +502,16 @@ describe("Review stack workspace", () => {
 
     expect(await screen.findByRole("dialog", { name: /checkout/i })).toBeInTheDocument();
     expect(screen.getByLabelText("Definitions")).toBeInTheDocument();
-    expect(screen.getByText("src/billing/checkout.ts:1")).toBeInTheDocument();
+    expect(screen.getAllByText("src/billing/checkout.ts:1").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Symbol code preview")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Open in diff/i })).toBeInTheDocument();
+    expect(screen.getByText(/export function checkout/)).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole("button", { name: /Drill into symbol stack/i })[0]);
+    expect(await screen.findByRole("dialog", { name: /stack/i })).toBeInTheDocument();
+    expect(screen.getByLabelText("Symbol trail")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Go to checkout in symbol trail/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Go to stack in symbol trail/i })).toBeInTheDocument();
   });
 
   it("adds a line comment to the pending review and submits it", async () => {
@@ -436,7 +522,9 @@ describe("Review stack workspace", () => {
     await screen.findByText("Core: src/billing");
     await user.click(screen.getAllByRole("button", { name: /checkout.ts/i })[0]);
     await user.click(screen.getAllByRole("button", { name: /comment on src\/billing\/checkout.ts:2/i })[0]);
-    await user.type(screen.getByLabelText("Draft review comment"), "Please keep this path covered.");
+    expect(screen.getByRole("group", { name: /Draft comment for src\/billing\/checkout.ts:2/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Draft review comment")).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("Inline draft review comment"), "Please keep this path covered.");
     await user.click(screen.getByRole("button", { name: /add to review/i }));
 
     await waitFor(() => {
@@ -451,8 +539,21 @@ describe("Review stack workspace", () => {
       );
     });
 
-    await user.click(screen.getByRole("button", { name: /^Submit$/ }));
+    expect(await screen.findByRole("button", { name: /Submit review \(1 comment\)/i })).toBeInTheDocument();
+    const commentMarker = screen.getAllByRole("button", { name: /View 1 comment on src\/billing\/checkout.ts:2/i })[0];
+    expect(commentMarker).toHaveClass(
+      "diff-line-comment-button-visible",
+    );
+    await user.click(commentMarker);
+    expect(screen.getByRole("group", { name: /Comments for src\/billing\/checkout.ts:2/i })).toBeInTheDocument();
+    expect(screen.getAllByText("Please keep this path covered.").length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText("Inline draft review comment")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Submit review \(1 comment\)/i }));
     const dialog = await screen.findByRole("dialog", { name: /submit review/i });
+    expect(within(dialog).getByText("Please keep this path covered.")).toBeInTheDocument();
+    expect(within(dialog).getByRole("radio", { name: /Comment/i })).toBeChecked();
+    expect(within(dialog).getByRole("radio", { name: /Request changes/i })).toBeInTheDocument();
+    expect(within(dialog).getByRole("radio", { name: /Approve/i })).toBeInTheDocument();
     await user.type(within(dialog).getByLabelText("Review summary"), "Looks good with one note.");
     await user.click(within(dialog).getByRole("button", { name: /^Submit$/ }));
 
@@ -465,6 +566,65 @@ describe("Review stack workspace", () => {
         }),
       );
     });
+  });
+
+  it("reconnects to an existing pending review draft on load", async () => {
+    const user = userEvent.setup();
+    const findPendingReview = vi.fn().mockResolvedValue({
+      pullRequestId: "PR_42",
+      pullRequestReviewId: "PRR_existing",
+      state: "PENDING",
+      message: "Reconnected to pending GitHub review.",
+      drafts: [
+        {
+          id: "PRRC_existing",
+          authorLogin: "octocat",
+          filePath: "src/billing/checkout.ts",
+          line: 2,
+          body: "Reloaded **pending** note.\n\n<details>\n<summary>Suggested fix</summary>\n\n```diff\n+ keep coverage\n```\n\n</details>",
+          updatedAt: "2026-06-18T12:20:00Z",
+          url: "https://github.com/Resplendent-Data/Narview/pull/42#discussion_r2",
+        },
+      ],
+    });
+
+    renderStackApp({ reviewActionClient: { findPendingReview } });
+
+    expect(await screen.findByRole("button", { name: /Submit review \(1 comment\)/i })).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: /checkout.ts/i })[0]);
+    expect(screen.getAllByRole("button", { name: /View 1 comment on src\/billing\/checkout.ts:2/i })[0]).toHaveClass(
+      "diff-line-comment-button-visible",
+    );
+    await user.click(screen.getAllByRole("button", { name: /View 1 comment on src\/billing\/checkout.ts:2/i })[0]);
+    const inlineViewer = screen.getByRole("group", { name: /Comments for src\/billing\/checkout.ts:2/i });
+    expect(within(inlineViewer).getByText("pending")).toBeInTheDocument();
+    expect(within(inlineViewer).getByText("Suggested fix")).toBeInTheDocument();
+    expect(within(inlineViewer).getByRole("button", { name: /Copy code/i })).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(findPendingReview).toHaveBeenCalledWith({
+        repository: "Resplendent-Data/Narview",
+        pullRequestNumber: 42,
+      });
+    });
+  });
+
+  it("shows inline GitHub errors when adding a draft comment fails", async () => {
+    const user = userEvent.setup();
+    const reviewActionClient = createReviewActionClient({
+      addPendingReviewThread: vi.fn().mockRejectedValue(new Error("Line is no longer part of the diff.")),
+    });
+    renderStackApp({ reviewActionClient });
+
+    await screen.findByText("Core: src/billing");
+    await user.click(screen.getAllByRole("button", { name: /checkout.ts/i })[0]);
+    await user.click(screen.getAllByRole("button", { name: /comment on src\/billing\/checkout.ts:2/i })[0]);
+    await user.type(screen.getByLabelText("Inline draft review comment"), "Please keep this path covered.");
+    await user.click(screen.getByRole("button", { name: /add to review/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Line is no longer part of the diff.");
+    expect(screen.getByLabelText("Inline draft review comment")).toHaveValue("Please keep this path covered.");
+    expect(screen.getByRole("button", { name: /Submit review \(0 comments\)/i })).toBeInTheDocument();
   });
 
   it("keeps external GitHub navigation wired through the opener plugin", async () => {
