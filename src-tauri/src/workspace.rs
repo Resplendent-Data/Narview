@@ -75,6 +75,10 @@ pub struct PullRequestSummary {
     number: u64,
     title: String,
     author_login: Option<String>,
+    assignee_logins: Vec<String>,
+    requested_reviewer_logins: Vec<String>,
+    base_branch: Option<String>,
+    head_branch: Option<String>,
     is_draft: bool,
     updated_at: String,
     url: String,
@@ -289,6 +293,14 @@ pub struct PullRequestAnalysisFilesResponse {
     files: Vec<AnalysisFileContent>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestFilePatchesResponse {
+    repository: WorkspaceRepository,
+    pull_request_number: u64,
+    files: Vec<AnalysisFileContent>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceFile {
@@ -489,6 +501,28 @@ pub async fn read_pull_request_analysis_files(
 }
 
 #[tauri::command]
+pub async fn read_pull_request_file_patches(
+    app: AppHandle,
+    repository: String,
+    number: u64,
+    paths: Vec<String>,
+) -> Result<PullRequestFilePatchesResponse, WorkspaceCommandError> {
+    let repository = parse_repository_slug(&repository)?;
+    let root = review_clones_root_path(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        read_pull_request_file_patches_at(&repository, &root, number, paths)
+    })
+    .await
+    .map_err(|error| {
+        WorkspaceCommandError::new(
+            "file-patch-task-error",
+            format!("Could not read Pull Request file patches: {error}"),
+        )
+    })?
+}
+
+#[tauri::command]
 pub async fn refresh_pull_requests(
     app: AppHandle,
     auth_state: State<'_, AuthState>,
@@ -582,6 +616,10 @@ pub async fn fetch_pull_request_data(
         number,
         title: detail.title.clone(),
         author_login: detail.author_login.clone(),
+        assignee_logins: detail.assignee_logins.clone(),
+        requested_reviewer_logins: detail.requested_reviewer_logins.clone(),
+        base_branch: detail.base_branch.clone(),
+        head_branch: detail.head_branch.clone(),
         is_draft: detail.is_draft,
         updated_at: detail.updated_at.clone(),
         url: detail.url.clone(),
@@ -786,6 +824,8 @@ struct PullRequestDetail {
     title: String,
     description: Option<String>,
     author_login: Option<String>,
+    assignee_logins: Vec<String>,
+    requested_reviewer_logins: Vec<String>,
     node_id: Option<String>,
     base_branch: Option<String>,
     base_sha: String,
@@ -832,6 +872,16 @@ async fn fetch_pull_request_detail(
         title: detail.title,
         description: detail.body,
         author_login: detail.user.map(|user| user.login),
+        assignee_logins: detail
+            .assignees
+            .into_iter()
+            .map(|user| user.login)
+            .collect(),
+        requested_reviewer_logins: detail
+            .requested_reviewers
+            .into_iter()
+            .map(|user| user.login)
+            .collect(),
         node_id: detail.node_id,
         base_branch: Some(detail.base.git_ref),
         base_sha: detail.base.sha,
@@ -1257,6 +1307,18 @@ fn summarize_pull_requests(
             number: pull_request.number,
             title: pull_request.title,
             author_login: pull_request.user.map(|user| user.login),
+            assignee_logins: pull_request
+                .assignees
+                .into_iter()
+                .map(|user| user.login)
+                .collect(),
+            requested_reviewer_logins: pull_request
+                .requested_reviewers
+                .into_iter()
+                .map(|user| user.login)
+                .collect(),
+            base_branch: pull_request.base.map(|branch| branch.git_ref),
+            head_branch: pull_request.head.map(|branch| branch.git_ref),
             is_draft: pull_request.draft.unwrap_or(false),
             updated_at: pull_request.updated_at,
             url: pull_request.html_url,
@@ -1272,11 +1334,23 @@ struct GithubPullRequest {
     html_url: String,
     updated_at: String,
     user: Option<GithubUser>,
+    #[serde(default)]
+    assignees: Vec<GithubUser>,
+    #[serde(default)]
+    requested_reviewers: Vec<GithubUser>,
+    base: Option<GithubListBranchRef>,
+    head: Option<GithubListBranchRef>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GithubUser {
     login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubListBranchRef {
+    #[serde(rename = "ref")]
+    git_ref: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1288,6 +1362,10 @@ struct GithubPullRequestDetail {
     html_url: String,
     updated_at: String,
     user: Option<GithubUser>,
+    #[serde(default)]
+    assignees: Vec<GithubUser>,
+    #[serde(default)]
+    requested_reviewers: Vec<GithubUser>,
     base: GithubBranchRef,
     head: GithubHeadRef,
     mergeable: Option<bool>,
@@ -1969,6 +2047,93 @@ fn read_pull_request_analysis_files_at(
     })
 }
 
+fn read_pull_request_file_patches_at(
+    repository: &WorkspaceRepository,
+    root: &Path,
+    number: u64,
+    paths: Vec<String>,
+) -> Result<PullRequestFilePatchesResponse, WorkspaceCommandError> {
+    let clone_path = review_clone_repository_path(root, repository);
+    if !clone_path.is_dir() || !clone_path.join(".git").exists() {
+        return Ok(PullRequestFilePatchesResponse {
+            repository: repository.clone(),
+            pull_request_number: number,
+            files: paths
+                .into_iter()
+                .map(|path| AnalysisFileContent {
+                    path,
+                    state: AnalysisFileContentState::Unavailable,
+                    content: None,
+                    message: Some(
+                        "Review Clone is not ready for local patch recovery.".to_string(),
+                    ),
+                })
+                .collect(),
+        });
+    }
+
+    let clone_root = fs::canonicalize(&clone_path)
+        .map_err(|error| WorkspaceCommandError::io("resolve Review Clone path", error))?;
+    let files = paths
+        .into_iter()
+        .map(|path| read_file_patch_from_clone(&clone_path, &clone_root, number, path))
+        .collect();
+
+    Ok(PullRequestFilePatchesResponse {
+        repository: repository.clone(),
+        pull_request_number: number,
+        files,
+    })
+}
+
+fn read_file_patch_from_clone(
+    clone_path: &Path,
+    clone_root: &Path,
+    number: u64,
+    path: String,
+) -> AnalysisFileContent {
+    if let Err(message) = safe_clone_relative_path(clone_root, &path) {
+        return AnalysisFileContent {
+            path,
+            state: AnalysisFileContentState::Unavailable,
+            content: None,
+            message: Some(message),
+        };
+    }
+
+    let base_ref = format!("refs/narview/pr/{number}/base");
+    let head_ref = format!("refs/narview/pr/{number}/head");
+    let args = vec![
+        "diff".to_string(),
+        "--unified=3".to_string(),
+        base_ref,
+        head_ref,
+        "--".to_string(),
+        path.clone(),
+    ];
+
+    match run_git_in_clone(clone_path, &args, None) {
+        Ok(patch) if !patch.trim().is_empty() => AnalysisFileContent {
+            path,
+            state: AnalysisFileContentState::Loaded,
+            content: Some(patch),
+            message: None,
+        },
+        Ok(_) => AnalysisFileContent {
+            path,
+            state: AnalysisFileContentState::Missing,
+            content: None,
+            message: Some("No local patch found for this file.".to_string()),
+        },
+        Err(error) => AnalysisFileContent {
+            path,
+            state: AnalysisFileContentState::Unavailable,
+            content: None,
+            message: Some(error.message),
+        },
+    }
+}
+
 fn read_analysis_file_from_clone(clone_root: &Path, path: String) -> AnalysisFileContent {
     let file_path = match safe_clone_relative_path(clone_root, &path) {
         Ok(file_path) => file_path,
@@ -2507,6 +2672,8 @@ mod tests {
             title: "Test PR".to_string(),
             description: None,
             author_login: Some("octocat".to_string()),
+            assignee_logins: Vec::new(),
+            requested_reviewer_logins: Vec::new(),
             node_id: Some("PR_test".to_string()),
             base_branch: Some("main".to_string()),
             base_sha: repos.base_sha.clone(),
@@ -2799,6 +2966,55 @@ mod tests {
     }
 
     #[test]
+    fn reads_prepared_pull_request_file_patches_from_review_clone_refs() {
+        if !git_available() {
+            return;
+        }
+
+        let repos = create_test_pull_request_repos(true);
+        let analysis_root = repos.root.join("analysis");
+        let repository = WorkspaceRepository::new("acme", "api");
+        let detail = test_pull_request_detail(&repos, &repos.base_remote, "acme/api");
+
+        let prepared = prepare_pull_request_review_clone_at(
+            &repository,
+            &analysis_root,
+            42,
+            &repos.base_remote,
+            &detail,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(prepared.state, PullRequestAnalysisInputState::Ready);
+
+        let patches = read_pull_request_file_patches_at(
+            &repository,
+            &analysis_root,
+            42,
+            vec!["README.md".to_string(), "../outside.txt".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(patches.pull_request_number, 42);
+        assert_eq!(patches.files[0].state, AnalysisFileContentState::Loaded);
+        let patch = patches.files[0].content.as_deref().unwrap_or_default();
+        assert!(patch.contains("diff --git a/README.md b/README.md"));
+        assert!(patch.contains("+head"));
+        assert_eq!(
+            patches.files[1].state,
+            AnalysisFileContentState::Unavailable
+        );
+        assert!(patches.files[1]
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("inside the Review Clone"));
+
+        fs::remove_dir_all(repos.root).ok();
+    }
+
+    #[test]
     fn prepares_fetchable_fork_pull_request_head() {
         if !git_available() {
             return;
@@ -2877,6 +3093,18 @@ mod tests {
                 user: Some(GithubUser {
                     login: "octocat".to_string(),
                 }),
+                assignees: vec![GithubUser {
+                    login: "hubot".to_string(),
+                }],
+                requested_reviewers: vec![GithubUser {
+                    login: "monalisa".to_string(),
+                }],
+                base: Some(GithubListBranchRef {
+                    git_ref: "main".to_string(),
+                }),
+                head: Some(GithubListBranchRef {
+                    git_ref: "ready-review".to_string(),
+                }),
             },
             GithubPullRequest {
                 number: 12,
@@ -2887,6 +3115,10 @@ mod tests {
                 user: Some(GithubUser {
                     login: "monalisa".to_string(),
                 }),
+                assignees: Vec::new(),
+                requested_reviewers: Vec::new(),
+                base: None,
+                head: None,
             },
         ];
 
@@ -2894,6 +3126,10 @@ mod tests {
 
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].number, 11);
+        assert_eq!(visible[0].assignee_logins, vec!["hubot"]);
+        assert_eq!(visible[0].requested_reviewer_logins, vec!["monalisa"]);
+        assert_eq!(visible[0].base_branch.as_deref(), Some("main"));
+        assert_eq!(visible[0].head_branch.as_deref(), Some("ready-review"));
         assert!(!visible[0].is_draft);
     }
 
@@ -2907,6 +3143,10 @@ mod tests {
             html_url: "https://github.com/acme/api/pull/12".to_string(),
             updated_at: "2026-05-18T13:00:00Z".to_string(),
             user: None,
+            assignees: Vec::new(),
+            requested_reviewers: Vec::new(),
+            base: None,
+            head: None,
         }];
 
         let visible = summarize_pull_requests(&repository, pull_requests, true);

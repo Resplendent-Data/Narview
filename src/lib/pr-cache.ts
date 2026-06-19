@@ -342,10 +342,10 @@ function compactCacheForQuota(store: PullRequestCacheStore): PullRequestCacheSto
         key,
         {
           ...entry,
-          fileSummaries: entry.fileSummaries.map((file) => {
-            const { patch: _patch, ...summary } = file;
-            return summary;
-          }),
+          fileSummaries: entry.fileSummaries.map((file) => ({
+            ...file,
+            patch: null,
+          })),
         },
       ]),
     ),

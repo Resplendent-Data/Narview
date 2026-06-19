@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildLazyDiffState } from "./diff-viewer";
+import { buildLazyDiffState, getDefaultLoadedDiffHunkIds } from "./diff-viewer";
 import type { CachedFileSummary } from "./pr-cache";
 
 const filePath = "src/example.py";
@@ -95,7 +95,31 @@ function valueErrorFile(): CachedFileSummary {
   };
 }
 
+function missingPatchFile(): CachedFileSummary {
+  return {
+    path: "src/example.ts",
+    additions: 4,
+    deletions: 2,
+    status: "modified",
+  };
+}
+
 describe("buildLazyDiffState", () => {
+  it("does not synthesize example code when patch content is missing", () => {
+    const file = missingPatchFile();
+    const state = buildLazyDiffState(file, {
+      mode: "unified",
+      repository: "owner/repo",
+      pullRequestNumber: 123,
+      loadedHunkIds: getDefaultLoadedDiffHunkIds(file),
+      fullFileLoaded: true,
+    });
+
+    expect(getDefaultLoadedDiffHunkIds(file)).toEqual([]);
+    expect(state.hunks).toEqual([]);
+    expect(state.fullFileLines).toBeNull();
+  });
+
   it("keeps separate patch hunks separate before context expansion overlaps", () => {
     const state = buildLazyDiffState(changedFile(), {
       mode: "unified",

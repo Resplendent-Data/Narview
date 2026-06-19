@@ -10,8 +10,11 @@ import {
   Columns2,
   FileCode2,
   FileText,
+  GitBranch,
   Github,
   GitPullRequest,
+  AlertTriangle,
+  Clock3,
   Loader2,
   LogIn,
   LogOut,
@@ -23,9 +26,11 @@ import {
   Search,
   Send,
   Sun,
+  User,
+  Users,
   X,
 } from "lucide-react";
-import { Fragment, type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownContent } from "./components/markdown-content";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -87,6 +92,7 @@ import {
   type ReviewStackFile,
 } from "./lib/review-stacks";
 import { getPullRequestKey, parsePullRequestUrl, type ReviewSessionClient, localReviewSessionClient } from "./lib/review-session";
+import { summarizeChecks, type ChecksSummary } from "./lib/review-overview";
 import { type ThreadActionClient, tauriThreadActionClient } from "./lib/thread-actions";
 import { cn } from "./lib/utils";
 import {
@@ -100,6 +106,31 @@ import {
 } from "./lib/workspace";
 
 type Theme = "light" | "dark";
+type BadgeVariant = "default" | "success" | "warning" | "danger" | "info" | "muted";
+
+type PullRequestPickerOption = {
+  key: string;
+  pullRequest: PullRequestSummary;
+  title: string;
+  repositoryLabel: string;
+  authorLabel: string;
+  assigneeLabel: string;
+  reviewerLabel: string;
+  branchLabel: string;
+  updatedLabel: string;
+  reviewReadinessLabel: string;
+  reviewReadinessVariant: BadgeVariant;
+  reviewDecisionLabel: string;
+  reviewDecisionVariant: BadgeVariant;
+  checksLabel: string;
+  checksVariant: BadgeVariant;
+  checksDetailLabel: string;
+  changedFilesLabel: string;
+  changedLinesLabel: string;
+  reviewThreadsLabel: string;
+  cacheLabel: string;
+  failingCheckNames: string[];
+};
 
 type AppProps = {
   authClient?: AuthClient;
@@ -326,6 +357,7 @@ export function App({
   const [quickOpenInput, setQuickOpenInput] = useState("");
   const [quickOpenedPullRequest, setQuickOpenedPullRequest] = useState<PullRequestSummary | null>(null);
   const [selectedPullRequestKey, setSelectedPullRequestKey] = useState<string | null>(null);
+  const [pullRequestPickerOpen, setPullRequestPickerOpen] = useState(false);
   const [includeDrafts, setIncludeDrafts] = useState(false);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>(idleRefreshStatus);
   const [pullRequestDataStatus, setPullRequestDataStatus] = useState<{
@@ -333,6 +365,7 @@ export function App({
     state: "idle" | "loading" | "loaded" | "failed";
     message: string | null;
   }>({ key: null, state: "idle", message: null });
+  const [livePullRequestDataByKey, setLivePullRequestDataByKey] = useState<Record<string, CachedPullRequestData>>({});
   const [cacheRevision, setCacheRevision] = useState(0);
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
   const [selectedStackId, setSelectedStackId] = useState<string | null>(null);
@@ -346,6 +379,7 @@ export function App({
   const [viewedBusyStackIds, setViewedBusyStackIds] = useState<string[]>([]);
   const [fileCollapseOverrides, setFileCollapseOverrides] = useState<Record<string, boolean>>({});
   const [sourceContentByPath, setSourceContentByPath] = useState<Record<string, string | null>>({});
+  const [recoveredPatchByReviewKeyAndPath, setRecoveredPatchByReviewKeyAndPath] = useState<Record<string, Record<string, string | null>>>({});
   const [expandedHunkContexts, setExpandedHunkContexts] = useState<Record<string, Record<string, DiffHunkExpansion>>>({});
   const [commentTarget, setCommentTarget] = useState<CommentTarget | null>(null);
   const [lineCommentViewerTarget, setLineCommentViewerTarget] = useState<Extract<CommentTarget, { subjectType: "LINE" }> | null>(null);
@@ -389,7 +423,20 @@ export function App({
   const cachedData = selectedPullRequestIsFallback
     ? null
     : cacheStore.entries[selectedPullRequestReviewKey] ?? readCachedPullRequest(selectedPullRequestReviewKey);
-  const reviewData = cachedData ?? createFallbackPullRequestData();
+  const livePullRequestData = selectedPullRequestIsFallback ? null : (livePullRequestDataByKey[selectedPullRequestReviewKey] ?? null);
+  const reviewData = livePullRequestData ?? cachedData ?? createFallbackPullRequestData();
+  const pullRequestPickerOptions = useMemo(
+    () =>
+      routedPullRequests.map((pullRequest) => {
+        const key = getPullRequestKey(pullRequest);
+        return buildPullRequestPickerOption(pullRequest, livePullRequestDataByKey[key] ?? cacheStore.entries[key]);
+      }),
+    [cacheStore, livePullRequestDataByKey, routedPullRequests],
+  );
+  const selectedPullRequestPickerOption = useMemo(
+    () => buildPullRequestPickerOption(selectedPullRequest, livePullRequestData ?? cachedData),
+    [cachedData, livePullRequestData, selectedPullRequest],
+  );
   const effectiveThreads = useMemo(() => {
     const byId = new Map<string, CachedReviewThread>();
     for (const thread of reviewData.reviewThreads) {
@@ -425,6 +472,14 @@ export function App({
   const activeFileIndex = activeFile ? selectedLayerFilePaths.indexOf(activeFile.path) : -1;
   const activeFileSummary = activeFile ? reviewData.fileSummaries.find((file) => file.path === activeFile.path) ?? null : null;
   const activeFileSourceContent = activeFile ? sourceContentByPath[activeFile.path] : undefined;
+  const activeFileRecoveredPatch = activeFile ? recoveredPatchByReviewKeyAndPath[selectedPullRequestReviewKey]?.[activeFile.path] : undefined;
+  const activeFileSummaryForDiff =
+    activeFileSummary && typeof activeFileRecoveredPatch === "string" && !activeFileSummary.patch
+      ? {
+          ...activeFileSummary,
+          patch: activeFileRecoveredPatch,
+        }
+      : activeFileSummary;
   const activeFileExpandedHunkContexts = activeFile ? (expandedHunkContexts[activeFile.path] ?? {}) : {};
   const activeLayerThreads = effectiveThreads.filter((thread) => selectedLayerFilePaths.includes(thread.filePath));
   const activeFileThreads = activeFile ? effectiveThreads.filter((thread) => thread.filePath === activeFile.path) : [];
@@ -433,12 +488,12 @@ export function App({
         .filter((draft): draft is PublishedLineDraft => draft.target?.subjectType === "LINE" && draft.target.path === activeFile.path)
     : [];
   const diffState =
-    activeFileSummary && activeFile
-      ? buildLazyDiffState(activeFileSummary, {
+    activeFileSummaryForDiff && activeFile
+      ? buildLazyDiffState(activeFileSummaryForDiff, {
           mode: diffMode,
           repository: selectedPullRequest.repository,
           pullRequestNumber: selectedPullRequest.number,
-          loadedHunkIds: getDefaultLoadedDiffHunkIds(activeFileSummary),
+          loadedHunkIds: getDefaultLoadedDiffHunkIds(activeFileSummaryForDiff),
           expandedHunkContexts: activeFileExpandedHunkContexts,
           sourceContent: typeof activeFileSourceContent === "string" ? activeFileSourceContent : null,
         })
@@ -601,6 +656,7 @@ export function App({
     setViewedBusyStackIds([]);
     setFileCollapseOverrides({});
     setSourceContentByPath({});
+    setRecoveredPatchByReviewKeyAndPath({});
     setExpandedHunkContexts({});
     setOptimisticThreads([]);
     setThreadStateOverrides({});
@@ -659,6 +715,74 @@ export function App({
     selectedPullRequest.number,
     selectedPullRequestReviewKey,
     selectedPullRequestIsFallback,
+  ]);
+
+  useEffect(() => {
+    const path = activeFileSummary?.path;
+    if (
+      !path ||
+      activeFile?.kind !== "text" ||
+      selectedPullRequestIsFallback ||
+      activeFileSummary.patch ||
+      activeFileRecoveredPatch !== undefined
+    ) {
+      return;
+    }
+
+    const activePath = path;
+    const reviewKey = selectedPullRequestReviewKey;
+    let active = true;
+
+    async function readActiveFilePatch() {
+      const readPatch = () => workspaceClient.readPullRequestFilePatches(selectedPullRequest, [activePath]);
+
+      try {
+        let response = await readPatch();
+        let filePatch = response.files.find((file) => file.path === activePath) ?? response.files[0] ?? null;
+        if (filePatch?.state !== "loaded" && !clonePrepareAttemptedRef.current.has(reviewKey)) {
+          clonePrepareAttemptedRef.current.add(reviewKey);
+          await workspaceClient.preparePullRequestReviewClone(selectedPullRequest);
+          response = await readPatch();
+          filePatch = response.files.find((file) => file.path === activePath) ?? response.files[0] ?? null;
+        }
+
+        if (!active || selectedPullRequestReviewKeyRef.current !== reviewKey) {
+          return;
+        }
+        setRecoveredPatchByReviewKeyAndPath((current) => ({
+          ...current,
+          [reviewKey]: {
+            ...(current[reviewKey] ?? {}),
+            [activePath]: filePatch?.state === "loaded" ? (filePatch.content ?? "") : null,
+          },
+        }));
+      } catch {
+        if (active && selectedPullRequestReviewKeyRef.current === reviewKey) {
+          setRecoveredPatchByReviewKeyAndPath((current) => ({
+            ...current,
+            [reviewKey]: {
+              ...(current[reviewKey] ?? {}),
+              [activePath]: null,
+            },
+          }));
+        }
+      }
+    }
+
+    void readActiveFilePatch();
+
+    return () => {
+      active = false;
+    };
+  }, [
+    activeFileRecoveredPatch,
+    activeFile?.kind,
+    activeFileSummary?.patch,
+    activeFileSummary?.path,
+    selectedPullRequest,
+    selectedPullRequestIsFallback,
+    selectedPullRequestReviewKey,
+    workspaceClient,
   ]);
 
   useEffect(() => {
@@ -749,6 +873,10 @@ export function App({
         if (!active) {
           return;
         }
+        setLivePullRequestDataByKey((current) => ({
+          ...current,
+          [selectedPullRequestReviewKey]: data,
+        }));
         writeCachedPullRequestData(data);
         setCacheRevision((current) => current + 1);
         setPullRequestDataStatus({
@@ -788,8 +916,52 @@ export function App({
   ]);
 
   useEffect(() => {
+    if (!pullRequestPickerOpen || authSession.state !== "signed-in" || routedPullRequests.length === 0) {
+      return;
+    }
+
+    const pullRequestsMissingChecks = routedPullRequests.filter((pullRequest) => {
+      const entry = cacheStore.entries[getPullRequestKey(pullRequest)];
+      return !entry || entry.checks.length === 0;
+    });
+
+    if (pullRequestsMissingChecks.length === 0) {
+      return;
+    }
+
+    let active = true;
+    async function hydratePullRequestPickerChecks() {
+      for (const pullRequest of pullRequestsMissingChecks) {
+        try {
+          const response = await workspaceClient.fetchPullRequestChecks(pullRequest);
+          if (!active) {
+            return;
+          }
+          upsertCachedPullRequest(pullRequest, {
+            checks: response.checks,
+            rateLimit: response.rateLimit,
+            fetchedAtEpochMs: response.fetchedAtEpochMs,
+          });
+          setCacheRevision((current) => current + 1);
+        } catch {
+          // The picker still has useful PR metadata when checks cannot be refreshed.
+        }
+      }
+    }
+
+    void hydratePullRequestPickerChecks();
+
+    return () => {
+      active = false;
+    };
+  }, [authSession.state, cacheStore, pullRequestPickerOpen, routedPullRequests, workspaceClient]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (isEditableTarget(event.target)) {
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) {
         return;
       }
       if (event.key.toLowerCase() === "j") {
@@ -811,6 +983,10 @@ export function App({
       if (event.key.toLowerCase() === "o") {
         event.preventDefault();
         void openSelectedPullRequestInGithub();
+      }
+      if (event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        setPullRequestPickerOpen(true);
       }
     };
 
@@ -875,6 +1051,7 @@ export function App({
       setOauthFlow(null);
       setPullRequests([]);
       setSelectedPullRequestKey(null);
+      setLivePullRequestDataByKey({});
     } catch (error) {
       setAuthError(getErrorMessage(error));
     } finally {
@@ -1184,6 +1361,10 @@ export function App({
 
     try {
       const data = await workspaceClient.fetchPullRequestData(selectedPullRequest);
+      setLivePullRequestDataByKey((current) => ({
+        ...current,
+        [selectedPullRequestReviewKey]: data,
+      }));
       writeCachedPullRequestData(data);
       setCacheRevision((current) => current + 1);
       setPullRequestDataStatus({
@@ -1249,6 +1430,28 @@ export function App({
     if (selectedPullRequestIsFallback) {
       return;
     }
+
+    setLivePullRequestDataByKey((current) => {
+      const liveEntry = current[reviewKey];
+      if (!liveEntry) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [reviewKey]: {
+          ...liveEntry,
+          fileSummaries: liveEntry.fileSummaries.map((file) =>
+            file.path === path
+              ? {
+                  ...file,
+                  viewerViewedState: state,
+                }
+              : file,
+          ),
+        },
+      };
+    });
 
     const current = readCacheStore().entries[reviewKey];
     if (!current) {
@@ -1414,22 +1617,31 @@ export function App({
             </Button>
           </form>
 
-          <select
-            className="hidden h-8 max-w-64 rounded-md border bg-background px-2 text-sm lg:block"
-            aria-label="Pull Request"
-            value={selectedPullRequestReviewKey}
-            onChange={(event) => setSelectedPullRequestKey(event.target.value)}
-          >
-            {routedPullRequests.length === 0 ? (
-              <option value={selectedPullRequestReviewKey}>{selectedPullRequest.title}</option>
-            ) : (
-              routedPullRequests.map((pullRequest) => (
-                <option key={getPullRequestKey(pullRequest)} value={getPullRequestKey(pullRequest)}>
-                  {pullRequest.repository} #{pullRequest.number}
-                </option>
-              ))
-            )}
-          </select>
+          <PullRequestPickerDialog
+            open={pullRequestPickerOpen}
+            onOpenChange={setPullRequestPickerOpen}
+            options={pullRequestPickerOptions}
+            selectedKey={selectedPullRequestReviewKey}
+            busy={workspaceBusy}
+            onRefresh={() => void refreshPullRequests(includeDrafts)}
+            onSelect={(key) => {
+              setSelectedPullRequestKey(key);
+              setPullRequestPickerOpen(false);
+            }}
+            trigger={
+              <Button
+                variant="outline"
+                size="sm"
+                className="hidden h-8 max-w-[24rem] min-w-0 justify-start lg:flex"
+                aria-label="Pull Request"
+              >
+                <GitPullRequest className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate text-left">{selectedPullRequestPickerOption.title}</span>
+                <Badge variant={selectedPullRequestPickerOption.checksVariant}>{selectedPullRequestPickerOption.checksLabel}</Badge>
+                <Kbd>P</Kbd>
+              </Button>
+            }
+          />
 
           <Button variant="outline" size="icon" aria-label="Refresh Pull Requests" onClick={() => void refreshPullRequests(includeDrafts)} disabled={workspaceBusy}>
             <RefreshCw className={cn("h-4 w-4", workspaceBusy && "animate-spin")} aria-hidden="true" />
@@ -1818,6 +2030,7 @@ export function App({
             <span className="hidden items-center gap-1 lg:flex">
               <Kbd>J</Kbd>/<Kbd>K</Kbd>
               <Kbd>Z</Kbd>
+              <Kbd>P</Kbd>
               <Kbd>O</Kbd>
             </span>
           </div>
@@ -2963,6 +3176,252 @@ function ThreadItem({
   );
 }
 
+function PullRequestPickerDialog({
+  open,
+  onOpenChange,
+  options,
+  selectedKey,
+  busy,
+  trigger,
+  onRefresh,
+  onSelect,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  options: PullRequestPickerOption[];
+  selectedKey: string;
+  busy: boolean;
+  trigger: ReactNode;
+  onRefresh: () => void;
+  onSelect: (key: string) => void;
+}) {
+  const [activeKey, setActiveKey] = useState(selectedKey);
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pickerWasOpenRef = useRef(false);
+
+  useEffect(() => {
+    if (!open) {
+      pickerWasOpenRef.current = false;
+      return;
+    }
+
+    if (pickerWasOpenRef.current) {
+      return;
+    }
+
+    pickerWasOpenRef.current = true;
+    const initialKey = options.some((option) => option.key === selectedKey) ? selectedKey : (options[0]?.key ?? "");
+    setActiveKey(initialKey);
+    if (initialKey) {
+      rowRefs.current.get(initialKey)?.focus();
+    }
+  }, [open, options, selectedKey]);
+
+  useEffect(() => {
+    if (!open || options.length === 0 || options.some((option) => option.key === activeKey)) {
+      return;
+    }
+
+    const fallbackKey = options.some((option) => option.key === selectedKey) ? selectedKey : options[0].key;
+    setActiveKey(fallbackKey);
+  }, [activeKey, open, options, selectedKey]);
+
+  function focusOption(key: string) {
+    setActiveKey(key);
+    const row = rowRefs.current.get(key);
+    row?.focus();
+    row?.scrollIntoView?.({ block: "nearest" });
+  }
+
+  function moveActiveOption(direction: 1 | -1) {
+    if (options.length === 0) {
+      return;
+    }
+    const currentIndex = options.findIndex((option) => option.key === activeKey);
+    const nextIndex =
+      currentIndex === -1
+        ? direction === 1
+          ? 0
+          : options.length - 1
+        : (currentIndex + direction + options.length) % options.length;
+    focusOption(options[nextIndex].key);
+  }
+
+  function handlePickerKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const control = target?.closest("[data-pr-picker-control='true']");
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveActiveOption(1);
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveActiveOption(-1);
+      return;
+    }
+
+    if (event.key === "Home" && options.length > 0) {
+      event.preventDefault();
+      focusOption(options[0].key);
+      return;
+    }
+
+    if (event.key === "End" && options.length > 0) {
+      event.preventDefault();
+      focusOption(options[options.length - 1].key);
+      return;
+    }
+
+    if (event.key === "Enter" && !control) {
+      const activeOption = options.find((option) => option.key === activeKey);
+      if (activeOption) {
+        event.preventDefault();
+        onSelect(activeOption.key);
+      }
+    }
+  }
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Trigger asChild>{trigger}</Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/35" />
+        <Dialog.Content
+          className="fixed inset-x-4 top-8 z-50 mx-auto flex max-h-[calc(100vh-4rem)] w-[min(58rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-lg border bg-card shadow-lg"
+          onKeyDown={handlePickerKeyDown}
+        >
+          <div className="flex items-center justify-between gap-3 border-b px-3 py-2.5">
+            <div className="min-w-0">
+              <Dialog.Title className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                <GitPullRequest className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span className="truncate">Pull Requests</span>
+              </Dialog.Title>
+              <Dialog.Description className="mt-0.5 text-xs text-muted-foreground">
+                {options.length === 0
+                  ? "No open pull requests loaded."
+                  : `${options.length} open pull request${options.length === 1 ? "" : "s"} loaded.`}
+              </Dialog.Description>
+            </div>
+            <Button data-pr-picker-control="true" variant="outline" size="sm" onClick={onRefresh} disabled={busy}>
+              <RefreshCw className={cn("h-4 w-4", busy && "animate-spin")} aria-hidden="true" />
+              Refresh
+            </Button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto" aria-label="Available pull requests">
+            {options.length === 0 ? (
+              <div className="p-4 text-sm text-muted-foreground">
+                Refresh saved repositories to load open pull requests.
+              </div>
+            ) : (
+              <div className="divide-y">
+                {options.map((option) => {
+                  const selected = option.key === selectedKey;
+                  const active = option.key === activeKey;
+                  return (
+                    <button
+                      key={option.key}
+                      ref={(node) => {
+                        if (node) {
+                          rowRefs.current.set(option.key, node);
+                        } else {
+                          rowRefs.current.delete(option.key);
+                        }
+                      }}
+                      type="button"
+                      data-pr-picker-row="true"
+                      className={cn(
+                        "grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3 px-3 py-2 text-left text-xs hover:bg-accent",
+                        active && !selected && "bg-muted/70",
+                        selected && "bg-accent text-accent-foreground",
+                      )}
+                      aria-selected={active}
+                      tabIndex={active ? 0 : -1}
+                      aria-label={`Switch to ${option.title}`}
+                      onFocus={() => setActiveKey(option.key)}
+                      onClick={() => onSelect(option.key)}
+                    >
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <h3 className="truncate text-xs font-semibold">{option.title}</h3>
+                          {selected ? <span className="shrink-0 text-[10px] font-medium text-primary">Active</span> : null}
+                        </div>
+                        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                          <PullRequestListMeta icon={GitPullRequest} value={option.repositoryLabel} />
+                          <PullRequestListMeta icon={User} value={option.authorLabel} />
+                          <PullRequestListMeta icon={Users} value={option.assigneeLabel} label="Assignees" />
+                          <PullRequestListMeta icon={CheckCheck} value={option.reviewerLabel} label="Reviewers" />
+                          <PullRequestListMeta icon={GitBranch} value={option.branchLabel} />
+                        </div>
+                        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                          <span>{option.changedFilesLabel}</span>
+                          <span>{option.changedLinesLabel}</span>
+                          <span>{option.reviewThreadsLabel}</span>
+                          <span>{option.updatedLabel}</span>
+                        </div>
+                        {option.failingCheckNames.length > 0 ? (
+                          <div className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-rose-700 dark:text-rose-300">
+                            <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                            <span className="truncate">Failing: {option.failingCheckNames.join(", ")}</span>
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="flex shrink-0 flex-col items-end gap-1 text-[11px]">
+                        <PullRequestListStatus variant={option.reviewReadinessVariant} label={option.reviewReadinessLabel} />
+                        <PullRequestListStatus variant={option.reviewDecisionVariant} label={option.reviewDecisionLabel} />
+                        <PullRequestListStatus variant={option.checksVariant} label={option.checksLabel} />
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between gap-3 border-t px-3 py-2 text-[11px] text-muted-foreground">
+            <span>Details come from the latest list refresh plus cached PR data.</span>
+            <Button data-pr-picker-control="true" variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+              Close
+            </Button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function PullRequestListMeta({
+  icon: Icon,
+  value,
+  label,
+}: {
+  icon: typeof GitPullRequest;
+  value: string;
+  label?: string;
+}) {
+  return (
+    <span className="flex min-w-0 max-w-48 items-center gap-1">
+      <Icon className="h-3 w-3 shrink-0" aria-hidden="true" />
+      {label ? <span className="sr-only">{label}: </span> : null}
+      <span className="truncate">{value}</span>
+    </span>
+  );
+}
+
+function PullRequestListStatus({ variant, label }: { variant: BadgeVariant; label: string }) {
+  const Icon = variant === "success" ? Check : variant === "danger" ? X : variant === "warning" ? AlertTriangle : variant === "info" ? Clock3 : Circle;
+
+  return (
+    <span className={cn("flex items-center gap-1 whitespace-nowrap", getPickerStatusTextClass(variant))}>
+      <Icon className="h-3 w-3 shrink-0" aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
 function SubmitReviewDialog({
   open,
   onOpenChange,
@@ -3993,6 +4452,164 @@ function splitFilePath(path: string) {
 
 function formatFileStatus(status: string) {
   return status.replace(/[_-]/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function buildPullRequestPickerOption(
+  pullRequest: PullRequestSummary,
+  cachedData: CachedPullRequestData | null | undefined,
+): PullRequestPickerOption {
+  const key = getPullRequestKey(pullRequest);
+  const metadata = cachedData?.metadata;
+  const checksSummary = cachedData ? summarizeChecks(cachedData.checks) : null;
+  const reviewDecision = metadata?.reviewDecision ?? null;
+  const readinessIsDraft = metadata?.isDraft ?? pullRequest.isDraft;
+  const assigneeLogins = pullRequest.assigneeLogins ?? cachedData?.pullRequest.assigneeLogins ?? [];
+  const requestedReviewerLogins = pullRequest.requestedReviewerLogins ?? cachedData?.pullRequest.requestedReviewerLogins ?? [];
+  const changedFiles = cachedData?.fileSummaries.length ?? null;
+  const changedLines = cachedData
+    ? cachedData.fileSummaries.reduce((total, file) => total + file.additions + file.deletions, 0)
+    : null;
+  const unresolvedThreads = cachedData?.reviewThreads.filter((thread) => thread.state === "unresolved").length ?? null;
+  const totalThreads = cachedData?.reviewThreads.length ?? null;
+  const headBranch = metadata?.headBranch ?? pullRequest.headBranch ?? null;
+  const baseBranch = metadata?.baseBranch ?? pullRequest.baseBranch ?? null;
+  const checksDisplay = getPickerChecksDisplay(checksSummary);
+  const reviewDecisionDisplay = getPickerReviewDecisionDisplay(reviewDecision);
+
+  return {
+    key,
+    pullRequest,
+    title: metadata?.title ?? pullRequest.title,
+    repositoryLabel: `${pullRequest.repository} #${pullRequest.number}`,
+    authorLabel: pullRequest.authorLogin ? `@${pullRequest.authorLogin}` : "Unknown author",
+    assigneeLabel: assigneeLogins.length > 0 ? formatLoginList(assigneeLogins) : "Unassigned",
+    reviewerLabel: requestedReviewerLogins.length > 0 ? formatLoginList(requestedReviewerLogins) : "No reviewers",
+    branchLabel: formatBranchPair(headBranch, baseBranch),
+    updatedLabel: `Updated ${formatIsoDate(metadata?.updatedAt ?? pullRequest.updatedAt)}`,
+    reviewReadinessLabel: readinessIsDraft ? "Draft" : "Ready for review",
+    reviewReadinessVariant: readinessIsDraft ? "warning" : "success",
+    reviewDecisionLabel: reviewDecisionDisplay.label,
+    reviewDecisionVariant: reviewDecisionDisplay.variant,
+    checksLabel: checksDisplay.label,
+    checksVariant: checksDisplay.variant,
+    checksDetailLabel: checksDisplay.detail,
+    changedFilesLabel: changedFiles === null ? "Files not loaded" : `${changedFiles} changed ${pluralize("file", changedFiles)}`,
+    changedLinesLabel: changedLines === null ? "Lines not loaded" : `${changedLines} changed ${pluralize("line", changedLines)}`,
+    reviewThreadsLabel:
+      unresolvedThreads === null || totalThreads === null
+        ? "Threads not loaded"
+        : unresolvedThreads > 0
+          ? `${unresolvedThreads} unresolved ${pluralize("thread", unresolvedThreads)}`
+          : totalThreads > 0
+            ? `${totalThreads} resolved ${pluralize("thread", totalThreads)}`
+            : "No review threads",
+    cacheLabel: cachedData ? `Cached ${formatIsoDateFromEpoch(cachedData.fetchedAtEpochMs)}` : "Details not cached",
+    failingCheckNames: checksSummary?.failingNames ?? [],
+  };
+}
+
+function getPickerChecksDisplay(checksSummary: ChecksSummary | null): {
+  label: string;
+  detail: string;
+  variant: BadgeVariant;
+} {
+  if (!checksSummary || checksSummary.total === 0) {
+    return {
+      label: "Checks unknown",
+      detail: "CI/CD not loaded",
+      variant: "muted",
+    };
+  }
+
+  if (checksSummary.failing > 0) {
+    const pendingLabel = checksSummary.pending > 0 ? `, ${checksSummary.pending} pending` : "";
+    return {
+      label: `${checksSummary.failing} failing`,
+      detail: `${checksSummary.failing} failing${pendingLabel}`,
+      variant: "danger",
+    };
+  }
+
+  if (checksSummary.pending > 0) {
+    return {
+      label: `${checksSummary.pending} pending`,
+      detail: `${checksSummary.pending} pending`,
+      variant: "warning",
+    };
+  }
+
+  return {
+    label: `${checksSummary.passing}/${checksSummary.total} passing`,
+    detail: `${checksSummary.passing} passing ${pluralize("check", checksSummary.passing)}`,
+    variant: "success",
+  };
+}
+
+function getPickerReviewDecisionDisplay(reviewDecision: CachedPullRequestData["metadata"]["reviewDecision"]): {
+  label: string;
+  variant: BadgeVariant;
+} {
+  switch (reviewDecision) {
+    case "APPROVED":
+      return { label: "Approved", variant: "success" };
+    case "CHANGES_REQUESTED":
+      return { label: "Changes requested", variant: "danger" };
+    case "REVIEW_REQUIRED":
+      return { label: "Review required", variant: "warning" };
+    default:
+      return { label: "Review unknown", variant: "muted" };
+  }
+}
+
+function getPickerStatusTextClass(variant: BadgeVariant) {
+  switch (variant) {
+    case "success":
+      return "text-emerald-700 dark:text-emerald-300";
+    case "warning":
+      return "text-amber-700 dark:text-amber-300";
+    case "danger":
+      return "text-rose-700 dark:text-rose-300";
+    case "info":
+      return "text-sky-700 dark:text-sky-300";
+    default:
+      return "text-muted-foreground";
+  }
+}
+
+function formatLoginList(logins: string[]) {
+  const uniqueLogins = [...new Set(logins.filter(Boolean))];
+  const visible = uniqueLogins.slice(0, 3).map((login) => `@${login}`);
+  const remaining = uniqueLogins.length - visible.length;
+  return remaining > 0 ? `${visible.join(", ")} +${remaining}` : visible.join(", ");
+}
+
+function formatBranchPair(headBranch: string | null | undefined, baseBranch: string | null | undefined) {
+  if (headBranch && baseBranch) {
+    return `${headBranch} -> ${baseBranch}`;
+  }
+  return headBranch ?? baseBranch ?? "Branches unknown";
+}
+
+function formatIsoDate(value: string | null | undefined) {
+  if (!value) {
+    return "unknown";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function formatIsoDateFromEpoch(epochMs: number) {
+  if (!Number.isFinite(epochMs) || epochMs <= 0) {
+    return "unknown";
+  }
+  return formatIsoDate(new Date(epochMs).toISOString());
+}
+
+function pluralize(noun: string, count: number) {
+  return count === 1 ? noun : `${noun}s`;
 }
 
 function getErrorMessage(error: unknown) {

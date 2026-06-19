@@ -809,7 +809,7 @@ function buildSourceSignature(files: CachedFileSummary[], fileContents: Analysis
         file.status,
         file.additions,
         file.deletions,
-        hashString(file.patch === null ? "<missing-text-diff>" : (file.patch ?? "<generated-hunks>")),
+        hashString(file.patch === null ? "<missing-text-diff>" : (file.patch ?? "<missing-cached-diff>")),
         source?.state ?? "no-content",
         hashString(source?.content ?? ""),
       ].join(":");

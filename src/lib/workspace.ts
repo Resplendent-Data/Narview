@@ -13,6 +13,10 @@ export interface PullRequestSummary {
   number: number;
   title: string;
   authorLogin: string | null;
+  assigneeLogins?: string[];
+  requestedReviewerLogins?: string[];
+  baseBranch?: string | null;
+  headBranch?: string | null;
   isDraft: boolean;
   updatedAt: string;
   url: string;
@@ -92,6 +96,12 @@ export interface PullRequestAnalysisFilesResponse {
   files: AnalysisFileContent[];
 }
 
+export interface PullRequestFilePatchesResponse {
+  repository: WorkspaceRepository;
+  pullRequestNumber: number;
+  files: AnalysisFileContent[];
+}
+
 export interface WorkspaceClient {
   listRepositories: () => Promise<WorkspaceRepositoriesResponse>;
   saveRepository: (slug: string) => Promise<WorkspaceRepositoriesResponse>;
@@ -100,6 +110,7 @@ export interface WorkspaceClient {
   ensureReviewClone: (repository: string) => Promise<ReviewCloneStatus>;
   preparePullRequestReviewClone: (pullRequest: PullRequestSummary) => Promise<PullRequestAnalysisInput>;
   readPullRequestAnalysisFiles: (pullRequest: PullRequestSummary, paths: string[]) => Promise<PullRequestAnalysisFilesResponse>;
+  readPullRequestFilePatches: (pullRequest: PullRequestSummary, paths: string[]) => Promise<PullRequestFilePatchesResponse>;
   refreshPullRequests: (includeDrafts: boolean) => Promise<PullRequestRefreshResponse>;
   fetchPullRequestData: (pullRequest: PullRequestSummary) => Promise<CachedPullRequestData>;
   fetchPullRequestChecks: (pullRequest: PullRequestSummary) => Promise<PullRequestChecksResponse>;
@@ -260,6 +271,19 @@ const localWorkspaceClient: WorkspaceClient = {
     };
   },
 
+  async readPullRequestFilePatches(pullRequest, paths) {
+    return {
+      repository: parseSlug(pullRequest.repository),
+      pullRequestNumber: pullRequest.number,
+      files: paths.map((path) => ({
+        path,
+        state: "unavailable",
+        content: null,
+        message: "Desktop runtime required to recover local Pull Request patches.",
+      })),
+    };
+  },
+
   async refreshPullRequests() {
     return {
       repositories: readLocalRepositories(),
@@ -359,6 +383,21 @@ export const tauriWorkspaceClient: WorkspaceClient = {
     } catch (error) {
       if (isDesktopRuntimeUnavailable(messageFromError(error))) {
         return localWorkspaceClient.readPullRequestAnalysisFiles(pullRequest, paths);
+      }
+      throw new Error(messageFromError(error));
+    }
+  },
+
+  async readPullRequestFilePatches(pullRequest, paths) {
+    try {
+      return await invoke<PullRequestFilePatchesResponse>("read_pull_request_file_patches", {
+        repository: pullRequest.repository,
+        number: pullRequest.number,
+        paths,
+      });
+    } catch (error) {
+      if (isDesktopRuntimeUnavailable(messageFromError(error))) {
+        return localWorkspaceClient.readPullRequestFilePatches(pullRequest, paths);
       }
       throw new Error(messageFromError(error));
     }

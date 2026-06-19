@@ -4,7 +4,13 @@ import userEvent from "@testing-library/user-event";
 import { App } from "./App";
 import type { AppUpdateClient } from "./lib/app-updater";
 import type { AuthClient, AuthSession } from "./lib/auth";
-import { createCachedPullRequest, type CachedPullRequestData, type CachedReviewThread } from "./lib/pr-cache";
+import {
+  createCachedPullRequest,
+  prCacheStorageKey,
+  writeCachedPullRequestData,
+  type CachedPullRequestData,
+  type CachedReviewThread,
+} from "./lib/pr-cache";
 import type {
   AddPendingReviewThreadInput,
   DiscardPendingReviewInput,
@@ -15,7 +21,7 @@ import type {
 } from "./lib/review-actions";
 import { getPullRequestKey, type ReviewSessionClient } from "./lib/review-session";
 import type { ThreadActionClient } from "./lib/thread-actions";
-import type { PullRequestSummary, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
+import type { PullRequestChecksResponse, PullRequestSummary, WorkspaceClient, WorkspaceRepository } from "./lib/workspace";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openUrl: vi.fn().mockResolvedValue(undefined),
@@ -42,10 +48,30 @@ const pullRequest: PullRequestSummary = {
   number: 42,
   title: "Add billing review stack",
   authorLogin: "octocat",
+  assigneeLogins: ["octocat"],
+  requestedReviewerLogins: ["monalisa"],
+  baseBranch: "main",
+  headBranch: "billing-stack",
   isDraft: false,
   updatedAt: "2026-06-18T12:00:00Z",
   url: "https://github.com/Resplendent-Data/Narview/pull/42",
 };
+
+const blockedPullRequest: PullRequestSummary = {
+  repository: repository.slug,
+  number: 77,
+  title: "Stabilize export queue",
+  authorLogin: "monalisa",
+  assigneeLogins: ["hubot"],
+  requestedReviewerLogins: ["octocat"],
+  baseBranch: "main",
+  headBranch: "export-queue",
+  isDraft: false,
+  updatedAt: "2026-06-18T13:00:00Z",
+  url: "https://github.com/Resplendent-Data/Narview/pull/77",
+};
+
+let rejectPullRequestCacheWrites = false;
 
 const localStorageMock = {
   store: new Map<string, string>(),
@@ -53,6 +79,9 @@ const localStorageMock = {
     return this.store.get(key) ?? null;
   },
   setItem(key: string, value: string) {
+    if (rejectPullRequestCacheWrites && key === prCacheStorageKey) {
+      throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    }
     this.store.set(key, value);
   },
   removeItem(key: string) {
@@ -69,6 +98,7 @@ beforeEach(() => {
     value: localStorageMock,
   });
   localStorageMock.clear();
+  rejectPullRequestCacheWrites = false;
   vi.clearAllMocks();
 });
 
@@ -91,6 +121,11 @@ function createWorkspaceClient(overrides: Partial<WorkspaceClient> = {}): Worksp
     ensureReviewClone: vi.fn(),
     preparePullRequestReviewClone: vi.fn(),
     readPullRequestAnalysisFiles: vi.fn(),
+    readPullRequestFilePatches: vi.fn().mockResolvedValue({
+      repository,
+      pullRequestNumber: pullRequest.number,
+      files: [],
+    }),
     refreshPullRequests: vi.fn().mockResolvedValue({
       repositories: [repository],
       pullRequests: [pullRequest],
@@ -263,6 +298,72 @@ function createReviewStackFixture(): CachedPullRequestData {
   };
 }
 
+function createBlockedPullRequestFixture(): CachedPullRequestData {
+  const cache = createCachedPullRequest(blockedPullRequest, 1_800_000_100_000);
+
+  return {
+    ...cache,
+    metadata: {
+      ...cache.metadata,
+      description: "Tightens queue export behavior before release.",
+      nodeId: "PR_77",
+      baseBranch: "main",
+      headBranch: "export-queue",
+      headSha: "7777777777777777777777777777777777777777",
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "UNSTABLE",
+      reviewDecision: "CHANGES_REQUESTED",
+    },
+    fileSummaries: [
+      {
+        path: "src/export/queue.ts",
+        additions: 31,
+        deletions: 8,
+        status: "modified",
+        patch: "@@ -1,3 +1,5 @@\n export function queueExport() {\n+  return scheduleExport();\n }",
+        viewerViewedState: "UNVIEWED",
+      },
+      {
+        path: "src/export/queue.test.ts",
+        additions: 14,
+        deletions: 2,
+        status: "modified",
+        patch: "@@ -1,3 +1,4 @@\n it('exports queued work', () => {\n+  expect(true).toBe(true);\n });",
+        viewerViewedState: "UNVIEWED",
+      },
+    ],
+    reviewThreads: [
+      {
+        id: "thread-export",
+        authorLogin: "octocat",
+        filePath: "src/export/queue.ts",
+        line: 2,
+        state: "unresolved",
+        body: "This still drops queued exports on retry.",
+        updatedAt: "2026-06-18T13:05:00Z",
+      },
+    ],
+    checks: [
+      {
+        name: "ci/export",
+        status: "completed",
+        conclusion: "failure",
+        url: "https://github.com/Resplendent-Data/Narview/actions/runs/77",
+        startedAt: "2026-06-18T13:02:00Z",
+        completedAt: "2026-06-18T13:04:00Z",
+      },
+      {
+        name: "lint",
+        status: "in-progress",
+        conclusion: null,
+        url: null,
+        startedAt: "2026-06-18T13:03:00Z",
+        completedAt: null,
+      },
+    ],
+  };
+}
+
 function renderStackApp(overrides: {
   authClient?: Partial<AuthClient>;
   workspaceClient?: Partial<WorkspaceClient>;
@@ -296,6 +397,56 @@ describe("Review stack workspace", () => {
     expect(screen.getByLabelText("Diff for src/billing/checkout.ts")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /Open symbol references for stack/i }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: /Open symbol references for ready/i }).length).toBeGreaterThan(0);
+  });
+
+  it("renders freshly fetched patches even when Pull Request cache persistence fails", async () => {
+    rejectPullRequestCacheWrites = true;
+    renderStackApp();
+
+    await userEvent.click(await screen.findByRole("button", { name: "src/billing/checkout.ts" }));
+
+    expect(screen.getByLabelText("Diff for src/billing/checkout.ts")).toBeInTheDocument();
+    expect(screen.queryByText("Patch content is unavailable.")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /Open symbol references for stack/i }).length).toBeGreaterThan(0);
+  });
+
+  it("recovers missing active-file patch content from the prepared review clone", async () => {
+    const fixture = createReviewStackFixture();
+    const checkoutFile = fixture.fileSummaries.find((file) => file.path === "src/billing/checkout.ts")!;
+    const compactFixture: CachedPullRequestData = {
+      ...fixture,
+      fileSummaries: fixture.fileSummaries.map((file) => {
+        if (file.path !== "src/billing/checkout.ts") {
+          return file;
+        }
+        const { patch: _patch, ...summary } = file;
+        return summary;
+      }),
+    };
+    renderStackApp({
+      workspaceClient: {
+        fetchPullRequestData: vi.fn().mockResolvedValue(compactFixture),
+        readPullRequestFilePatches: vi.fn().mockResolvedValue({
+          repository,
+          pullRequestNumber: pullRequest.number,
+          files: [
+            {
+              path: "src/billing/checkout.ts",
+              state: "loaded",
+              content: checkoutFile.patch,
+              message: null,
+            },
+          ],
+        }),
+      },
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: "src/billing/checkout.ts" }));
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /Open symbol references for stack/i }).length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByText("Patch content is unavailable.")).not.toBeInTheDocument();
   });
 
   it("syncs stack viewed state through the GitHub viewed action", async () => {
@@ -489,6 +640,85 @@ describe("Review stack workspace", () => {
 
     await waitFor(() => {
       expect(openUrl).toHaveBeenCalledWith("https://github.com/Resplendent-Data/Narview/pull/42");
+    });
+  });
+
+  it("opens a rich pull request picker with P and switches pull requests", async () => {
+    const user = userEvent.setup();
+    const checksHydration = createDeferred<PullRequestChecksResponse>();
+    const uncachedPullRequest: PullRequestSummary = {
+      repository: repository.slug,
+      number: 88,
+      title: "Polish diagnostics view",
+      authorLogin: "hubot",
+      assigneeLogins: [],
+      requestedReviewerLogins: [],
+      baseBranch: "main",
+      headBranch: "diagnostics-view",
+      isDraft: false,
+      updatedAt: "2026-06-18T14:00:00Z",
+      url: "https://github.com/Resplendent-Data/Narview/pull/88",
+    };
+    writeCachedPullRequestData(createBlockedPullRequestFixture());
+    renderStackApp({
+      workspaceClient: {
+        fetchPullRequestChecks: vi.fn().mockReturnValue(checksHydration.promise),
+        refreshPullRequests: vi.fn().mockResolvedValue({
+          repositories: [repository],
+          pullRequests: [pullRequest, blockedPullRequest, uncachedPullRequest],
+          status: {
+            state: "fresh",
+            message: "Fetched 3 open pull requests.",
+            rateLimitResetEpochSeconds: null,
+            refreshedAtEpochSeconds: 1_800_000_000,
+          },
+        }),
+      },
+    });
+
+    await screen.findByText("Core: src/billing");
+    fireEvent.keyDown(window, { key: "p" });
+
+    const dialog = await screen.findByRole("dialog", { name: /Pull Requests/i });
+    expect(within(dialog).getByText("Add billing review stack")).toBeInTheDocument();
+    expect(within(dialog).getByText("Stabilize export queue")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("@hubot").length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByText("@octocat").length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByText("Ready for review").length).toBeGreaterThan(0);
+    expect(within(dialog).getByText("Changes requested")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("1 failing").length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByText("1 unresolved thread").length).toBeGreaterThan(0);
+    expect(within(dialog).getByText("Failing: ci/export")).toBeInTheDocument();
+
+    const blockedRow = within(dialog).getByRole("button", { name: /Switch to Stabilize export queue/i });
+    fireEvent.keyDown(dialog, { key: "ArrowDown" });
+    expect(blockedRow).toHaveFocus();
+    checksHydration.resolve({
+      checks: [
+        {
+          name: "diagnostics",
+          status: "completed",
+          conclusion: "success",
+          url: null,
+          startedAt: "2026-06-18T14:01:00Z",
+          completedAt: "2026-06-18T14:02:00Z",
+        },
+      ],
+      rateLimit: {
+        remaining: 4999,
+        resetEpochSeconds: null,
+      },
+      fetchedAtEpochMs: 1_800_000_200_000,
+    });
+    await waitFor(() => {
+      expect(within(dialog).getAllByText("1/1 passing").length).toBeGreaterThan(0);
+      expect(blockedRow).toHaveFocus();
+    });
+    fireEvent.keyDown(dialog, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: /Pull Requests/i })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Pull Request" })).toHaveTextContent("Stabilize export queue");
     });
   });
 

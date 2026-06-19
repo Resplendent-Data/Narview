@@ -78,7 +78,7 @@ describe("Pull Request cache persistence", () => {
     expect(() => writeCacheStore(store)).not.toThrow();
 
     const saved = readCacheStore();
-    expect(saved.entries["Resplendent-Data/front-end#2074"].fileSummaries[0].patch).toBeUndefined();
+    expect(saved.entries["Resplendent-Data/front-end#2074"].fileSummaries[0].patch).toBeNull();
     expect(setItem).toHaveBeenCalledTimes(2);
   });
 });

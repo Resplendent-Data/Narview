@@ -63,12 +63,6 @@ export interface HighlightWindow {
   overscan?: number;
 }
 
-interface HunkDescriptor {
-  id: string;
-  header: string;
-  startLine: number;
-}
-
 interface PatchHunkView extends DiffHunkView {
   oldStart: number | null;
   newStart: number | null;
@@ -110,11 +104,7 @@ export function getDefaultLoadedDiffHunkIds(file: CachedFileSummary) {
     return parsePatch(file.patch, file.path).map((hunk) => hunk.id);
   }
 
-  if (file.patch === null) {
-    return [];
-  }
-
-  return getDiffHunkDescriptors(file).map((descriptor) => descriptor.id);
+  return [];
 }
 
 export function buildLazyDiffState(file: CachedFileSummary, options: LazyDiffOptions): LazyDiffState {
@@ -177,48 +167,16 @@ export function buildLazyDiffState(file: CachedFileSummary, options: LazyDiffOpt
     };
   }
 
-  if (file.patch === null) {
-    return {
-      filePath: file.path,
-      mode: options.mode,
-      kind,
-      language,
-      githubUrl,
-      hunks: [],
-      fullFileLines: null,
-    };
-  }
-
-  const loaded = new Set([...getDefaultLoadedDiffHunkIds(file), ...(options.loadedHunkIds ?? [])]);
-  const expanded = new Set(options.expandedHunkIds ?? []);
-  const descriptors = getDiffHunkDescriptors(file);
-  const hunks = descriptors.map((descriptor, index) => {
-    const isLoaded = loaded.has(descriptor.id);
-    const isExpanded = expanded.has(descriptor.id);
-    const rawLines = isLoaded ? buildHunkLines(file, descriptor, index, isExpanded) : [];
-
-    return {
-      id: descriptor.id,
-      header: descriptor.header,
-      loaded: isLoaded,
-      expandable: isLoaded,
-      expanded: isExpanded,
-      canExpandBefore: isLoaded && !isExpanded,
-      canExpandAfter: isLoaded && !isExpanded,
-      contextBefore: isExpanded ? 2 : 0,
-      contextAfter: isExpanded ? 2 : 0,
-      lines: highlightLoadedDiffLines(rawLines, file.path),
-    };
-  });
-
   return {
     filePath: file.path,
     mode: options.mode,
     kind,
     language,
     githubUrl,
-    hunks,
-    fullFileLines: options.fullFileLoaded ? buildFullFileLines(file, language) : null,
+    hunks: [],
+    fullFileLines: options.fullFileLoaded && sourceLines
+      ? highlightLoadedDiffLines(buildSourceFullFileLines(sourceLines), file.path)
+      : null,
   };
 }
 
@@ -419,24 +377,6 @@ export function getLanguageForPath(path: string) {
   return languages[extension] ?? "text";
 }
 
-function getDiffHunkDescriptors(file: CachedFileSummary): HunkDescriptor[] {
-  const changedLines = Math.max(file.additions + file.deletions, 1);
-  const secondStart = Math.min(160, Math.max(42, changedLines));
-
-  return [
-    {
-      id: `${file.path}:primary`,
-      header: `@@ -1,6 +1,8 @@ ${file.path}`,
-      startLine: 1,
-    },
-    {
-      id: `${file.path}:secondary`,
-      header: `@@ -${secondStart},5 +${secondStart},7 @@ ${file.path}`,
-      startLine: secondStart,
-    },
-  ];
-}
-
 function parsePatch(patch: string, filePath: string): PatchHunkView[] {
   const hunks: PatchHunkView[] = [];
   let current: { id: string; header: string; lines: DiffLine[]; oldLine: number; newLine: number } | null = null;
@@ -560,54 +500,6 @@ function buildSourceFullFileLines(sourceLines: string[]) {
   return sourceLines.map((content, index) => createLine(index + 1, index + 1, "context", content));
 }
 
-function buildHunkLines(file: CachedFileSummary, descriptor: HunkDescriptor, index: number, expanded: boolean): DiffLine[] {
-  const name = toIdentifier(file.path);
-  const base = descriptor.startLine;
-  const lines: DiffLine[] = [];
-
-  if (expanded) {
-    lines.push(createLine(base - 2, base - 2, "context", `// context before ${file.path}`));
-    lines.push(createLine(base - 1, base - 1, "context", `const previous${name} = loadPreviousState();`));
-  }
-
-  if (file.status === "added") {
-    lines.push(createLine(null, base, "addition", `export function ${name}() {`));
-    lines.push(createLine(null, base + 1, "addition", `  return create${name}();`));
-    lines.push(createLine(null, base + 2, "addition", "}"));
-  } else {
-    lines.push(createLine(base, base, "context", `export function update${name}() {`));
-    lines.push(createLine(base + 1, null, "deletion", `  const value = previous${name};`));
-    lines.push(createLine(null, base + 1, "addition", `  const value = next${name};`));
-    lines.push(createLine(base + 2, base + 2, "context", "  return value;"));
-    if (index === 1) {
-      lines.push(createLine(base + 3, null, "deletion", "  logger.debug(value);"));
-      lines.push(createLine(null, base + 3, "addition", "  logger.info(value);"));
-    }
-    lines.push(createLine(base + 4, base + 4, "context", "}"));
-  }
-
-  if (expanded) {
-    lines.push(createLine(base + 5, base + 5, "context", `const next${name} = loadNextState();`));
-    lines.push(createLine(base + 6, base + 6, "context", `// context after ${file.path}`));
-  }
-
-  return lines;
-}
-
-function buildFullFileLines(file: CachedFileSummary, language: string): DiffLine[] {
-  const name = toIdentifier(file.path);
-  const lines = [
-    createLine(1, 1, "context", `import { loadNextState } from "${name}";`),
-    createLine(2, 2, "context", ""),
-    createLine(3, 3, "context", `export function update${name}() {`),
-    createLine(4, 4, "addition", `  const value = next${name};`),
-    createLine(5, 5, "context", "  return value;"),
-    createLine(6, 6, "context", "}"),
-  ];
-
-  return lines.map((line) => ({ ...line, highlighted: true, language }));
-}
-
 function createLine(oldLine: number | null, newLine: number | null, kind: DiffLineKind, content: string, sourceContext = false): DiffLine {
   return {
     oldLine,
@@ -618,15 +510,6 @@ function createLine(oldLine: number | null, newLine: number | null, kind: DiffLi
     language: "text",
     sourceContext,
   };
-}
-
-function toIdentifier(path: string) {
-  const fileName = path.split("/").at(-1) ?? path;
-  return fileName
-    .replace(/\.[^.]+$/, "")
-    .replace(/[^a-zA-Z0-9]+(.)/g, (_, letter: string) => letter.toUpperCase())
-    .replace(/^[^a-zA-Z]+/, "")
-    .replace(/^./, (letter) => letter.toUpperCase());
 }
 
 function getExtension(path: string) {
