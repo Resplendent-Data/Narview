@@ -369,6 +369,7 @@ function renderStackApp(overrides: {
   workspaceClient?: Partial<WorkspaceClient>;
   reviewActionClient?: Partial<ReviewActionClient>;
   threadActionClient?: Partial<ThreadActionClient>;
+  updaterClient?: Partial<AppUpdateClient>;
 } = {}) {
   const clients = {
     authClient: createAuthClient(overrides.authClient),
@@ -376,7 +377,7 @@ function renderStackApp(overrides: {
     reviewActionClient: createReviewActionClient(overrides.reviewActionClient),
     threadActionClient: createThreadActionClient(overrides.threadActionClient),
     reviewSessionClient: createReviewSessionClient(),
-    updaterClient: createUpdaterClient(),
+    updaterClient: createUpdaterClient(overrides.updaterClient),
   };
 
   render(<App {...clients} />);
@@ -641,6 +642,26 @@ describe("Review stack workspace", () => {
     await waitFor(() => {
       expect(openUrl).toHaveBeenCalledWith("https://github.com/Resplendent-Data/Narview/pull/42");
     });
+  });
+
+  it("shows the current app version and checks for updates from the footer", async () => {
+    const user = userEvent.setup();
+    const checkForUpdate = vi.fn().mockResolvedValue(null);
+    renderStackApp({
+      updaterClient: {
+        getCurrentVersion: vi.fn().mockResolvedValue("0.1.0-rc.23"),
+        checkForUpdate,
+      },
+    });
+
+    expect(await screen.findByText("App v0.1.0-rc.23")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /check for updates/i }));
+
+    await waitFor(() => {
+      expect(checkForUpdate).toHaveBeenCalled();
+    });
+    expect(await screen.findByText("You're up to date")).toBeInTheDocument();
   });
 
   it("opens a rich pull request picker with P and switches pull requests", async () => {

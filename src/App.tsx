@@ -519,6 +519,14 @@ export function App({
   const sidePanelCommentTarget = commentTarget?.subjectType === "LINE" ? null : commentTarget;
   const activeCommentFeedback =
     commentTarget && commentFeedback?.targetLabel === commentTarget.label ? commentFeedback : null;
+  const updateBusy = updater.isChecking || updater.isUpdating;
+  const updateButtonLabel = updater.isUpdating ? "Updating" : updater.isChecking ? "Checking" : "Check updates";
+  const updateStatusLabel =
+    updater.statusMessage === "Updates ready" && !updater.updateInfo
+      ? "Current"
+      : updater.updateInfo && updater.statusMessage === "Updates ready"
+        ? `Update ${updater.updateInfo.version}`
+        : updater.statusMessage;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -2026,7 +2034,20 @@ export function App({
             <button className="hover:text-foreground" onClick={() => void openSelectedPullRequestInGithub()}>
               GitHub
             </button>
-            <span>{updater.isChecking ? "Checking update" : updater.updateInfo ? `Update ${updater.updateInfo.version}` : "Current"}</span>
+            <span className="whitespace-nowrap font-mono">App v{updater.currentVersion}</span>
+            <button
+              className="inline-flex items-center gap-1 whitespace-nowrap hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={() => void updater.checkForUpdates()}
+              disabled={updateBusy}
+              aria-label={`Check for updates. Current version ${updater.currentVersion}`}
+              title={updater.error ?? updater.statusMessage}
+            >
+              {updateBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
+              <span>{updateButtonLabel}</span>
+            </button>
+            <span className="hidden max-w-48 truncate md:inline" title={updater.error ?? updater.statusMessage}>
+              {updateStatusLabel}
+            </span>
             <span className="hidden items-center gap-1 lg:flex">
               <Kbd>J</Kbd>/<Kbd>K</Kbd>
               <Kbd>Z</Kbd>
