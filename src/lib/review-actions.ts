@@ -50,7 +50,7 @@ export interface AddPendingReviewThreadInput extends PullRequestIdentity {
 }
 
 export interface SubmitPendingReviewInput extends PullRequestIdentity {
-  pullRequestReviewId: string;
+  pullRequestReviewId?: string | null;
   event: PullRequestReviewEvent;
   body: string;
 }
@@ -113,9 +113,6 @@ export function validatePendingReviewThreadInput(input: AddPendingReviewThreadIn
 }
 
 export function validateSubmitReviewInput(input: SubmitPendingReviewInput): string | null {
-  if (!input.pullRequestReviewId) {
-    return "No pending review is ready to submit.";
-  }
   if ((input.event === "COMMENT" || input.event === "REQUEST_CHANGES") && input.body.trim().length === 0) {
     return "A review summary is required for comments and changes-requested reviews.";
   }
@@ -176,7 +173,7 @@ export const tauriReviewActionClient: ReviewActionClient = {
     return invoke<ReviewSubmitResult>("submit_pending_review", {
       repository: input.repository,
       pullRequestNumber: input.pullRequestNumber,
-      pullRequestReviewId: input.pullRequestReviewId,
+      pullRequestReviewId: input.pullRequestReviewId ?? null,
       event: input.event,
       body: input.body,
     });

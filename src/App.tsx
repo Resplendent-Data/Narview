@@ -1,4 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
+import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Check,
@@ -333,7 +334,11 @@ function getInitialTheme(): Theme {
   if (typeof window === "undefined") {
     return "light";
   }
-  return window.localStorage.getItem("narview.theme") === "dark" ? "dark" : "light";
+  const savedTheme = window.localStorage.getItem("narview.theme");
+  if (savedTheme === "dark" || savedTheme === "light") {
+    return savedTheme;
+  }
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 export function App({
@@ -531,6 +536,11 @@ export function App({
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     window.localStorage.setItem("narview.theme", theme);
+    if (isTauri()) {
+      void import("@tauri-apps/api/app")
+        .then(({ setTheme }) => setTheme(theme))
+        .catch(() => undefined);
+    }
   }, [theme]);
 
   useEffect(() => {
@@ -1306,15 +1316,10 @@ export function App({
   }
 
   async function handleSubmitReview() {
-    if (!pendingReview) {
-      setActionMessage("No pending review is ready to submit.");
-      return;
-    }
-
     const input = {
       repository: selectedPullRequest.repository,
       pullRequestNumber: selectedPullRequest.number,
-      pullRequestReviewId: pendingReview.pullRequestReviewId,
+      pullRequestReviewId: pendingReview?.pullRequestReviewId ?? null,
       event: reviewEvent,
       body: reviewSummary,
     };
@@ -3473,6 +3478,13 @@ function SubmitReviewDialog({
     { value: "REQUEST_CHANGES", label: "Request changes", detail: "Block merge until issues are addressed." },
     { value: "APPROVE", label: "Approve", detail: "Approve the pull request." },
   ];
+  const reviewSummaryRequired = event === "COMMENT" || event === "REQUEST_CHANGES";
+  const canSubmit = !busy && (!reviewSummaryRequired || body.trim().length > 0);
+  const submitHint = pendingReview
+    ? "Pending review ready"
+    : event === "APPROVE"
+      ? "Ready to approve without draft comments."
+      : "Add a review summary to submit without draft comments.";
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -3560,12 +3572,12 @@ function SubmitReviewDialog({
           </div>
 
           <div className="flex items-center justify-between gap-2 border-t p-4">
-            <span className="text-xs text-muted-foreground">{pendingReview ? "Pending review ready" : "Add a draft comment to start a pending review."}</span>
+            <span className="text-xs text-muted-foreground">{submitHint}</span>
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>
-              <Button onClick={onSubmit} disabled={!pendingReview || busy}>
+              <Button onClick={onSubmit} disabled={!canSubmit}>
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <Send className="h-4 w-4" aria-hidden="true" />}
                 Submit
               </Button>

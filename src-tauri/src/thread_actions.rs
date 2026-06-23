@@ -615,38 +615,87 @@ pub async fn submit_pending_review(
     workspace_state: State<'_, WorkspaceState>,
     repository: String,
     pull_request_number: u64,
-    pull_request_review_id: String,
+    pull_request_review_id: Option<String>,
     event: String,
     body: String,
 ) -> Result<ReviewSubmitResponse, ThreadActionError> {
-    let (_owner, _name) = parse_repository_slug(&repository)?;
-    let _ = pull_request_number;
+    let (owner, name) = parse_repository_slug(&repository)?;
     let token = github_token(&auth_state)?;
     let event = event.trim().to_ascii_uppercase();
+    let body = body.trim().to_string();
     if !matches!(event.as_str(), "COMMENT" | "APPROVE" | "REQUEST_CHANGES") {
         return Err(ThreadActionError::new(
             "github-review-validation-error",
             "Review event must be COMMENT, APPROVE, or REQUEST_CHANGES.",
         ));
     }
-    if (event == "COMMENT" || event == "REQUEST_CHANGES") && body.trim().is_empty() {
+    if (event == "COMMENT" || event == "REQUEST_CHANGES") && body.is_empty() {
         return Err(ThreadActionError::new(
             "github-review-validation-error",
             "A review summary is required for this review event.",
         ));
     }
 
+    if let Some(pending_review_id) = pull_request_review_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        let data = send_graphql(
+            &workspace_state.http,
+            &token,
+            "submit pending review",
+            json!({
+                "query": "mutation SubmitPendingReview($input: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $input) { pullRequestReview { id state url } } }",
+                "variables": {
+                    "input": {
+                        "pullRequestReviewId": pending_review_id,
+                        "event": event,
+                        "body": body,
+                    }
+                }
+            }),
+        )
+        .await?;
+
+        return Ok(ReviewSubmitResponse {
+            ok: true,
+            pull_request_review_id: required_string(
+                &data,
+                "/submitPullRequestReview/pullRequestReview/id",
+                "Pull Request Review id",
+            )?,
+            state: data
+                .pointer("/submitPullRequestReview/pullRequestReview/state")
+                .and_then(Value::as_str)
+                .unwrap_or("SUBMITTED")
+                .to_string(),
+            url: data
+                .pointer("/submitPullRequestReview/pullRequestReview/url")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            message: "Pending review submitted to GitHub.".to_string(),
+        });
+    }
+
+    let pull_request_id = fetch_pull_request_id(
+        &workspace_state.http,
+        &token,
+        &owner,
+        &name,
+        pull_request_number,
+    )
+    .await?;
     let data = send_graphql(
         &workspace_state.http,
         &token,
-        "submit pending review",
+        "submit review",
         json!({
-            "query": "mutation SubmitPendingReview($input: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $input) { pullRequestReview { id state url } } }",
+            "query": "mutation SubmitReview($input: AddPullRequestReviewInput!) { addPullRequestReview(input: $input) { pullRequestReview { id state url } } }",
             "variables": {
                 "input": {
-                    "pullRequestReviewId": pull_request_review_id,
+                    "pullRequestId": pull_request_id,
                     "event": event,
-                    "body": body.trim(),
+                    "body": body,
                 }
             }
         }),
@@ -657,19 +706,19 @@ pub async fn submit_pending_review(
         ok: true,
         pull_request_review_id: required_string(
             &data,
-            "/submitPullRequestReview/pullRequestReview/id",
+            "/addPullRequestReview/pullRequestReview/id",
             "Pull Request Review id",
         )?,
         state: data
-            .pointer("/submitPullRequestReview/pullRequestReview/state")
+            .pointer("/addPullRequestReview/pullRequestReview/state")
             .and_then(Value::as_str)
             .unwrap_or("SUBMITTED")
             .to_string(),
         url: data
-            .pointer("/submitPullRequestReview/pullRequestReview/url")
+            .pointer("/addPullRequestReview/pullRequestReview/url")
             .and_then(Value::as_str)
             .map(ToString::to_string),
-        message: "Pending review submitted to GitHub.".to_string(),
+        message: "Review submitted to GitHub.".to_string(),
     })
 }
 

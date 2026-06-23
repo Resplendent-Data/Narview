@@ -174,7 +174,7 @@ function createReviewActionClient(overrides: Partial<ReviewActionClient> = {}): 
     })),
     submitPendingReview: vi.fn().mockImplementation(async (input: SubmitPendingReviewInput) => ({
       ok: true,
-      pullRequestReviewId: input.pullRequestReviewId,
+      pullRequestReviewId: input.pullRequestReviewId ?? "PRR_direct",
       state: "COMMENTED",
       url: "https://github.com/Resplendent-Data/Narview/pull/42#pullrequestreview-1",
       message: "Pending review submitted to GitHub.",
@@ -816,6 +816,29 @@ describe("Review stack workspace", () => {
           body: "Looks good with one note.",
         }),
       );
+    });
+  });
+
+  it("submits an approval without draft review comments", async () => {
+    const user = userEvent.setup();
+    const reviewActionClient = createReviewActionClient();
+    renderStackApp({ reviewActionClient });
+
+    await screen.findByText("Core: src/billing");
+    await user.click(screen.getByRole("button", { name: /Submit review \(0 comments\)/i }));
+    const dialog = await screen.findByRole("dialog", { name: /submit review/i });
+    await user.click(within(dialog).getByRole("radio", { name: /Approve/i }));
+    await user.type(within(dialog).getByLabelText("Review summary"), "Lgtm");
+    await user.click(within(dialog).getByRole("button", { name: /^Submit$/ }));
+
+    await waitFor(() => {
+      expect(reviewActionClient.submitPendingReview).toHaveBeenCalledWith({
+        repository: "Resplendent-Data/Narview",
+        pullRequestNumber: 42,
+        pullRequestReviewId: null,
+        event: "APPROVE",
+        body: "Lgtm",
+      });
     });
   });
 
