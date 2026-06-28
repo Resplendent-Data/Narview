@@ -24,7 +24,7 @@ class SubmitReviewScreen extends ConsumerWidget {
         title: const Text('Submit Review'),
         leading: IconButton(
           tooltip: 'Back',
-          onPressed: () => context.go(identity?.reviewRoutePath ?? '/'),
+          onPressed: () => context.go(identity?.routePath ?? '/'),
           icon: const Icon(Icons.arrow_back),
         ),
       ),
@@ -55,14 +55,29 @@ class SubmitReviewScreen extends ConsumerWidget {
               Card(
                 child: ListTile(
                   title: Text(
-                    draft.path,
+                    draft.line == null
+                        ? draft.path
+                        : '${draft.path}:${draft.line}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  subtitle: Text(
-                    draft.body,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (draft.codePreview != null &&
+                          draft.codePreview!.isNotEmpty)
+                        Text(
+                          draft.codePreview!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontFamily: 'monospace'),
+                        ),
+                      Text(
+                        draft.body,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
                   ),
                 ),
               ),

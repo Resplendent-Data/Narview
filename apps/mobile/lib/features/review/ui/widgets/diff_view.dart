@@ -1,28 +1,74 @@
 import 'package:flutter/material.dart';
 import 'package:highlight/highlight.dart' as hl;
 
+class DiffLineAnchor {
+  const DiffLineAnchor({
+    required this.path,
+    required this.line,
+    required this.side,
+    required this.codePreview,
+    required this.isDeletion,
+  });
+
+  final String path;
+  final int line;
+  final String side;
+  final String codePreview;
+  final bool isDeletion;
+
+  String get key => keyFor(path, line, side);
+
+  static String keyFor(String path, int line, String side) {
+    return '$path:$side:$line';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return other is DiffLineAnchor &&
+        other.path == path &&
+        other.line == line &&
+        other.side == side;
+  }
+
+  @override
+  int get hashCode => Object.hash(path, line, side);
+}
+
 class DiffView extends StatelessWidget {
-  const DiffView({super.key, required this.path, required this.patch});
+  const DiffView({
+    super.key,
+    required this.path,
+    required this.patch,
+    this.selectedAnchor,
+    this.threadAnchorKeys = const {},
+    this.draftAnchorKeys = const {},
+    this.onLineTap,
+  });
 
   final String path;
   final String? patch;
+  final DiffLineAnchor? selectedAnchor;
+  final Set<String> threadAnchorKeys;
+  final Set<String> draftAnchorKeys;
+  final ValueChanged<DiffLineAnchor>? onLineTap;
 
   @override
   Widget build(BuildContext context) {
-    final lines = (patch == null || patch!.isEmpty)
+    final rawLines = (patch == null || patch!.isEmpty)
         ? ['Binary or non-text file']
         : patch!.split(RegExp(r'\r?\n'));
+    final lines = _parseDiffLines(path, rawLines);
     final language = _languageForPath(path);
-    final maxLineLength = lines.fold<int>(
+    final maxLineLength = rawLines.fold<int>(
       0,
       (current, line) => line.length > current ? line.length : current,
     );
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final contentWidth = (84 + (maxLineLength * 7.8)).clamp(
+        final contentWidth = (132 + (maxLineLength * 7.8)).clamp(
           constraints.maxWidth,
-          2400.0,
+          2600.0,
         );
 
         return SingleChildScrollView(
@@ -34,59 +80,77 @@ class DiffView extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: 12),
               itemCount: lines.length,
               itemBuilder: (context, index) {
-                final line = _DiffLine.parse(lines[index]);
-                final colors = _lineColors(line.kind);
-                return DecoratedBox(
-                  decoration: BoxDecoration(color: colors.background),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 4,
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SizedBox(
-                          width: 34,
-                          child: Text(
-                            '${index + 1}',
-                            style: TextStyle(
-                              color: Colors.grey.shade600,
-                              fontFeatures: const [
-                                FontFeature.tabularFigures(),
-                              ],
-                              fontSize: 12,
-                            ),
-                            textAlign: TextAlign.right,
-                          ),
+                final line = lines[index];
+                final anchor = line.anchor;
+                final anchorKey = anchor?.key;
+                final selected =
+                    anchor != null &&
+                    selectedAnchor != null &&
+                    anchor == selectedAnchor;
+                final hasThread =
+                    anchorKey != null && threadAnchorKeys.contains(anchorKey);
+                final hasDraft =
+                    anchorKey != null && draftAnchorKeys.contains(anchorKey);
+                final colors = _lineColors(line.kind, selected: selected);
+
+                return Material(
+                  key: anchor == null
+                      ? null
+                      : ValueKey(
+                          'diff-line-${anchor.path}-${anchor.side}-${anchor.line}',
                         ),
-                        const SizedBox(width: 10),
-                        SizedBox(
-                          width: 14,
-                          child: Text(
-                            line.marker,
-                            style: TextStyle(
-                              color: colors.markerForeground,
-                              fontFamily: 'monospace',
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
-                              height: 1.35,
-                            ),
-                          ),
-                        ),
-                        Expanded(
-                          child: RichText(
-                            softWrap: false,
-                            overflow: TextOverflow.visible,
-                            text: TextSpan(
-                              style: _baseCodeStyle(colors.foreground),
-                              children: line.highlight
-                                  ? _highlightSpans(line.code, language)
-                                  : [TextSpan(text: line.code)],
+                  color: colors.background,
+                  child: InkWell(
+                    onTap: anchor == null || onLineTap == null
+                        ? null
+                        : () => onLineTap!(anchor),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 4,
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _LineNumber(value: line.oldLine),
+                          _LineNumber(value: line.newLine),
+                          const SizedBox(width: 8),
+                          SizedBox(
+                            width: 12,
+                            child: Text(
+                              line.marker,
+                              style: TextStyle(
+                                color: colors.markerForeground,
+                                fontFamily: 'monospace',
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13,
+                                height: 1.35,
+                              ),
                             ),
                           ),
-                        ),
-                      ],
+                          const SizedBox(width: 8),
+                          SizedBox(
+                            width: 22,
+                            child: _LineBadges(
+                              hasThread: hasThread,
+                              hasDraft: hasDraft,
+                              selected: selected,
+                            ),
+                          ),
+                          Expanded(
+                            child: RichText(
+                              softWrap: false,
+                              overflow: TextOverflow.visible,
+                              text: TextSpan(
+                                style: _baseCodeStyle(colors.foreground),
+                                children: line.highlight
+                                    ? _highlightSpans(line.code, language)
+                                    : [TextSpan(text: line.code)],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 );
@@ -97,6 +161,174 @@ class DiffView extends StatelessWidget {
       },
     );
   }
+}
+
+class _LineNumber extends StatelessWidget {
+  const _LineNumber({required this.value});
+
+  final int? value;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 30,
+      child: Text(
+        value?.toString() ?? '',
+        style: TextStyle(
+          color: Colors.grey.shade600,
+          fontFeatures: const [FontFeature.tabularFigures()],
+          fontSize: 12,
+        ),
+        textAlign: TextAlign.right,
+      ),
+    );
+  }
+}
+
+class _LineBadges extends StatelessWidget {
+  const _LineBadges({
+    required this.hasThread,
+    required this.hasDraft,
+    required this.selected,
+  });
+
+  final bool hasThread;
+  final bool hasDraft;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!hasThread && !hasDraft && !selected) {
+      return const SizedBox.shrink();
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (hasThread)
+          const Icon(Icons.forum_outlined, color: Color(0xff7c3aed), size: 14),
+        if (hasDraft)
+          const Icon(Icons.edit_note, color: Color(0xffc2410c), size: 16),
+        if (selected && !hasThread && !hasDraft)
+          const Icon(Icons.add_comment, color: Color(0xff0f766e), size: 14),
+      ],
+    );
+  }
+}
+
+List<_RenderedDiffLine> _parseDiffLines(String path, List<String> values) {
+  final lines = <_RenderedDiffLine>[];
+  final headerPattern = RegExp(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@');
+  var oldLine = 0;
+  var newLine = 0;
+
+  for (final value in values) {
+    final header = headerPattern.firstMatch(value);
+    if (header != null) {
+      oldLine = int.parse(header.group(1)!);
+      newLine = int.parse(header.group(2)!);
+      lines.add(
+        _RenderedDiffLine(
+          kind: _DiffLineKind.hunk,
+          marker: '',
+          code: value,
+          highlight: false,
+          oldLine: null,
+          newLine: null,
+          anchor: null,
+        ),
+      );
+      continue;
+    }
+
+    if (value.startsWith('+++') || value.startsWith('---')) {
+      lines.add(
+        _RenderedDiffLine(
+          kind: _DiffLineKind.metadata,
+          marker: '',
+          code: value,
+          highlight: false,
+          oldLine: null,
+          newLine: null,
+          anchor: null,
+        ),
+      );
+      continue;
+    }
+
+    if (value.startsWith('+')) {
+      final code = value.substring(1);
+      final anchor = DiffLineAnchor(
+        path: path,
+        line: newLine,
+        side: 'RIGHT',
+        codePreview: code.trim(),
+        isDeletion: false,
+      );
+      lines.add(
+        _RenderedDiffLine(
+          kind: _DiffLineKind.addition,
+          marker: '+',
+          code: code,
+          highlight: true,
+          oldLine: null,
+          newLine: newLine,
+          anchor: anchor,
+        ),
+      );
+      newLine += 1;
+      continue;
+    }
+
+    if (value.startsWith('-')) {
+      final code = value.substring(1);
+      final anchor = DiffLineAnchor(
+        path: path,
+        line: oldLine,
+        side: 'LEFT',
+        codePreview: code.trim(),
+        isDeletion: true,
+      );
+      lines.add(
+        _RenderedDiffLine(
+          kind: _DiffLineKind.deletion,
+          marker: '-',
+          code: code,
+          highlight: true,
+          oldLine: oldLine,
+          newLine: null,
+          anchor: anchor,
+        ),
+      );
+      oldLine += 1;
+      continue;
+    }
+
+    final code = value.startsWith(' ') ? value.substring(1) : value;
+    final anchor = newLine > 0
+        ? DiffLineAnchor(
+            path: path,
+            line: newLine,
+            side: 'RIGHT',
+            codePreview: code.trim(),
+            isDeletion: false,
+          )
+        : null;
+    lines.add(
+      _RenderedDiffLine(
+        kind: _DiffLineKind.context,
+        marker: '',
+        code: code,
+        highlight: true,
+        oldLine: oldLine > 0 ? oldLine : null,
+        newLine: newLine > 0 ? newLine : null,
+        anchor: anchor,
+      ),
+    );
+    if (oldLine > 0) oldLine += 1;
+    if (newLine > 0) newLine += 1;
+  }
+
+  return lines;
 }
 
 TextStyle _baseCodeStyle(Color foreground) {
@@ -199,7 +431,14 @@ bool _hasAny(String className, List<String> values) {
   return values.any(classes.contains);
 }
 
-_DiffLineColors _lineColors(_DiffLineKind kind) {
+_DiffLineColors _lineColors(_DiffLineKind kind, {required bool selected}) {
+  if (selected) {
+    return const _DiffLineColors(
+      Color(0xfffff7ed),
+      Color(0xff0f172a),
+      Color(0xffc2410c),
+    );
+  }
   switch (kind) {
     case _DiffLineKind.addition:
       return const _DiffLineColors(
@@ -276,67 +515,24 @@ String _languageForPath(String path) {
 
 enum _DiffLineKind { addition, deletion, hunk, metadata, context }
 
-class _DiffLine {
-  const _DiffLine({
+class _RenderedDiffLine {
+  const _RenderedDiffLine({
     required this.kind,
     required this.marker,
     required this.code,
     required this.highlight,
+    required this.oldLine,
+    required this.newLine,
+    required this.anchor,
   });
-
-  factory _DiffLine.parse(String value) {
-    if (value.startsWith('@@')) {
-      return _DiffLine(
-        kind: _DiffLineKind.hunk,
-        marker: '',
-        code: value,
-        highlight: false,
-      );
-    }
-    if (value.startsWith('+++') || value.startsWith('---')) {
-      return _DiffLine(
-        kind: _DiffLineKind.metadata,
-        marker: '',
-        code: value,
-        highlight: false,
-      );
-    }
-    if (value.startsWith('+')) {
-      return _DiffLine(
-        kind: _DiffLineKind.addition,
-        marker: '+',
-        code: value.substring(1),
-        highlight: true,
-      );
-    }
-    if (value.startsWith('-')) {
-      return _DiffLine(
-        kind: _DiffLineKind.deletion,
-        marker: '-',
-        code: value.substring(1),
-        highlight: true,
-      );
-    }
-    if (value.startsWith(' ')) {
-      return _DiffLine(
-        kind: _DiffLineKind.context,
-        marker: '',
-        code: value.substring(1),
-        highlight: true,
-      );
-    }
-    return _DiffLine(
-      kind: _DiffLineKind.context,
-      marker: '',
-      code: value,
-      highlight: true,
-    );
-  }
 
   final _DiffLineKind kind;
   final String marker;
   final String code;
   final bool highlight;
+  final int? oldLine;
+  final int? newLine;
+  final DiffLineAnchor? anchor;
 }
 
 class _DiffLineColors {

@@ -27,7 +27,7 @@ void main() {
     expect(find.text('Review stack rebuild'), findsNothing);
   });
 
-  testWidgets('opens the mobile review flow', (tester) async {
+  testWidgets('opens the mobile review workspace', (tester) async {
     narviewRouter.go('/');
     await tester.pumpWidget(
       ProviderScope(
@@ -49,18 +49,14 @@ void main() {
     await tester.tap(find.text('Review stack rebuild'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Start Review'), findsOneWidget);
-    expect(find.text('Contracts, schema, and setup'), findsOneWidget);
-
-    await tester.tap(find.text('Start Review'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Review'), findsOneWidget);
     expect(find.text('review-stack.graphql'), findsOneWidget);
+    expect(find.text('Next open'), findsOneWidget);
+    expect(find.text('Map'), findsOneWidget);
+    expect(find.text('Focus'), findsOneWidget);
     expect(find.text('Comment'), findsOneWidget);
   });
 
-  testWidgets('opens stacks, files, and toggles viewed state', (tester) async {
+  testWidgets('opens the review map and creates a line draft', (tester) async {
     narviewRouter.go('/');
     await tester.pumpWidget(
       ProviderScope(
@@ -77,25 +73,36 @@ void main() {
 
     await tester.tap(find.text('Review stack rebuild'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Contracts, schema, and setup'));
+
+    await tester.tap(find.byTooltip('Review Map').last);
     await tester.pumpAndSettle();
 
-    expect(find.text('Mark Stack Viewed'), findsOneWidget);
-    expect(find.text('schemas/review-stack.graphql'), findsOneWidget);
+    expect(find.text('Review Map'), findsOneWidget);
+    expect(find.text('Contracts, schema, and setup'), findsOneWidget);
 
-    await tester.tap(find.text('schemas/review-stack.graphql'));
+    await tester.tap(find.text('schemas/review-stack.graphql').last);
     await tester.pumpAndSettle();
 
-    expect(find.text('review-stack.graphql'), findsOneWidget);
-    expect(find.byTooltip('Mark viewed'), findsOneWidget);
-
-    await tester.tap(find.byTooltip('Mark viewed'));
+    await tester.tap(
+      find.byKey(
+        const ValueKey('diff-line-schemas/review-stack.graphql-RIGHT-2'),
+      ),
+    );
     await tester.pumpAndSettle();
 
-    expect(find.byTooltip('Mark unviewed'), findsOneWidget);
+    expect(find.text('Draft Comment'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), 'Needs a nullable check.');
+    await tester.tap(find.text('Save Draft'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('1 drafts'), findsOneWidget);
+    expect(find.textContaining('Line 2 selected'), findsOneWidget);
   });
 
-  testWidgets('review action bar fits a narrow phone viewport', (tester) async {
+  testWidgets('workspace command bar fits a narrow phone viewport', (
+    tester,
+  ) async {
     narviewRouter.go('/');
     tester.view.physicalSize = const Size(393, 852);
     tester.view.devicePixelRatio = 1;
@@ -117,13 +124,11 @@ void main() {
 
     await tester.tap(find.text('Review stack rebuild'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Start Review'));
-    await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    expect(find.byTooltip('Threads'), findsOneWidget);
-    expect(find.byTooltip('Comment'), findsOneWidget);
-    expect(find.byTooltip('Mark Viewed'), findsOneWidget);
+    expect(find.byTooltip('Threads and drafts'), findsOneWidget);
+    expect(find.byTooltip('Add file comment'), findsOneWidget);
+    expect(find.byTooltip('Mark viewed'), findsOneWidget);
   });
 }
 

@@ -277,10 +277,16 @@ class PendingReviewDraft {
     required this.path,
     required this.body,
     required this.targetLabel,
+    this.line,
+    this.side,
+    this.codePreview,
   });
 
   final String id;
   final String path;
   final String body;
   final String targetLabel;
+  final int? line;
+  final String? side;
+  final String? codePreview;
 }
