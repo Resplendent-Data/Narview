@@ -61,7 +61,7 @@ jobs:
           fi
 
           APP_VERSION="${TAG_NAME#v}"
-          node -e "const fs=require('node:fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const tauri=JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json','utf8')); if (pkg.version !== '$APP_VERSION' || tauri.version !== '$APP_VERSION') { throw new Error('Tag $TAG_NAME must match package.json and tauri.conf.json version ' + pkg.version); }"
+          node -e "const fs=require('node:fs'); const pkg=JSON.parse(fs.readFileSync('apps/desktop/package.json','utf8')); const tauri=JSON.parse(fs.readFileSync('apps/desktop/src-tauri/tauri.conf.json','utf8')); if (pkg.version !== '$APP_VERSION' || tauri.version !== '$APP_VERSION') { throw new Error('Tag $TAG_NAME must match desktop package.json and tauri.conf.json version ' + pkg.version); }"
 
           for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
             if [[ -z "${!name:-}" ]]; then
@@ -90,7 +90,7 @@ jobs:
       - name: Cache Rust builds
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./src-tauri -> target"
+          workspaces: "./apps/desktop/src-tauri -> target"
 
       - name: Install frontend dependencies
         run: npm ci
@@ -105,6 +105,7 @@ jobs:
         run: npm run build
 
       - name: Prepare Tauri release config
+        working-directory: apps/desktop
         run: node scripts/prepare-tauri-release-config.mjs --output src-tauri/tauri.release.generated.conf.json
 
       - name: Build, sign, and publish Tauri artifacts
@@ -115,6 +116,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          projectPath: apps/desktop
           tagName: ${{ env.TAG_NAME }}
           releaseName: Narview ${{ env.TAG_NAME }}
           releaseBody: |
@@ -149,4 +151,4 @@ jobs:
           args: ${{ matrix.args }}
 
       - name: Verify release artifact paths
-        run: node scripts/verify-release-artifacts.mjs --platform "${{ matrix.artifactPlatform }}" --artifact-paths '${{ steps.tauri.outputs.artifactPaths }}'
+        run: node apps/desktop/scripts/verify-release-artifacts.mjs --platform "${{ matrix.artifactPlatform }}" --artifact-paths '${{ steps.tauri.outputs.artifactPaths }}'

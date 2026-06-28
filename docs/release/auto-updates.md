@@ -20,4 +20,4 @@ GitHub's latest release endpoint ignores prereleases. Because Narview's updater 
 
 Existing `0.1.0-rc.4` and `0.1.0-rc.5` installs cannot auto-update into the new signed channel because those builds were shipped without trusted signed updater metadata. Install the next signed release manually once; automatic updates should work from that build onward as long as the updater key is preserved.
 
-Only replace the runtime updater public key in `src-tauri/tauri.conf.json` when intentionally rotating the matching private key. Losing either the private key or its password breaks automatic updates for already-installed builds.
+Only replace the runtime updater public key in `apps/desktop/src-tauri/tauri.conf.json` when intentionally rotating the matching private key. Losing either the private key or its password breaks automatic updates for already-installed builds.

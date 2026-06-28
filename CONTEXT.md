@@ -8,6 +8,18 @@ Narview helps teams review GitHub pull requests through a GitHub-first **Review 
 The user's saved set of GitHub repositories to review in Narview.
 _Avoid_: Organization, team, account
 
+**Narview Client**:
+An installed Narview experience that can complete the core GitHub pull request review workflow for a reviewer.
+_Avoid_: Companion app, viewer-only app
+
+**Desktop Client**:
+The Narview client optimized for large-screen review work, deep inspection, and desktop-native capabilities.
+_Avoid_: Main app, real app
+
+**Mobile Client**:
+The Narview client optimized for phone and tablet review work while still supporting a complete GitHub pull request review loop.
+_Avoid_: Companion app, read-only app, triage app
+
 **Pull Request**:
 A GitHub request to merge a set of commits from one branch into another.
 _Avoid_: Change request, merge request
@@ -111,6 +123,9 @@ _Avoid_: Approval speed, comment volume, merge velocity
 ## Relationships
 
 - A **Workspace** contains zero or more GitHub repositories.
+- A **Narview Client** is either a **Desktop Client** or **Mobile Client**.
+- A **Narview Client** supports the core workflow of opening a **Pull Request**, inspecting review data, handling **Review Threads**, marking **Viewed** state, and submitting review feedback when the reviewer has permission.
+- A **Mobile Client** can complete the core review loop from GitHub pull request data without requiring a **Review Clone**.
 - A **Pull Request** belongs to exactly one GitHub repository.
 - A **Pull Request** contains one or more **File Changes**.
 - A **Pull Request** is inspected through one **Review Workspace**.

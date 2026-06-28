@@ -1,0 +1,183 @@
+{
+  "name": "review-stack-basic",
+  "input": {
+    "files": [
+      {
+        "path": "schemas/review-stack.graphql",
+        "previousPath": null,
+        "additions": 10,
+        "deletions": 1,
+        "status": "modified",
+        "patch": "@@ -1,3 +1,7 @@\n type PullRequest {\n+  reviewStacks: [ReviewStack!]!\n+  viewerViewedState: FileViewedState!\n }",
+        "viewerViewedState": "UNVIEWED"
+      },
+      {
+        "path": "src/review/stacks.ts",
+        "previousPath": null,
+        "additions": 88,
+        "deletions": 12,
+        "status": "modified",
+        "patch": "@@ -8,6 +8,9 @@\n export function buildReviewStackModel(files) {\n+  return groupFiles(files);\n }",
+        "viewerViewedState": "UNVIEWED"
+      },
+      {
+        "path": "src/components/review-stack-workspace.tsx",
+        "previousPath": null,
+        "additions": 45,
+        "deletions": 5,
+        "status": "modified",
+        "patch": "@@ -12,6 +12,9 @@\n export function ReviewWorkspace() {\n+  return <ReviewStackRail />;\n }",
+        "viewerViewedState": "VIEWED"
+      },
+      {
+        "path": "src/review/stacks.test.ts",
+        "previousPath": null,
+        "additions": 12,
+        "deletions": 0,
+        "status": "modified",
+        "patch": "@@ -0,0 +1,5 @@\n+import { buildReviewStackModel } from './stacks';\n+\n+it('groups files', () => {});",
+        "viewerViewedState": "UNVIEWED"
+      },
+      {
+        "path": "docs/review.md",
+        "previousPath": null,
+        "additions": 5,
+        "deletions": 0,
+        "status": "added",
+        "patch": "@@ -0,0 +1,3 @@\n+# Review workflow\n+\n+Use stacks.",
+        "viewerViewedState": "UNKNOWN"
+      },
+      {
+        "path": "package-lock.json",
+        "previousPath": null,
+        "additions": 1,
+        "deletions": 1,
+        "status": "modified",
+        "patch": null,
+        "viewerViewedState": "UNVIEWED"
+      }
+    ],
+    "reviewThreads": [
+      {
+        "id": "thread-core",
+        "authorLogin": "octocat",
+        "filePath": "src/review/stacks.ts",
+        "line": 9,
+        "state": "unresolved",
+        "body": "Please double-check stack grouping.",
+        "updatedAt": "2026-06-01T12:00:00Z",
+        "comments": []
+      },
+      {
+        "id": "thread-ui",
+        "authorLogin": "hubot",
+        "filePath": "src/components/review-stack-workspace.tsx",
+        "line": 13,
+        "state": "resolved",
+        "body": "Resolved UI note.",
+        "updatedAt": "2026-06-01T12:30:00Z",
+        "comments": []
+      }
+    ]
+  },
+  "expected": {
+    "stacks": [
+      {
+        "title": "Contracts, schema, and setup",
+        "kind": "contracts",
+        "filePaths": ["schemas/review-stack.graphql"],
+        "viewedFileCount": 0,
+        "totalFileCount": 1,
+        "commentCount": 0,
+        "layers": [
+          {
+            "title": "review-stack.graphql",
+            "filePaths": ["schemas/review-stack.graphql"],
+            "viewedState": "unviewed",
+            "commentCount": 0
+          }
+        ]
+      },
+      {
+        "title": "Core: src/review",
+        "kind": "core",
+        "filePaths": ["src/review/stacks.ts"],
+        "viewedFileCount": 0,
+        "totalFileCount": 1,
+        "commentCount": 1,
+        "layers": [
+          {
+            "title": "stacks.ts",
+            "filePaths": ["src/review/stacks.ts"],
+            "viewedState": "unviewed",
+            "commentCount": 1
+          }
+        ]
+      },
+      {
+        "title": "Interface: src/components",
+        "kind": "interface",
+        "filePaths": ["src/components/review-stack-workspace.tsx"],
+        "viewedFileCount": 1,
+        "totalFileCount": 1,
+        "commentCount": 1,
+        "layers": [
+          {
+            "title": "review-stack-workspace.tsx",
+            "filePaths": ["src/components/review-stack-workspace.tsx"],
+            "viewedState": "viewed",
+            "commentCount": 1
+          }
+        ]
+      },
+      {
+        "title": "Tests for src/review",
+        "kind": "tests",
+        "filePaths": ["src/review/stacks.test.ts"],
+        "viewedFileCount": 0,
+        "totalFileCount": 1,
+        "commentCount": 0,
+        "layers": [
+          {
+            "title": "stacks.test.ts",
+            "filePaths": ["src/review/stacks.test.ts"],
+            "viewedState": "unviewed",
+            "commentCount": 0
+          }
+        ]
+      },
+      {
+        "title": "Docs and release notes",
+        "kind": "docs",
+        "filePaths": ["docs/review.md"],
+        "viewedFileCount": 0,
+        "totalFileCount": 1,
+        "commentCount": 0,
+        "layers": [
+          {
+            "title": "review.md",
+            "filePaths": ["docs/review.md"],
+            "viewedState": "unviewed",
+            "commentCount": 0
+          }
+        ]
+      },
+      {
+        "title": "Generated and low-signal files",
+        "kind": "generated",
+        "filePaths": ["package-lock.json"],
+        "viewedFileCount": 0,
+        "totalFileCount": 1,
+        "commentCount": 0,
+        "layers": [
+          {
+            "title": "package-lock.json",
+            "filePaths": ["package-lock.json"],
+            "viewedState": "unviewed",
+            "commentCount": 0
+          }
+        ]
+      }
+    ]
+  }
+}
