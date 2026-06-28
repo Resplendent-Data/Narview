@@ -43,6 +43,7 @@ dependencies:
   intl: ^0.20.3
   flutter_markdown_plus: ^1.0.7
   url_launcher: ^6.3.2
+  highlight: ^0.7.0
 
 dev_dependencies:
   flutter_test:
