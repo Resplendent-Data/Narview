@@ -75,18 +75,21 @@ class PullRequestOverviewScreen extends ConsumerWidget {
                             ),
                           ],
                         ),
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          onPressed: () => context.go(identity.reviewRoutePath),
+                          icon: const Icon(Icons.play_arrow),
+                          label: const Text('Start Review'),
+                        ),
                       ],
                     ),
                   ),
                 ),
                 const SizedBox(height: 8),
-                for (final stack in model.stacks)
-                  Card(
-                    child: ListTile(
-                      title: Text(stack.title),
-                      subtitle: Text(getStackProgressLabel(stack)),
-                      trailing: Text('${stack.commentCount}'),
-                    ),
+                for (var index = 0; index < model.stacks.length; index += 1)
+                  _StackCard(
+                    stack: model.stacks[index],
+                    onTap: () => context.go(identity.stackRoutePath(index)),
                   ),
               ],
             ),
@@ -99,14 +102,53 @@ class PullRequestOverviewScreen extends ConsumerWidget {
               Center(child: Text('Could not load pull request: $error')),
         ),
       ),
-      bottomNavigationBar: SafeArea(
-        minimum: const EdgeInsets.all(12),
-        child: FilledButton.icon(
-          onPressed: () => context.go(identity.reviewRoutePath),
-          icon: const Icon(Icons.play_arrow),
-          label: const Text('Start Review'),
+    );
+  }
+}
+
+class _StackCard extends StatelessWidget {
+  const _StackCard({required this.stack, required this.onTap});
+
+  final ReviewStack stack;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: ListTile(
+        leading: _StackProgressIcon(stack: stack),
+        title: Text(stack.title),
+        subtitle: Text(getStackProgressLabel(stack)),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (stack.commentCount > 0)
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Text('${stack.commentCount}'),
+              ),
+            const Icon(Icons.chevron_right),
+          ],
         ),
+        onTap: onTap,
       ),
+    );
+  }
+}
+
+class _StackProgressIcon extends StatelessWidget {
+  const _StackProgressIcon({required this.stack});
+
+  final ReviewStack stack;
+
+  @override
+  Widget build(BuildContext context) {
+    final fullyViewed =
+        stack.totalFileCount > 0 &&
+        stack.viewedFileCount == stack.totalFileCount;
+    return Icon(
+      fullyViewed ? Icons.check_circle : Icons.radio_button_unchecked,
+      color: fullyViewed ? Colors.green.shade700 : Colors.grey.shade600,
     );
   }
 }

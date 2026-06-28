@@ -14,6 +14,11 @@ class PullRequestIdentity {
 
   String get submitRoutePath => '/pulls/$owner/$name/$number/submit-review';
 
+  String stackRoutePath(int stackIndex) => '$routePath/stacks/$stackIndex';
+
+  String fileRoutePath(int stackIndex, int fileIndex) =>
+      '${stackRoutePath(stackIndex)}/files/$fileIndex';
+
   @override
   bool operator ==(Object other) {
     return other is PullRequestIdentity &&
@@ -126,6 +131,20 @@ class CheckRun {
   final String name;
   final String status;
   final String? conclusion;
+}
+
+class FileViewedActionResult {
+  const FileViewedActionResult({
+    required this.ok,
+    required this.path,
+    required this.viewerViewedState,
+    required this.message,
+  });
+
+  final bool ok;
+  final String path;
+  final String viewerViewedState;
+  final String message;
 }
 
 class PullRequestReviewData {

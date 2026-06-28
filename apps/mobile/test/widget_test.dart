@@ -60,6 +60,41 @@ void main() {
     expect(find.text('Comment'), findsOneWidget);
   });
 
+  testWidgets('opens stacks, files, and toggles viewed state', (tester) async {
+    narviewRouter.go('/');
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authRepositoryProvider.overrideWithValue(
+            const _FakeAuthRepository(AuthSession.signedIn(login: 'tester')),
+          ),
+          reviewRepositoryProvider.overrideWithValue(FixtureReviewRepository()),
+        ],
+        child: const NarviewApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Review stack rebuild'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Contracts, schema, and setup'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Mark Stack Viewed'), findsOneWidget);
+    expect(find.text('schemas/review-stack.graphql'), findsOneWidget);
+
+    await tester.tap(find.text('schemas/review-stack.graphql'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('review-stack.graphql'), findsOneWidget);
+    expect(find.byTooltip('Mark viewed'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Mark viewed'));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Mark unviewed'), findsOneWidget);
+  });
+
   testWidgets('review action bar fits a narrow phone viewport', (tester) async {
     narviewRouter.go('/');
     tester.view.physicalSize = const Size(393, 852);

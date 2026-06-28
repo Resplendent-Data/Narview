@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../data/review_repository.dart';
 import '../domain/review_models.dart';
+import 'review_viewed_actions.dart';
 import 'widgets/diff_view.dart';
 
 class ReviewModeScreen extends ConsumerStatefulWidget {
@@ -24,6 +25,7 @@ class ReviewModeScreen extends ConsumerStatefulWidget {
 
 class _ReviewModeScreenState extends ConsumerState<ReviewModeScreen> {
   int _layerIndex = 0;
+  final Set<String> _viewedBusyPaths = {};
 
   @override
   Widget build(BuildContext context) {
@@ -54,10 +56,13 @@ class _ReviewModeScreenState extends ConsumerState<ReviewModeScreen> {
         child: data.when(
           data: (reviewData) => stackModel.when(
             data: (model) => _ReviewContent(
+              identity: identity,
               data: reviewData,
               model: model,
               layerIndex: _layerIndex,
+              viewedBusyPaths: _viewedBusyPaths,
               onSelectLayer: (index) => setState(() => _layerIndex = index),
+              onToggleViewed: _toggleFileViewed,
             ),
             loading: () => const Center(child: CircularProgressIndicator()),
             error: (error, stackTrace) =>
@@ -70,20 +75,47 @@ class _ReviewModeScreenState extends ConsumerState<ReviewModeScreen> {
       ),
     );
   }
+
+  Future<void> _toggleFileViewed(
+    PullRequestIdentity identity,
+    ReviewStackFile file,
+  ) async {
+    if (_viewedBusyPaths.contains(file.path)) {
+      return;
+    }
+    setState(() => _viewedBusyPaths.add(file.path));
+    await syncFileViewedChange(
+      context: context,
+      ref: ref,
+      identity: identity,
+      file: file,
+      viewed: file.viewerViewedState != 'VIEWED',
+    );
+    if (mounted) {
+      setState(() => _viewedBusyPaths.remove(file.path));
+    }
+  }
 }
 
 class _ReviewContent extends ConsumerWidget {
   const _ReviewContent({
+    required this.identity,
     required this.data,
     required this.model,
     required this.layerIndex,
+    required this.viewedBusyPaths,
     required this.onSelectLayer,
+    required this.onToggleViewed,
   });
 
+  final PullRequestIdentity identity;
   final PullRequestReviewData data;
   final ReviewStackModel model;
   final int layerIndex;
+  final Set<String> viewedBusyPaths;
   final ValueChanged<int> onSelectLayer;
+  final void Function(PullRequestIdentity identity, ReviewStackFile file)
+  onToggleViewed;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -98,6 +130,9 @@ class _ReviewContent extends ConsumerWidget {
     final threads = data.reviewThreads
         .where((thread) => thread.filePath == selectedPath)
         .toList();
+    final viewed = selectedFile?.viewerViewedState == 'VIEWED';
+    final viewedBusy =
+        selectedFile != null && viewedBusyPaths.contains(selectedFile.path);
 
     return Column(
       children: [
@@ -133,9 +168,11 @@ class _ReviewContent extends ConsumerWidget {
           onNext: () => onSelectLayer(layerIndex + 1),
           onThreads: () => _showThreads(context, threads),
           onComment: () => _showComposer(context, ref, selectedPath),
-          viewedLabel: selectedLayer.viewedState == 'viewed'
-              ? 'Viewed'
-              : 'Mark Viewed',
+          viewedLabel: viewed ? 'Viewed' : 'Mark Viewed',
+          viewedBusy: viewedBusy,
+          onViewed: selectedFile == null
+              ? null
+              : () => onToggleViewed(identity, selectedFile),
         ),
       ],
     );
@@ -151,6 +188,8 @@ class _ReviewActionBar extends StatelessWidget {
     required this.onThreads,
     required this.onComment,
     required this.viewedLabel,
+    required this.viewedBusy,
+    required this.onViewed,
   });
 
   final bool canGoBack;
@@ -160,6 +199,8 @@ class _ReviewActionBar extends StatelessWidget {
   final VoidCallback onThreads;
   final VoidCallback onComment;
   final String viewedLabel;
+  final bool viewedBusy;
+  final VoidCallback? onViewed;
 
   @override
   Widget build(BuildContext context) {
@@ -196,8 +237,10 @@ class _ReviewActionBar extends StatelessWidget {
                   ),
                   _CompactActionButton(
                     tooltip: viewedLabel,
-                    onPressed: () {},
-                    icon: Icons.check,
+                    onPressed: viewedBusy ? null : onViewed,
+                    icon: viewedLabel == 'Viewed'
+                        ? Icons.check_circle
+                        : Icons.radio_button_unchecked,
                     filled: true,
                   ),
                 ],
@@ -228,8 +271,12 @@ class _ReviewActionBar extends StatelessWidget {
                   label: const Text('Comment'),
                 ),
                 FilledButton.icon(
-                  onPressed: () {},
-                  icon: const Icon(Icons.check),
+                  onPressed: viewedBusy ? null : onViewed,
+                  icon: Icon(
+                    viewedLabel == 'Viewed'
+                        ? Icons.check_circle
+                        : Icons.radio_button_unchecked,
+                  ),
                   label: Text(viewedLabel),
                 ),
               ],

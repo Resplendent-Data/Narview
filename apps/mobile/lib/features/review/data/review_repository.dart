@@ -11,6 +11,12 @@ abstract class ReviewRepository {
   Future<List<PullRequestSummary>> listPullRequests();
 
   Future<PullRequestReviewData> fetchPullRequest(String repository, int number);
+
+  Future<FileViewedActionResult> setFileViewed({
+    required PullRequestIdentity identity,
+    required String path,
+    required bool viewed,
+  });
 }
 
 final reviewRepositoryProvider = Provider<ReviewRepository>(
@@ -39,11 +45,39 @@ final reviewStackModelProvider =
       final data = await ref.watch(
         pullRequestReviewDataProvider(identity).future,
       );
+      final viewedOverrides =
+          ref.watch(viewedOverridesProvider)[identity] ?? const {};
       return ReviewStackBuilder().build(
         files: data.files,
         reviewThreads: data.reviewThreads,
+        viewedOverrides: viewedOverrides,
       );
     });
+
+final viewedOverridesProvider =
+    NotifierProvider<ViewedOverridesNotifier, ViewedOverridesByPullRequest>(
+      ViewedOverridesNotifier.new,
+    );
+
+typedef ViewedOverridesByPullRequest =
+    Map<PullRequestIdentity, Map<String, String>>;
+
+class ViewedOverridesNotifier extends Notifier<ViewedOverridesByPullRequest> {
+  @override
+  ViewedOverridesByPullRequest build() => const {};
+
+  void setFileState(
+    PullRequestIdentity identity,
+    String path,
+    String viewedState,
+  ) {
+    final current = state[identity] ?? const <String, String>{};
+    state = {
+      ...state,
+      identity: {...current, path: viewedState},
+    };
+  }
+}
 
 final pendingDraftsProvider =
     NotifierProvider<PendingDraftsNotifier, List<PendingReviewDraft>>(
@@ -118,12 +152,19 @@ class GithubReviewRepository implements ReviewRepository {
       Uri.https('api.github.com', '/repos/$repository/pulls/$number'),
     );
     final pullRequest = _pullRequestFromDetail(repository, detail);
-    final files = (await _getPaginatedArray(
+    final rawFiles = await _getPaginatedArray(
       token,
       Uri.https('api.github.com', '/repos/$repository/pulls/$number/files', {
         'per_page': '100',
       }),
-    )).map(_fileFromJson).toList();
+    );
+    final viewedStates = await _fetchViewedStates(
+      token,
+      PullRequestIdentity(repository: repository, number: number),
+    ).catchError((_) => const <String, String>{});
+    final files = rawFiles
+        .map((file) => _fileFromJson(file, viewedStates))
+        .toList();
     final comments = await _getPaginatedArray(
       token,
       Uri.https('api.github.com', '/repos/$repository/pulls/$number/comments', {
@@ -144,6 +185,37 @@ class GithubReviewRepository implements ReviewRepository {
       reviewThreads: comments.map(_threadFromReviewComment).toList(),
       checks: checks,
       fetchedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  @override
+  Future<FileViewedActionResult> setFileViewed({
+    required PullRequestIdentity identity,
+    required String path,
+    required bool viewed,
+  }) async {
+    final trimmedPath = path.trim();
+    if (trimmedPath.isEmpty) {
+      throw const ReviewRepositoryException('File path is required.');
+    }
+
+    final token = await _requireToken();
+    final pullRequestId = await _fetchPullRequestNodeId(token, identity);
+    final mutation = viewed
+        ? 'mutation MarkFileViewed(\$input: MarkFileAsViewedInput!) { markFileAsViewed(input: \$input) { pullRequest { id } } }'
+        : 'mutation UnmarkFileViewed(\$input: UnmarkFileAsViewedInput!) { unmarkFileAsViewed(input: \$input) { pullRequest { id } } }';
+
+    await _postGraphql(token, mutation, {
+      'input': {'pullRequestId': pullRequestId, 'path': trimmedPath},
+    });
+
+    return FileViewedActionResult(
+      ok: true,
+      path: trimmedPath,
+      viewerViewedState: viewed ? 'VIEWED' : 'UNVIEWED',
+      message: viewed
+          ? 'File marked viewed on GitHub.'
+          : 'File marked unviewed on GitHub.',
     );
   }
 
@@ -176,6 +248,89 @@ class GithubReviewRepository implements ReviewRepository {
     final items = (json['items'] as List<dynamic>? ?? const [])
         .whereType<Map<String, dynamic>>();
     return items.map(_pullRequestFromSearchItem).toList();
+  }
+
+  Future<Map<String, String>> _fetchViewedStates(
+    String token,
+    PullRequestIdentity identity,
+  ) async {
+    final states = <String, String>{};
+    String? cursor;
+    var page = 1;
+
+    while (page <= 5) {
+      final data = await _postGraphql(
+        token,
+        'query NarviewViewedFiles(\$owner: String!, \$name: String!, \$number: Int!, \$cursor: String) { repository(owner: \$owner, name: \$name) { pullRequest(number: \$number) { files(first: 100, after: \$cursor) { pageInfo { hasNextPage endCursor } nodes { path viewerViewedState } } } } }',
+        {
+          'owner': identity.owner,
+          'name': identity.name,
+          'number': identity.number,
+          'cursor': cursor,
+        },
+      );
+      final repository = data['repository'];
+      final pullRequest = repository is Map<String, dynamic>
+          ? repository['pullRequest']
+          : null;
+      final files = pullRequest is Map<String, dynamic>
+          ? pullRequest['files']
+          : null;
+      if (files is! Map<String, dynamic>) {
+        return states;
+      }
+
+      final nodes = files['nodes'];
+      if (nodes is List<dynamic>) {
+        for (final node in nodes.whereType<Map<String, dynamic>>()) {
+          final path = node['path'] as String?;
+          final viewedState = node['viewerViewedState'] as String?;
+          if (path != null && viewedState != null) {
+            states[path] = viewedState;
+          }
+        }
+      }
+
+      final pageInfo = files['pageInfo'];
+      final hasNextPage = pageInfo is Map<String, dynamic>
+          ? pageInfo['hasNextPage'] as bool? ?? false
+          : false;
+      if (!hasNextPage) {
+        break;
+      }
+      cursor = pageInfo['endCursor'] as String?;
+      page += 1;
+    }
+
+    return states;
+  }
+
+  Future<String> _fetchPullRequestNodeId(
+    String token,
+    PullRequestIdentity identity,
+  ) async {
+    final data = await _postGraphql(
+      token,
+      'query NarviewPullRequestId(\$owner: String!, \$name: String!, \$number: Int!) { repository(owner: \$owner, name: \$name) { pullRequest(number: \$number) { id } } }',
+      {
+        'owner': identity.owner,
+        'name': identity.name,
+        'number': identity.number,
+      },
+    );
+    final repository = data['repository'];
+    final pullRequest = repository is Map<String, dynamic>
+        ? repository['pullRequest']
+        : null;
+    final id = pullRequest is Map<String, dynamic>
+        ? pullRequest['id'] as String?
+        : null;
+    if (id == null || id.isEmpty) {
+      throw const ReviewRepositoryException(
+        'Could not find Pull Request on GitHub.',
+      );
+    }
+    return id;
   }
 
   Future<List<CheckRun>> _fetchChecks(
@@ -221,6 +376,46 @@ class GithubReviewRepository implements ReviewRepository {
     final decoded = jsonDecode(response.body);
     if (decoded is Map<String, dynamic>) {
       return decoded;
+    }
+    throw const ReviewRepositoryException(
+      'GitHub returned an unexpected response.',
+    );
+  }
+
+  Future<Map<String, dynamic>> _postGraphql(
+    String token,
+    String query,
+    Map<String, Object?> variables,
+  ) async {
+    final response = await _httpClient.post(
+      Uri.https('api.github.com', '/graphql'),
+      headers: {..._headers(token), 'content-type': 'application/json'},
+      body: jsonEncode({'query': query, 'variables': variables}),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ReviewRepositoryException(
+        'GitHub returned HTTP ${response.statusCode}.',
+      );
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map<String, dynamic>) {
+      throw const ReviewRepositoryException(
+        'GitHub returned an unexpected response.',
+      );
+    }
+    final errors = decoded['errors'];
+    if (errors is List<dynamic> && errors.isNotEmpty) {
+      final first = errors.first;
+      final message = first is Map<String, dynamic>
+          ? first['message'] as String?
+          : null;
+      throw ReviewRepositoryException(
+        message ?? 'GitHub returned a GraphQL error.',
+      );
+    }
+    final data = decoded['data'];
+    if (data is Map<String, dynamic>) {
+      return data;
     }
     throw const ReviewRepositoryException(
       'GitHub returned an unexpected response.',
@@ -281,6 +476,20 @@ class FixtureReviewRepository implements ReviewRepository {
       reviewThreads: _threads,
       checks: _checks,
       fetchedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  @override
+  Future<FileViewedActionResult> setFileViewed({
+    required PullRequestIdentity identity,
+    required String path,
+    required bool viewed,
+  }) async {
+    return FileViewedActionResult(
+      ok: true,
+      path: path,
+      viewerViewedState: viewed ? 'VIEWED' : 'UNVIEWED',
+      message: viewed ? 'File marked viewed.' : 'File marked unviewed.',
     );
   }
 }
@@ -349,16 +558,17 @@ PullRequestSummary _pullRequestFromDetail(
   );
 }
 
-FileSummary _fileFromJson(dynamic value) {
+FileSummary _fileFromJson(dynamic value, Map<String, String> viewedStates) {
   final json = value as Map<String, dynamic>;
+  final path = json['filename'] as String? ?? 'unknown';
   return FileSummary(
-    path: json['filename'] as String? ?? 'unknown',
+    path: path,
     previousPath: json['previous_filename'] as String?,
     additions: json['additions'] as int? ?? 0,
     deletions: json['deletions'] as int? ?? 0,
     status: json['status'] as String? ?? 'modified',
     patch: json['patch'] as String?,
-    viewerViewedState: 'UNKNOWN',
+    viewerViewedState: viewedStates[path] ?? 'UNKNOWN',
   );
 }
 
