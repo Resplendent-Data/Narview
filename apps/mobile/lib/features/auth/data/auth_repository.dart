@@ -46,8 +46,12 @@ class GithubDeviceAuthRepository implements AuthRepository {
       return const AuthSession.signedOut();
     }
 
-    final user = await _fetchViewer(token);
-    return AuthSession.signedIn(login: user.login);
+    try {
+      final user = await _fetchViewer(token);
+      return AuthSession.signedIn(login: user.login);
+    } catch (_) {
+      return const AuthSession.signedIn(login: 'GitHub');
+    }
   }
 
   @override
@@ -97,7 +101,9 @@ class GithubDeviceAuthRepository implements AuthRepository {
     final accessToken = json['access_token'] as String?;
     if (accessToken != null && accessToken.isNotEmpty) {
       await _tokenStore.writeToken(accessToken);
-      final user = await _fetchViewer(accessToken);
+      final user = await _fetchViewer(
+        accessToken,
+      ).catchError((_) => const _GithubUser(login: 'GitHub'));
       return OAuthPollResponse.authorized(
         AuthSession.signedIn(login: user.login),
       );

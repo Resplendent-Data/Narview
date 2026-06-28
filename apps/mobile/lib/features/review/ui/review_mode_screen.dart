@@ -156,38 +156,102 @@ class _ReviewActionBar extends StatelessWidget {
       child: SafeArea(
         top: false,
         minimum: const EdgeInsets.fromLTRB(8, 8, 8, 8),
-        child: Row(
-          children: [
-            IconButton(
-              tooltip: 'Previous',
-              onPressed: canGoBack ? onBack : null,
-              icon: const Icon(Icons.chevron_left),
-            ),
-            IconButton(
-              tooltip: 'Next',
-              onPressed: canGoNext ? onNext : null,
-              icon: const Icon(Icons.chevron_right),
-            ),
-            const Spacer(),
-            TextButton.icon(
-              onPressed: onThreads,
-              icon: const Icon(Icons.forum_outlined),
-              label: const Text('Threads'),
-            ),
-            TextButton.icon(
-              onPressed: onComment,
-              icon: const Icon(Icons.add_comment_outlined),
-              label: const Text('Comment'),
-            ),
-            FilledButton.icon(
-              onPressed: () {},
-              icon: const Icon(Icons.check),
-              label: Text(viewedLabel),
-            ),
-          ],
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            if (constraints.maxWidth < 480) {
+              return Row(
+                children: [
+                  _CompactActionButton(
+                    tooltip: 'Previous',
+                    onPressed: canGoBack ? onBack : null,
+                    icon: Icons.chevron_left,
+                  ),
+                  _CompactActionButton(
+                    tooltip: 'Next',
+                    onPressed: canGoNext ? onNext : null,
+                    icon: Icons.chevron_right,
+                  ),
+                  _CompactActionButton(
+                    tooltip: 'Threads',
+                    onPressed: onThreads,
+                    icon: Icons.forum_outlined,
+                  ),
+                  _CompactActionButton(
+                    tooltip: 'Comment',
+                    onPressed: onComment,
+                    icon: Icons.add_comment_outlined,
+                  ),
+                  _CompactActionButton(
+                    tooltip: viewedLabel,
+                    onPressed: () {},
+                    icon: Icons.check,
+                    filled: true,
+                  ),
+                ],
+              );
+            }
+
+            return Row(
+              children: [
+                IconButton(
+                  tooltip: 'Previous',
+                  onPressed: canGoBack ? onBack : null,
+                  icon: const Icon(Icons.chevron_left),
+                ),
+                IconButton(
+                  tooltip: 'Next',
+                  onPressed: canGoNext ? onNext : null,
+                  icon: const Icon(Icons.chevron_right),
+                ),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: onThreads,
+                  icon: const Icon(Icons.forum_outlined),
+                  label: const Text('Threads'),
+                ),
+                TextButton.icon(
+                  onPressed: onComment,
+                  icon: const Icon(Icons.add_comment_outlined),
+                  label: const Text('Comment'),
+                ),
+                FilledButton.icon(
+                  onPressed: () {},
+                  icon: const Icon(Icons.check),
+                  label: Text(viewedLabel),
+                ),
+              ],
+            );
+          },
         ),
       ),
     );
+  }
+}
+
+class _CompactActionButton extends StatelessWidget {
+  const _CompactActionButton({
+    required this.tooltip,
+    required this.onPressed,
+    required this.icon,
+    this.filled = false,
+  });
+
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final IconData icon;
+  final bool filled;
+
+  @override
+  Widget build(BuildContext context) {
+    final button = filled
+        ? IconButton.filled(
+            tooltip: tooltip,
+            onPressed: onPressed,
+            icon: Icon(icon),
+          )
+        : IconButton(tooltip: tooltip, onPressed: onPressed, icon: Icon(icon));
+
+    return Expanded(child: Center(child: button));
   }
 }
 

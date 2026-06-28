@@ -204,31 +204,72 @@ class _GitHubSignInCardState extends ConsumerState<_GitHubSignInCard> {
       _message = 'Starting GitHub sign-in...';
     });
 
+    OAuthStartResponse flow;
     try {
       final auth = ref.read(authRepositoryProvider);
-      final flow = await auth.startSignIn();
-      if (!mounted) return;
-      setState(() {
-        _flow = flow;
-        _message = 'Approve Narview in GitHub, then return here.';
-      });
-
-      await launchUrl(flow.browserUri, mode: LaunchMode.externalApplication);
-      await _pollUntilDone(flow);
+      flow = await auth.startSignIn();
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _message = 'Could not start GitHub sign-in: $error';
         _busy = false;
       });
+      return;
     }
+
+    if (!mounted) return;
+    setState(() {
+      _flow = flow;
+      _message = 'Approve Narview in GitHub, then return here.';
+    });
+
+    try {
+      final opened = await launchUrl(
+        flow.browserUri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened && mounted) {
+        setState(() {
+          _message =
+              'Open ${flow.verificationUri} and enter the code, then return here.';
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _message =
+              'Open ${flow.verificationUri} and enter the code, then return here.';
+        });
+      }
+    }
+
+    await _pollUntilDone(flow);
   }
 
   Future<void> _pollUntilDone(OAuthStartResponse flow) async {
     var intervalSeconds = flow.intervalSeconds;
     while (mounted) {
       await Future<void>.delayed(Duration(seconds: intervalSeconds));
-      final response = await ref.read(authRepositoryProvider).pollSignIn(flow);
+      OAuthPollResponse response;
+      try {
+        response = await ref.read(authRepositoryProvider).pollSignIn(flow);
+      } catch (_) {
+        if (!mounted) return;
+        if (DateTime.now().isAfter(flow.expiresAt)) {
+          setState(() {
+            _message =
+                'GitHub sign-in expired. Start again when the network is available.';
+            _busy = false;
+          });
+          return;
+        }
+        intervalSeconds = intervalSeconds < 5 ? 5 : intervalSeconds;
+        setState(() {
+          _message =
+              'Network issue while checking GitHub. Keep this screen open; retrying in ${intervalSeconds}s.';
+        });
+        continue;
+      }
       if (!mounted) return;
 
       switch (response.state) {

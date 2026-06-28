@@ -1,10 +1,13 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:narview_mobile/app/narview_app.dart';
+import 'package:narview_mobile/app/router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:narview_mobile/features/auth/data/auth_repository.dart';
 
 void main() {
   testWidgets('opens the mobile review flow', (tester) async {
+    narviewRouter.go('/');
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -31,6 +34,34 @@ void main() {
     expect(find.text('Review'), findsOneWidget);
     expect(find.text('review-stack.graphql'), findsOneWidget);
     expect(find.text('Comment'), findsOneWidget);
+  });
+
+  testWidgets('review action bar fits a narrow phone viewport', (tester) async {
+    narviewRouter.go('/');
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authRepositoryProvider.overrideWithValue(_FakeAuthRepository()),
+        ],
+        child: const NarviewApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Review stack rebuild'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start Review'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byTooltip('Threads'), findsOneWidget);
+    expect(find.byTooltip('Comment'), findsOneWidget);
+    expect(find.byTooltip('Mark Viewed'), findsOneWidget);
   });
 }
 
