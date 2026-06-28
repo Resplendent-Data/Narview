@@ -1,5 +1,9 @@
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'dart:convert';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
+
+import '../../../core/storage/secure_token_store.dart';
 import '../domain/review_models.dart';
 import '../domain/review_stack_builder.dart';
 
@@ -10,28 +14,36 @@ abstract class ReviewRepository {
 }
 
 final reviewRepositoryProvider = Provider<ReviewRepository>(
-  (ref) => FixtureReviewRepository(),
+  (ref) => GithubReviewRepository(SecureTokenStore()),
 );
 
 final pullRequestsProvider = FutureProvider<List<PullRequestSummary>>((ref) {
   return ref.watch(reviewRepositoryProvider).listPullRequests();
 });
 
-final activeReviewDataProvider = FutureProvider<PullRequestReviewData>((ref) {
-  return ref
-      .watch(reviewRepositoryProvider)
-      .fetchPullRequest('Resplendent-Data/Narview', 12);
-});
+final pullRequestReviewDataProvider =
+    FutureProvider.family<PullRequestReviewData, PullRequestIdentity>((
+      ref,
+      identity,
+    ) {
+      return ref
+          .watch(reviewRepositoryProvider)
+          .fetchPullRequest(identity.repository, identity.number);
+    });
 
-final activeReviewStackModelProvider = FutureProvider<ReviewStackModel>((
-  ref,
-) async {
-  final data = await ref.watch(activeReviewDataProvider.future);
-  return ReviewStackBuilder().build(
-    files: data.files,
-    reviewThreads: data.reviewThreads,
-  );
-});
+final reviewStackModelProvider =
+    FutureProvider.family<ReviewStackModel, PullRequestIdentity>((
+      ref,
+      identity,
+    ) async {
+      final data = await ref.watch(
+        pullRequestReviewDataProvider(identity).future,
+      );
+      return ReviewStackBuilder().build(
+        files: data.files,
+        reviewThreads: data.reviewThreads,
+      );
+    });
 
 final pendingDraftsProvider =
     NotifierProvider<PendingDraftsNotifier, List<PendingReviewDraft>>(
@@ -48,6 +60,207 @@ class PendingDraftsNotifier extends Notifier<List<PendingReviewDraft>> {
 
   void clear() {
     state = const [];
+  }
+}
+
+class GithubReviewRepository implements ReviewRepository {
+  GithubReviewRepository(this._tokenStore, {http.Client? httpClient})
+    : _httpClient = httpClient ?? http.Client();
+
+  final SecureTokenStore _tokenStore;
+  final http.Client _httpClient;
+
+  @override
+  Future<List<PullRequestSummary>> listPullRequests() async {
+    final token = await _requireToken();
+    final viewer = await _fetchViewer(token);
+    final queries = [
+      'is:pr is:open review-requested:${viewer.login}',
+      'is:pr is:open assignee:${viewer.login}',
+      'is:pr is:open author:${viewer.login}',
+      'is:pr is:open involves:${viewer.login}',
+    ];
+    final results = <PullRequestSummary>[];
+    final errors = <Object>[];
+
+    for (final query in queries) {
+      try {
+        results.addAll(await _searchPullRequests(token, query));
+      } catch (error) {
+        errors.add(error);
+      }
+    }
+
+    final byKey = <String, PullRequestSummary>{};
+    for (final pullRequest in results) {
+      byKey['${pullRequest.repository.toLowerCase()}#${pullRequest.number}'] =
+          pullRequest;
+    }
+
+    final merged = byKey.values.toList()
+      ..sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
+    if (merged.isEmpty && errors.isNotEmpty) {
+      throw ReviewRepositoryException(
+        'Could not load Pull Requests from GitHub. ${errors.first}',
+      );
+    }
+    return merged;
+  }
+
+  @override
+  Future<PullRequestReviewData> fetchPullRequest(
+    String repository,
+    int number,
+  ) async {
+    final token = await _requireToken();
+    final detail = await _getObject(
+      token,
+      Uri.https('api.github.com', '/repos/$repository/pulls/$number'),
+    );
+    final pullRequest = _pullRequestFromDetail(repository, detail);
+    final files = (await _getPaginatedArray(
+      token,
+      Uri.https('api.github.com', '/repos/$repository/pulls/$number/files', {
+        'per_page': '100',
+      }),
+    )).map(_fileFromJson).toList();
+    final comments = await _getPaginatedArray(
+      token,
+      Uri.https('api.github.com', '/repos/$repository/pulls/$number/comments', {
+        'per_page': '100',
+      }),
+    );
+    final checks = await _fetchChecks(
+      token,
+      repository,
+      detail['head'] is Map<String, dynamic>
+          ? (detail['head'] as Map<String, dynamic>)['sha'] as String?
+          : null,
+    );
+
+    return PullRequestReviewData(
+      pullRequest: pullRequest,
+      files: files,
+      reviewThreads: comments.map(_threadFromReviewComment).toList(),
+      checks: checks,
+      fetchedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  Future<String> _requireToken() async {
+    final token = await _tokenStore.readToken();
+    if (token == null || token.trim().isEmpty) {
+      throw const ReviewRepositoryException('Sign in to GitHub first.');
+    }
+    return token;
+  }
+
+  Future<_Viewer> _fetchViewer(String token) async {
+    final json = await _getObject(token, Uri.https('api.github.com', '/user'));
+    return _Viewer(login: json['login'] as String? ?? 'GitHub');
+  }
+
+  Future<List<PullRequestSummary>> _searchPullRequests(
+    String token,
+    String query,
+  ) async {
+    final json = await _getObject(
+      token,
+      Uri.https('api.github.com', '/search/issues', {
+        'q': query,
+        'sort': 'updated',
+        'order': 'desc',
+        'per_page': '30',
+      }),
+    );
+    final items = (json['items'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>();
+    return items.map(_pullRequestFromSearchItem).toList();
+  }
+
+  Future<List<CheckRun>> _fetchChecks(
+    String token,
+    String repository,
+    String? headSha,
+  ) async {
+    if (headSha == null || headSha.isEmpty) {
+      return const [];
+    }
+    try {
+      final json = await _getObject(
+        token,
+        Uri.https(
+          'api.github.com',
+          '/repos/$repository/commits/$headSha/check-runs',
+          {'per_page': '100'},
+        ),
+      );
+      final runs = (json['check_runs'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>();
+      return runs
+          .map(
+            (run) => CheckRun(
+              name: run['name'] as String? ?? 'Check',
+              status: run['status'] as String? ?? 'unknown',
+              conclusion: run['conclusion'] as String?,
+            ),
+          )
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<Map<String, dynamic>> _getObject(String token, Uri uri) async {
+    final response = await _httpClient.get(uri, headers: _headers(token));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ReviewRepositoryException(
+        'GitHub returned HTTP ${response.statusCode}.',
+      );
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is Map<String, dynamic>) {
+      return decoded;
+    }
+    throw const ReviewRepositoryException(
+      'GitHub returned an unexpected response.',
+    );
+  }
+
+  Future<List<dynamic>> _getPaginatedArray(String token, Uri uri) async {
+    final results = <dynamic>[];
+    var page = 1;
+    while (page <= 3) {
+      final pageUri = uri.replace(
+        queryParameters: {...uri.queryParameters, 'page': '$page'},
+      );
+      final response = await _httpClient.get(pageUri, headers: _headers(token));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw ReviewRepositoryException(
+          'GitHub returned HTTP ${response.statusCode}.',
+        );
+      }
+      final decoded = jsonDecode(response.body);
+      if (decoded is! List<dynamic>) {
+        throw const ReviewRepositoryException(
+          'GitHub returned an unexpected response.',
+        );
+      }
+      results.addAll(decoded);
+      if (decoded.length < 100) {
+        break;
+      }
+      page += 1;
+    }
+    return results;
+  }
+
+  Map<String, String> _headers(String token) {
+    return {
+      'accept': 'application/vnd.github+json',
+      'authorization': 'Bearer $token',
+      'x-github-api-version': '2022-11-28',
+    };
   }
 }
 
@@ -70,6 +283,113 @@ class FixtureReviewRepository implements ReviewRepository {
       fetchedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
     );
   }
+}
+
+PullRequestSummary parsePullRequestUrl(String value) {
+  final uri = Uri.tryParse(value.trim());
+  if (uri == null || uri.host.toLowerCase() != 'github.com') {
+    throw const ReviewRepositoryException('Enter a GitHub Pull Request URL.');
+  }
+  final parts = uri.pathSegments;
+  if (parts.length < 4 || parts[2] != 'pull') {
+    throw const ReviewRepositoryException('Enter a GitHub Pull Request URL.');
+  }
+  final number = int.tryParse(parts[3]);
+  if (number == null) {
+    throw const ReviewRepositoryException('Enter a GitHub Pull Request URL.');
+  }
+  final repository = '${parts[0]}/${parts[1]}';
+  return PullRequestSummary(
+    repository: repository,
+    number: number,
+    title: 'Pull Request #$number',
+    authorLogin: null,
+    isDraft: false,
+    updatedAt: '',
+    url: 'https://github.com/$repository/pull/$number',
+  );
+}
+
+PullRequestSummary _pullRequestFromSearchItem(Map<String, dynamic> item) {
+  final repositoryUrl = item['repository_url'] as String? ?? '';
+  final repository = repositoryUrl.split('/repos/').last;
+  return PullRequestSummary(
+    repository: repository,
+    number: item['number'] as int? ?? 0,
+    title: item['title'] as String? ?? 'Pull Request',
+    authorLogin: item['user'] is Map<String, dynamic>
+        ? (item['user'] as Map<String, dynamic>)['login'] as String?
+        : null,
+    isDraft: item['draft'] as bool? ?? false,
+    updatedAt: item['updated_at'] as String? ?? '',
+    url: item['html_url'] as String? ?? '',
+  );
+}
+
+PullRequestSummary _pullRequestFromDetail(
+  String repository,
+  Map<String, dynamic> detail,
+) {
+  return PullRequestSummary(
+    repository: repository,
+    number: detail['number'] as int? ?? 0,
+    title: detail['title'] as String? ?? 'Pull Request',
+    authorLogin: detail['user'] is Map<String, dynamic>
+        ? (detail['user'] as Map<String, dynamic>)['login'] as String?
+        : null,
+    isDraft: detail['draft'] as bool? ?? false,
+    updatedAt: detail['updated_at'] as String? ?? '',
+    url: detail['html_url'] as String? ?? '',
+    baseBranch: detail['base'] is Map<String, dynamic>
+        ? (detail['base'] as Map<String, dynamic>)['ref'] as String?
+        : null,
+    headBranch: detail['head'] is Map<String, dynamic>
+        ? (detail['head'] as Map<String, dynamic>)['ref'] as String?
+        : null,
+  );
+}
+
+FileSummary _fileFromJson(dynamic value) {
+  final json = value as Map<String, dynamic>;
+  return FileSummary(
+    path: json['filename'] as String? ?? 'unknown',
+    previousPath: json['previous_filename'] as String?,
+    additions: json['additions'] as int? ?? 0,
+    deletions: json['deletions'] as int? ?? 0,
+    status: json['status'] as String? ?? 'modified',
+    patch: json['patch'] as String?,
+    viewerViewedState: 'UNKNOWN',
+  );
+}
+
+ReviewThread _threadFromReviewComment(dynamic value) {
+  final json = value as Map<String, dynamic>;
+  return ReviewThread(
+    id: '${json['id'] ?? json['node_id'] ?? json['url']}',
+    authorLogin: json['user'] is Map<String, dynamic>
+        ? (json['user'] as Map<String, dynamic>)['login'] as String?
+        : null,
+    filePath: json['path'] as String? ?? 'unknown',
+    line: json['line'] as int?,
+    state: 'unresolved',
+    body: json['body'] as String? ?? '',
+    updatedAt: json['updated_at'] as String? ?? '',
+  );
+}
+
+class ReviewRepositoryException implements Exception {
+  const ReviewRepositoryException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+class _Viewer {
+  const _Viewer({required this.login});
+
+  final String login;
 }
 
 const _pullRequest = PullRequestSummary(

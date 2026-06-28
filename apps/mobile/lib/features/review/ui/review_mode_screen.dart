@@ -7,7 +7,16 @@ import '../domain/review_models.dart';
 import 'widgets/diff_view.dart';
 
 class ReviewModeScreen extends ConsumerStatefulWidget {
-  const ReviewModeScreen({super.key});
+  const ReviewModeScreen({
+    super.key,
+    required this.owner,
+    required this.repo,
+    required this.number,
+  });
+
+  final String owner;
+  final String repo;
+  final int number;
 
   @override
   ConsumerState<ReviewModeScreen> createState() => _ReviewModeScreenState();
@@ -18,21 +27,25 @@ class _ReviewModeScreenState extends ConsumerState<ReviewModeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final data = ref.watch(activeReviewDataProvider);
-    final stackModel = ref.watch(activeReviewStackModelProvider);
+    final identity = PullRequestIdentity(
+      repository: '${widget.owner}/${widget.repo}',
+      number: widget.number,
+    );
+    final data = ref.watch(pullRequestReviewDataProvider(identity));
+    final stackModel = ref.watch(reviewStackModelProvider(identity));
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Review'),
         leading: IconButton(
           tooltip: 'Overview',
-          onPressed: () => context.go('/pulls/resplendent-data-narview/12'),
+          onPressed: () => context.go(identity.routePath),
           icon: const Icon(Icons.arrow_back),
         ),
         actions: [
           IconButton(
             tooltip: 'Submit review',
-            onPressed: () => context.go('/submit-review'),
+            onPressed: () => context.go(identity.submitRoutePath),
             icon: const Icon(Icons.send),
           ),
         ],

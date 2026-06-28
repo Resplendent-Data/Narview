@@ -4,14 +4,38 @@ import 'package:narview_mobile/app/narview_app.dart';
 import 'package:narview_mobile/app/router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:narview_mobile/features/auth/data/auth_repository.dart';
+import 'package:narview_mobile/features/review/data/review_repository.dart';
 
 void main() {
+  testWidgets('shows onboarding before GitHub sign in', (tester) async {
+    narviewRouter.go('/');
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authRepositoryProvider.overrideWithValue(
+            const _FakeAuthRepository(AuthSession.signedOut()),
+          ),
+          reviewRepositoryProvider.overrideWithValue(FixtureReviewRepository()),
+        ],
+        child: const NarviewApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Review PRs from your phone'), findsOneWidget);
+    expect(find.text('Sign in to GitHub'), findsWidgets);
+    expect(find.text('Review stack rebuild'), findsNothing);
+  });
+
   testWidgets('opens the mobile review flow', (tester) async {
     narviewRouter.go('/');
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          authRepositoryProvider.overrideWithValue(_FakeAuthRepository()),
+          authRepositoryProvider.overrideWithValue(
+            const _FakeAuthRepository(AuthSession.signedIn(login: 'tester')),
+          ),
+          reviewRepositoryProvider.overrideWithValue(FixtureReviewRepository()),
         ],
         child: const NarviewApp(),
       ),
@@ -19,7 +43,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Narview'), findsOneWidget);
-    expect(find.text('Sign in to GitHub'), findsWidgets);
+    expect(find.text('Signed in as tester'), findsOneWidget);
     expect(find.text('Review stack rebuild'), findsOneWidget);
 
     await tester.tap(find.text('Review stack rebuild'));
@@ -46,7 +70,10 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          authRepositoryProvider.overrideWithValue(_FakeAuthRepository()),
+          authRepositoryProvider.overrideWithValue(
+            const _FakeAuthRepository(AuthSession.signedIn(login: 'tester')),
+          ),
+          reviewRepositoryProvider.overrideWithValue(FixtureReviewRepository()),
         ],
         child: const NarviewApp(),
       ),
@@ -66,8 +93,12 @@ void main() {
 }
 
 class _FakeAuthRepository implements AuthRepository {
+  const _FakeAuthRepository(this.session);
+
+  final AuthSession session;
+
   @override
-  Future<AuthSession> getSession() async => const AuthSession.signedOut();
+  Future<AuthSession> getSession() async => session;
 
   @override
   Future<OAuthPollResponse> pollSignIn(OAuthStartResponse flow) async {

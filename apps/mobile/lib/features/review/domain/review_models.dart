@@ -1,3 +1,30 @@
+class PullRequestIdentity {
+  const PullRequestIdentity({required this.repository, required this.number});
+
+  final String repository;
+  final int number;
+
+  String get owner => repository.split('/').first;
+
+  String get name => repository.split('/').last;
+
+  String get routePath => '/pulls/$owner/$name/$number';
+
+  String get reviewRoutePath => '/pulls/$owner/$name/$number/review';
+
+  String get submitRoutePath => '/pulls/$owner/$name/$number/submit-review';
+
+  @override
+  bool operator ==(Object other) {
+    return other is PullRequestIdentity &&
+        other.repository.toLowerCase() == repository.toLowerCase() &&
+        other.number == number;
+  }
+
+  @override
+  int get hashCode => Object.hash(repository.toLowerCase(), number);
+}
+
 class PullRequestSummary {
   const PullRequestSummary({
     required this.repository,
@@ -20,6 +47,9 @@ class PullRequestSummary {
   final String url;
   final String? baseBranch;
   final String? headBranch;
+
+  PullRequestIdentity get identity =>
+      PullRequestIdentity(repository: repository, number: number);
 }
 
 class FileSummary {

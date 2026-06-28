@@ -13,16 +13,28 @@ final narviewRouter = GoRouter(
       builder: (context, state) => const PullRequestInboxScreen(),
     ),
     GoRoute(
-      path: '/pulls/:slug/:number',
+      path: '/pulls/:owner/:repo/:number',
       builder: (context, state) => PullRequestOverviewScreen(
-        repositorySlug:
-            state.pathParameters['slug'] ?? 'resplendent-data-narview',
+        owner: state.pathParameters['owner'] ?? 'Resplendent-Data',
+        repo: state.pathParameters['repo'] ?? 'Narview',
         number: int.tryParse(state.pathParameters['number'] ?? '') ?? 12,
       ),
     ),
     GoRoute(
-      path: '/review',
-      builder: (context, state) => const ReviewModeScreen(),
+      path: '/pulls/:owner/:repo/:number/review',
+      builder: (context, state) => ReviewModeScreen(
+        owner: state.pathParameters['owner'] ?? 'Resplendent-Data',
+        repo: state.pathParameters['repo'] ?? 'Narview',
+        number: int.tryParse(state.pathParameters['number'] ?? '') ?? 12,
+      ),
+    ),
+    GoRoute(
+      path: '/pulls/:owner/:repo/:number/submit-review',
+      builder: (context, state) => SubmitReviewScreen(
+        owner: state.pathParameters['owner'] ?? 'Resplendent-Data',
+        repo: state.pathParameters['repo'] ?? 'Narview',
+        number: int.tryParse(state.pathParameters['number'] ?? '') ?? 12,
+      ),
     ),
     GoRoute(
       path: '/submit-review',

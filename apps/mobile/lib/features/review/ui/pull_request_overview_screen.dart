@@ -3,22 +3,29 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../data/review_repository.dart';
+import '../domain/review_models.dart';
 import '../domain/review_stack_builder.dart';
 
 class PullRequestOverviewScreen extends ConsumerWidget {
   const PullRequestOverviewScreen({
     super.key,
-    required this.repositorySlug,
+    required this.owner,
+    required this.repo,
     required this.number,
   });
 
-  final String repositorySlug;
+  final String owner;
+  final String repo;
   final int number;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final data = ref.watch(activeReviewDataProvider);
-    final stackModel = ref.watch(activeReviewStackModelProvider);
+    final identity = PullRequestIdentity(
+      repository: '$owner/$repo',
+      number: number,
+    );
+    final data = ref.watch(pullRequestReviewDataProvider(identity));
+    final stackModel = ref.watch(reviewStackModelProvider(identity));
 
     return Scaffold(
       appBar: AppBar(
@@ -95,7 +102,7 @@ class PullRequestOverviewScreen extends ConsumerWidget {
       bottomNavigationBar: SafeArea(
         minimum: const EdgeInsets.all(12),
         child: FilledButton.icon(
-          onPressed: () => context.go('/review'),
+          onPressed: () => context.go(identity.reviewRoutePath),
           icon: const Icon(Icons.play_arrow),
           label: const Text('Start Review'),
         ),

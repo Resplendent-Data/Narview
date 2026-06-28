@@ -3,20 +3,28 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../data/review_repository.dart';
+import '../domain/review_models.dart';
 
 class SubmitReviewScreen extends ConsumerWidget {
-  const SubmitReviewScreen({super.key});
+  const SubmitReviewScreen({super.key, this.owner, this.repo, this.number});
+
+  final String? owner;
+  final String? repo;
+  final int? number;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final drafts = ref.watch(pendingDraftsProvider);
+    final identity = owner == null || repo == null || number == null
+        ? null
+        : PullRequestIdentity(repository: '$owner/$repo', number: number!);
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Submit Review'),
         leading: IconButton(
           tooltip: 'Back',
-          onPressed: () => context.go('/review'),
+          onPressed: () => context.go(identity?.reviewRoutePath ?? '/'),
           icon: const Icon(Icons.arrow_back),
         ),
       ),
