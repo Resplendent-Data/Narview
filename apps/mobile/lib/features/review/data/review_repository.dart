@@ -165,12 +165,14 @@ class GithubReviewRepository implements ReviewRepository {
     final files = rawFiles
         .map((file) => _fileFromJson(file, viewedStates))
         .toList();
-    final comments = await _getPaginatedArray(
-      token,
-      Uri.https('api.github.com', '/repos/$repository/pulls/$number/comments', {
-        'per_page': '100',
-      }),
-    );
+    final reviewThreads =
+        await _fetchReviewThreads(
+          token,
+          PullRequestIdentity(repository: repository, number: number),
+        ).catchError(
+          (_) =>
+              _fetchReviewCommentsAsUnknownThreads(token, repository, number),
+        );
     final checks = await _fetchChecks(
       token,
       repository,
@@ -182,7 +184,7 @@ class GithubReviewRepository implements ReviewRepository {
     return PullRequestReviewData(
       pullRequest: pullRequest,
       files: files,
-      reviewThreads: comments.map(_threadFromReviewComment).toList(),
+      reviewThreads: reviewThreads,
       checks: checks,
       fetchedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
     );
@@ -331,6 +333,72 @@ class GithubReviewRepository implements ReviewRepository {
       );
     }
     return id;
+  }
+
+  Future<List<ReviewThread>> _fetchReviewThreads(
+    String token,
+    PullRequestIdentity identity,
+  ) async {
+    final threads = <ReviewThread>[];
+    String? cursor;
+
+    while (true) {
+      final data = await _postGraphql(
+        token,
+        'query NarviewReviewThreads(\$owner: String!, \$name: String!, \$number: Int!, \$cursor: String) { repository(owner: \$owner, name: \$name) { pullRequest(number: \$number) { reviewThreads(first: 100, after: \$cursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line originalLine comments(first: 50) { nodes { id author { login } body updatedAt } } } } } } }',
+        {
+          'owner': identity.owner,
+          'name': identity.name,
+          'number': identity.number,
+          'cursor': cursor,
+        },
+      );
+      final repository = data['repository'];
+      final pullRequest = repository is Map<String, dynamic>
+          ? repository['pullRequest']
+          : null;
+      final reviewThreads = pullRequest is Map<String, dynamic>
+          ? pullRequest['reviewThreads']
+          : null;
+      if (reviewThreads is! Map<String, dynamic>) {
+        return threads;
+      }
+
+      final nodes = reviewThreads['nodes'];
+      if (nodes is List<dynamic>) {
+        threads.addAll(
+          nodes.whereType<Map<String, dynamic>>().map(_threadFromGraphql),
+        );
+      }
+
+      final pageInfo = reviewThreads['pageInfo'];
+      final hasNextPage = pageInfo is Map<String, dynamic>
+          ? pageInfo['hasNextPage'] as bool? ?? false
+          : false;
+      if (!hasNextPage) {
+        break;
+      }
+      cursor = pageInfo['endCursor'] as String?;
+      if (cursor == null || cursor.isEmpty) {
+        break;
+      }
+    }
+
+    return threads;
+  }
+
+  Future<List<ReviewThread>> _fetchReviewCommentsAsUnknownThreads(
+    String token,
+    String repository,
+    int number,
+  ) async {
+    final comments = await _getPaginatedArray(
+      token,
+      Uri.https('api.github.com', '/repos/$repository/pulls/$number/comments', {
+        'per_page': '100',
+      }),
+    );
+    return comments.map(_threadFromReviewComment).toList();
   }
 
   Future<List<CheckRun>> _fetchChecks(
@@ -581,9 +649,39 @@ ReviewThread _threadFromReviewComment(dynamic value) {
         : null,
     filePath: json['path'] as String? ?? 'unknown',
     line: json['line'] as int?,
-    state: 'unresolved',
+    state: 'unknown',
     body: json['body'] as String? ?? '',
     updatedAt: json['updated_at'] as String? ?? '',
+  );
+}
+
+ReviewThread _threadFromGraphql(Map<String, dynamic> json) {
+  final comments = json['comments'];
+  final nodes = comments is Map<String, dynamic> ? comments['nodes'] : null;
+  final commentNodes = nodes is List<dynamic>
+      ? nodes.whereType<Map<String, dynamic>>().toList()
+      : const <Map<String, dynamic>>[];
+  final firstComment = commentNodes.isEmpty
+      ? const <String, dynamic>{}
+      : commentNodes.first;
+  final author = firstComment['author'];
+  final isResolved = json['isResolved'] as bool? ?? false;
+  final isOutdated = json['isOutdated'] as bool? ?? false;
+
+  return ReviewThread(
+    id: json['id'] as String? ?? firstComment['id'] as String? ?? 'thread',
+    authorLogin: author is Map<String, dynamic>
+        ? author['login'] as String?
+        : null,
+    filePath:
+        json['path'] as String? ?? firstComment['path'] as String? ?? 'unknown',
+    line:
+        json['line'] as int? ??
+        json['originalLine'] as int? ??
+        firstComment['line'] as int?,
+    state: isResolved ? 'resolved' : (isOutdated ? 'outdated' : 'unresolved'),
+    body: firstComment['body'] as String? ?? '',
+    updatedAt: firstComment['updatedAt'] as String? ?? '',
   );
 }
 

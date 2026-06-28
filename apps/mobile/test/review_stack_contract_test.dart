@@ -26,6 +26,45 @@ void main() {
 
     expect(_summarizeStacks(model.stacks), expected['stacks']);
   });
+
+  test(
+    'unknown and outdated review thread states do not count as unresolved',
+    () {
+      final model = ReviewStackBuilder().build(
+        files: const [
+          FileSummary(
+            path: 'apps/mobile/lib/app.dart',
+            additions: 3,
+            deletions: 1,
+            status: 'modified',
+          ),
+        ],
+        reviewThreads: const [
+          ReviewThread(
+            id: 'fallback-comment',
+            authorLogin: 'reviewer',
+            filePath: 'apps/mobile/lib/app.dart',
+            line: 12,
+            state: 'unknown',
+            body: 'Fallback REST comment without thread resolution state.',
+            updatedAt: '2026-06-28T00:00:00Z',
+          ),
+          ReviewThread(
+            id: 'outdated-thread',
+            authorLogin: 'reviewer',
+            filePath: 'apps/mobile/lib/app.dart',
+            line: 14,
+            state: 'outdated',
+            body: 'Thread on an outdated diff.',
+            updatedAt: '2026-06-28T00:01:00Z',
+          ),
+        ],
+      );
+
+      expect(model.files.single.commentCount, 2);
+      expect(model.files.single.unresolvedCommentCount, 0);
+    },
+  );
 }
 
 Map<String, dynamic> _readFixture() {

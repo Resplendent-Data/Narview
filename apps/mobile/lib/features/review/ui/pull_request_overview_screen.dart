@@ -80,6 +80,12 @@ class _PullRequestOverviewScreenState
     final fileThreads = data.reviewThreads
         .where((thread) => thread.filePath == current.file.path)
         .toList();
+    final unresolvedThreads = data.reviewThreads
+        .where(_isUnresolvedThread)
+        .toList();
+    final fileUnresolvedThreads = fileThreads
+        .where(_isUnresolvedThread)
+        .toList();
     final fileDrafts = drafts
         .where((draft) => draft.path == current.file.path)
         .toList();
@@ -93,7 +99,7 @@ class _PullRequestOverviewScreenState
           pullRequest: data.pullRequest,
           current: current,
           refs: refs,
-          threadCount: data.reviewThreads.length,
+          unresolvedThreadCount: unresolvedThreads.length,
           draftCount: drafts.length,
           onBack: () => context.go('/'),
           onSubmit: () => context.go(identity.submitRoutePath),
@@ -120,7 +126,7 @@ class _PullRequestOverviewScreenState
           viewed: _isViewed(current.file),
           viewedBusy: _viewedBusy,
           selectedAnchor: _selectedAnchor,
-          threadCount: fileThreads.length,
+          unresolvedThreadCount: fileUnresolvedThreads.length,
           draftCount: fileDrafts.length,
           onMap: () => _showReviewMap(data, model, drafts, current.file.path),
           onBack: () => _selectRef(refs[current.globalIndex - 1]),
@@ -168,6 +174,7 @@ class _PullRequestOverviewScreenState
   ) {
     final draftPaths = drafts.map((draft) => draft.path).toSet();
     final threadPaths = data.reviewThreads
+        .where(_isUnresolvedThread)
         .map((thread) => thread.filePath)
         .toSet();
     final ordered = [
@@ -314,7 +321,7 @@ class _WorkspaceHeader extends StatelessWidget {
     required this.pullRequest,
     required this.current,
     required this.refs,
-    required this.threadCount,
+    required this.unresolvedThreadCount,
     required this.draftCount,
     required this.onBack,
     required this.onSubmit,
@@ -326,7 +333,7 @@ class _WorkspaceHeader extends StatelessWidget {
   final PullRequestSummary pullRequest;
   final _WorkspaceFileRef current;
   final List<_WorkspaceFileRef> refs;
-  final int threadCount;
+  final int unresolvedThreadCount;
   final int draftCount;
   final VoidCallback onBack;
   final VoidCallback onSubmit;
@@ -471,7 +478,7 @@ class _WorkspaceHeader extends StatelessWidget {
                       const SizedBox(width: 6),
                       _MetricPill(
                         icon: Icons.forum_outlined,
-                        label: '$threadCount threads',
+                        label: '$unresolvedThreadCount open',
                         color: const Color(0xff7c3aed),
                       ),
                       const SizedBox(width: 6),
@@ -499,7 +506,7 @@ class _WorkspaceCommandBar extends StatelessWidget {
     required this.viewed,
     required this.viewedBusy,
     required this.selectedAnchor,
-    required this.threadCount,
+    required this.unresolvedThreadCount,
     required this.draftCount,
     required this.onMap,
     required this.onBack,
@@ -514,7 +521,7 @@ class _WorkspaceCommandBar extends StatelessWidget {
   final bool viewed;
   final bool viewedBusy;
   final DiffLineAnchor? selectedAnchor;
-  final int threadCount;
+  final int unresolvedThreadCount;
   final int draftCount;
   final VoidCallback onMap;
   final VoidCallback onBack;
@@ -577,7 +584,7 @@ class _WorkspaceCommandBar extends StatelessWidget {
                   tooltip: 'Threads and drafts',
                   label: 'Focus',
                   icon: Icons.forum_outlined,
-                  badge: threadCount + draftCount,
+                  badge: unresolvedThreadCount + draftCount,
                   onPressed: onAttention,
                 ),
                 _CommandButton(
@@ -642,6 +649,9 @@ class _ReviewMapSheetState extends State<_ReviewMapSheet> {
     final refs = _buildFileRefs(widget.model);
     final draftCounts = _draftCounts(widget.drafts);
     final threadCounts = _threadCounts(widget.data.reviewThreads);
+    final unresolvedThreadCounts = _threadCounts(
+      widget.data.reviewThreads.where(_isUnresolvedThread),
+    );
     final viewedCount = refs.where((ref) => _isViewed(ref.file)).length;
 
     return _SheetFrame(
@@ -709,6 +719,7 @@ class _ReviewMapSheetState extends State<_ReviewMapSheet> {
                     currentPath: widget.currentPath,
                     draftCounts: draftCounts,
                     threadCounts: threadCounts,
+                    unresolvedThreadCounts: unresolvedThreadCounts,
                     onSelect: widget.onSelect,
                   ),
               ],
@@ -729,6 +740,7 @@ class _MapStackSection extends StatelessWidget {
     required this.currentPath,
     required this.draftCounts,
     required this.threadCounts,
+    required this.unresolvedThreadCounts,
     required this.onSelect,
   });
 
@@ -739,6 +751,7 @@ class _MapStackSection extends StatelessWidget {
   final String currentPath;
   final Map<String, int> draftCounts;
   final Map<String, int> threadCounts;
+  final Map<String, int> unresolvedThreadCounts;
   final ValueChanged<_WorkspaceFileRef> onSelect;
 
   @override
@@ -813,6 +826,7 @@ class _MapStackSection extends StatelessWidget {
               file: row.file,
               draftCount: draftCounts[row.file.path] ?? 0,
               threadCount: threadCounts[row.file.path] ?? 0,
+              unresolvedThreadCount: unresolvedThreadCounts[row.file.path] ?? 0,
               onTap: () => onSelect(
                 _WorkspaceFileRef(
                   stackIndex: stackIndex,
@@ -844,9 +858,7 @@ class _AttentionSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final unresolved = data.reviewThreads
-        .where((thread) => thread.state != 'resolved')
-        .toList();
+    final unresolved = data.reviewThreads.where(_isUnresolvedThread).toList();
 
     return _SheetFrame(
       child: ListView(
@@ -1158,6 +1170,7 @@ class _MapFileTile extends StatelessWidget {
     required this.file,
     required this.draftCount,
     required this.threadCount,
+    required this.unresolvedThreadCount,
     required this.onTap,
   });
 
@@ -1165,6 +1178,7 @@ class _MapFileTile extends StatelessWidget {
   final ReviewStackFile file;
   final int draftCount;
   final int threadCount;
+  final int unresolvedThreadCount;
   final VoidCallback onTap;
 
   @override
@@ -1192,8 +1206,13 @@ class _MapFileTile extends StatelessWidget {
                 ),
               ),
             ),
-            if (threadCount > 0)
-              _TinyCount(count: threadCount, color: const Color(0xff7c3aed)),
+            if (unresolvedThreadCount > 0)
+              _TinyCount(
+                count: unresolvedThreadCount,
+                color: const Color(0xff7c3aed),
+              )
+            else if (threadCount > 0)
+              _TinyCount(count: threadCount, color: const Color(0xff64748b)),
             if (draftCount > 0) ...[
               const SizedBox(width: 4),
               _TinyCount(count: draftCount, color: const Color(0xffc2410c)),
@@ -1432,7 +1451,7 @@ Map<String, int> _draftCounts(List<PendingReviewDraft> drafts) {
   return counts;
 }
 
-Map<String, int> _threadCounts(List<ReviewThread> threads) {
+Map<String, int> _threadCounts(Iterable<ReviewThread> threads) {
   final counts = <String, int>{};
   for (final thread in threads) {
     counts[thread.filePath] = (counts[thread.filePath] ?? 0) + 1;
@@ -1459,5 +1478,7 @@ Set<String> _draftAnchorKeys(List<PendingReviewDraft> drafts) {
       )
       .toSet();
 }
+
+bool _isUnresolvedThread(ReviewThread thread) => thread.state == 'unresolved';
 
 bool _isViewed(ReviewStackFile file) => file.viewerViewedState == 'VIEWED';

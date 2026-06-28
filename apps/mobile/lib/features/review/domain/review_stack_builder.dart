@@ -79,7 +79,7 @@ class ReviewStackBuilder {
         () => _MutableCommentCounts(),
       );
       current.total += 1;
-      if (thread.state != 'resolved') {
+      if (thread.state == 'unresolved') {
         current.unresolved += 1;
       }
     }
