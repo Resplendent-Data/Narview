@@ -100,6 +100,41 @@ void main() {
     expect(find.textContaining('Line 2 selected'), findsOneWidget);
   });
 
+  testWidgets('opens an existing thread from focus instead of a new draft', (
+    tester,
+  ) async {
+    narviewRouter.go('/');
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authRepositoryProvider.overrideWithValue(
+            const _FakeAuthRepository(AuthSession.signedIn(login: 'tester')),
+          ),
+          reviewRepositoryProvider.overrideWithValue(FixtureReviewRepository()),
+        ],
+        child: const NarviewApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Review stack rebuild'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Threads and drafts'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Needs Attention'), findsOneWidget);
+    expect(find.text('src/review/stacks.ts:9'), findsOneWidget);
+
+    await tester.tap(find.text('src/review/stacks.ts:9'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Draft Comment'), findsNothing);
+    expect(find.text('New comment'), findsOneWidget);
+    expect(find.text('Please double-check stack grouping.'), findsWidgets);
+    expect(find.text('unresolved'), findsOneWidget);
+  });
+
   testWidgets('workspace command bar fits a narrow phone viewport', (
     tester,
   ) async {

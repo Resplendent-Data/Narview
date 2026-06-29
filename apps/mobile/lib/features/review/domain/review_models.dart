@@ -89,6 +89,29 @@ class FileSummary {
   final String? viewerViewedState;
 }
 
+class ReviewThreadComment {
+  const ReviewThreadComment({
+    required this.id,
+    required this.authorLogin,
+    required this.body,
+    required this.updatedAt,
+  });
+
+  factory ReviewThreadComment.fromJson(Map<String, dynamic> json) {
+    return ReviewThreadComment(
+      id: json['id'] as String,
+      authorLogin: json['authorLogin'] as String?,
+      body: json['body'] as String,
+      updatedAt: json['updatedAt'] as String,
+    );
+  }
+
+  final String id;
+  final String? authorLogin;
+  final String body;
+  final String updatedAt;
+}
+
 class ReviewThread {
   const ReviewThread({
     required this.id,
@@ -98,9 +121,11 @@ class ReviewThread {
     required this.state,
     required this.body,
     required this.updatedAt,
+    this.comments = const [],
   });
 
   factory ReviewThread.fromJson(Map<String, dynamic> json) {
+    final rawComments = json['comments'];
     return ReviewThread(
       id: json['id'] as String,
       authorLogin: json['authorLogin'] as String?,
@@ -109,6 +134,12 @@ class ReviewThread {
       state: json['state'] as String,
       body: json['body'] as String,
       updatedAt: json['updatedAt'] as String,
+      comments: rawComments is List<dynamic>
+          ? rawComments
+                .whereType<Map<String, dynamic>>()
+                .map(ReviewThreadComment.fromJson)
+                .toList()
+          : const [],
     );
   }
 
@@ -119,6 +150,7 @@ class ReviewThread {
   final String state;
   final String body;
   final String updatedAt;
+  final List<ReviewThreadComment> comments;
 }
 
 class CheckRun {

@@ -642,6 +642,7 @@ FileSummary _fileFromJson(dynamic value, Map<String, String> viewedStates) {
 
 ReviewThread _threadFromReviewComment(dynamic value) {
   final json = value as Map<String, dynamic>;
+  final comment = _threadCommentFromReviewComment(json);
   return ReviewThread(
     id: '${json['id'] ?? json['node_id'] ?? json['url']}',
     authorLogin: json['user'] is Map<String, dynamic>
@@ -652,6 +653,7 @@ ReviewThread _threadFromReviewComment(dynamic value) {
     state: 'unknown',
     body: json['body'] as String? ?? '',
     updatedAt: json['updated_at'] as String? ?? '',
+    comments: [comment],
   );
 }
 
@@ -661,27 +663,49 @@ ReviewThread _threadFromGraphql(Map<String, dynamic> json) {
   final commentNodes = nodes is List<dynamic>
       ? nodes.whereType<Map<String, dynamic>>().toList()
       : const <Map<String, dynamic>>[];
-  final firstComment = commentNodes.isEmpty
-      ? const <String, dynamic>{}
-      : commentNodes.first;
-  final author = firstComment['author'];
+  final threadComments = commentNodes.map(_threadCommentFromGraphql).toList();
+  final firstComment = threadComments.isEmpty ? null : threadComments.first;
   final isResolved = json['isResolved'] as bool? ?? false;
   final isOutdated = json['isOutdated'] as bool? ?? false;
 
   return ReviewThread(
-    id: json['id'] as String? ?? firstComment['id'] as String? ?? 'thread',
-    authorLogin: author is Map<String, dynamic>
-        ? author['login'] as String?
-        : null,
+    id: json['id'] as String? ?? firstComment?.id ?? 'thread',
+    authorLogin: firstComment?.authorLogin,
     filePath:
-        json['path'] as String? ?? firstComment['path'] as String? ?? 'unknown',
+        json['path'] as String? ??
+        (commentNodes.isEmpty ? null : commentNodes.first['path'] as String?) ??
+        'unknown',
     line:
         json['line'] as int? ??
         json['originalLine'] as int? ??
-        firstComment['line'] as int?,
+        (commentNodes.isEmpty ? null : commentNodes.first['line'] as int?),
     state: isResolved ? 'resolved' : (isOutdated ? 'outdated' : 'unresolved'),
-    body: firstComment['body'] as String? ?? '',
-    updatedAt: firstComment['updatedAt'] as String? ?? '',
+    body: firstComment?.body ?? '',
+    updatedAt: firstComment?.updatedAt ?? '',
+    comments: threadComments,
+  );
+}
+
+ReviewThreadComment _threadCommentFromGraphql(Map<String, dynamic> json) {
+  final author = json['author'];
+  return ReviewThreadComment(
+    id: json['id'] as String? ?? 'comment',
+    authorLogin: author is Map<String, dynamic>
+        ? author['login'] as String?
+        : null,
+    body: json['body'] as String? ?? '',
+    updatedAt: json['updatedAt'] as String? ?? '',
+  );
+}
+
+ReviewThreadComment _threadCommentFromReviewComment(Map<String, dynamic> json) {
+  return ReviewThreadComment(
+    id: '${json['id'] ?? json['node_id'] ?? json['url']}',
+    authorLogin: json['user'] is Map<String, dynamic>
+        ? (json['user'] as Map<String, dynamic>)['login'] as String?
+        : null,
+    body: json['body'] as String? ?? '',
+    updatedAt: json['updated_at'] as String? ?? '',
   );
 }
 

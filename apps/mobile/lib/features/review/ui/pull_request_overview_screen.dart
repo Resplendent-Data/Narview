@@ -89,6 +89,10 @@ class _PullRequestOverviewScreenState
     final fileDrafts = drafts
         .where((draft) => draft.path == current.file.path)
         .toList();
+    final selectedAnchorThreads = _threadsForAnchor(
+      fileThreads,
+      _selectedAnchor,
+    );
     final threadAnchorKeys = _threadAnchorKeys(fileThreads, current.file.path);
     final draftAnchorKeys = _draftAnchorKeys(fileDrafts);
 
@@ -113,11 +117,7 @@ class _PullRequestOverviewScreenState
             selectedAnchor: _selectedAnchor,
             threadAnchorKeys: threadAnchorKeys,
             draftAnchorKeys: draftAnchorKeys,
-            onLineTap: (anchor) {
-              setState(() => _selectedAnchor = anchor);
-              HapticFeedback.selectionClick();
-              _showCommentComposer(current, anchor);
-            },
+            onLineTap: (anchor) => _handleLineTap(current, fileThreads, anchor),
           ),
         ),
         _WorkspaceCommandBar(
@@ -126,13 +126,18 @@ class _PullRequestOverviewScreenState
           viewed: _isViewed(current.file),
           viewedBusy: _viewedBusy,
           selectedAnchor: _selectedAnchor,
+          selectedAnchorThreadCount: selectedAnchorThreads.length,
           unresolvedThreadCount: fileUnresolvedThreads.length,
           draftCount: fileDrafts.length,
           onMap: () => _showReviewMap(data, model, drafts, current.file.path),
           onBack: () => _selectRef(refs[current.globalIndex - 1]),
           onNext: () => _selectRef(refs[current.globalIndex + 1]),
           onAttention: () => _showAttentionSheet(data, model, drafts),
-          onComment: () => _showCommentComposer(current, _selectedAnchor),
+          onComment: () => _showSelectedThreadOrComposer(
+            current,
+            fileThreads,
+            _selectedAnchor,
+          ),
           onViewed: () => _toggleViewed(identity, current.file),
         ),
       ],
@@ -148,21 +153,68 @@ class _PullRequestOverviewScreenState
     return current.isEmpty ? refs.first : current.first;
   }
 
-  void _selectRef(_WorkspaceFileRef ref) {
+  void _selectRef(_WorkspaceFileRef ref, {DiffLineAnchor? anchor}) {
     setState(() {
       _selectedStackIndex = ref.stackIndex;
       _selectedFileIndex = ref.fileIndex;
-      _selectedAnchor = null;
+      _selectedAnchor = anchor;
     });
     HapticFeedback.selectionClick();
   }
 
-  void _selectPath(ReviewStackModel model, String path) {
+  _WorkspaceFileRef? _selectPath(
+    ReviewStackModel model,
+    String path, {
+    DiffLineAnchor? anchor,
+  }) {
     final refs = _buildFileRefs(model);
     final matches = refs.where((ref) => ref.file.path == path);
     if (matches.isNotEmpty) {
-      _selectRef(matches.first);
+      final match = matches.first;
+      _selectRef(match, anchor: anchor);
+      return match;
     }
+    return null;
+  }
+
+  void _handleLineTap(
+    _WorkspaceFileRef current,
+    List<ReviewThread> fileThreads,
+    DiffLineAnchor anchor,
+  ) {
+    setState(() => _selectedAnchor = anchor);
+    HapticFeedback.selectionClick();
+    final threads = _threadsForAnchor(fileThreads, anchor);
+    if (threads.isNotEmpty) {
+      _showThreadSheet(current: current, anchor: anchor, threads: threads);
+      return;
+    }
+    _showCommentComposer(current, anchor);
+  }
+
+  void _showSelectedThreadOrComposer(
+    _WorkspaceFileRef current,
+    List<ReviewThread> fileThreads,
+    DiffLineAnchor? anchor,
+  ) {
+    final threads = _threadsForAnchor(fileThreads, anchor);
+    if (anchor != null && threads.isNotEmpty) {
+      _showThreadSheet(current: current, anchor: anchor, threads: threads);
+      return;
+    }
+    _showCommentComposer(current, anchor);
+  }
+
+  void _selectThread(ReviewStackModel model, ReviewThread thread) {
+    final file = model.fileByPath(thread.filePath);
+    if (file == null) return;
+    final anchor = _anchorForThread(file, thread);
+    final selected = _selectPath(model, thread.filePath, anchor: anchor);
+    if (selected == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _showThreadSheet(current: selected, anchor: anchor, threads: [thread]);
+    });
   }
 
   void _jumpNextOpen(
@@ -261,9 +313,13 @@ class _PullRequestOverviewScreenState
           scrollController: scrollController,
           data: data,
           drafts: drafts,
-          onSelectPath: (path) {
+          onSelectDraft: (draft) {
             Navigator.of(sheetContext).pop();
-            _selectPath(model, path);
+            _selectPath(model, draft.path);
+          },
+          onSelectThread: (thread) {
+            Navigator.of(sheetContext).pop();
+            _selectThread(model, thread);
           },
         ),
       ),
@@ -308,6 +364,34 @@ class _PullRequestOverviewScreenState
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('Draft comment saved.')),
             );
+          },
+        ),
+      ),
+    );
+  }
+
+  void _showThreadSheet({
+    required _WorkspaceFileRef current,
+    required DiffLineAnchor? anchor,
+    required List<ReviewThread> threads,
+  }) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => DraggableScrollableSheet(
+        initialChildSize: 0.72,
+        minChildSize: 0.36,
+        maxChildSize: 0.92,
+        expand: false,
+        builder: (context, scrollController) => _ThreadSheet(
+          scrollController: scrollController,
+          file: current.file,
+          anchor: anchor,
+          threads: threads,
+          onNewComment: () {
+            Navigator.of(sheetContext).pop();
+            _showCommentComposer(current, anchor);
           },
         ),
       ),
@@ -506,6 +590,7 @@ class _WorkspaceCommandBar extends StatelessWidget {
     required this.viewed,
     required this.viewedBusy,
     required this.selectedAnchor,
+    required this.selectedAnchorThreadCount,
     required this.unresolvedThreadCount,
     required this.draftCount,
     required this.onMap,
@@ -521,6 +606,7 @@ class _WorkspaceCommandBar extends StatelessWidget {
   final bool viewed;
   final bool viewedBusy;
   final DiffLineAnchor? selectedAnchor;
+  final int selectedAnchorThreadCount;
   final int unresolvedThreadCount;
   final int draftCount;
   final VoidCallback onMap;
@@ -588,11 +674,15 @@ class _WorkspaceCommandBar extends StatelessWidget {
                   onPressed: onAttention,
                 ),
                 _CommandButton(
-                  tooltip: selectedAnchor == null
+                  tooltip: selectedAnchorThreadCount > 0
+                      ? 'Open selected thread'
+                      : selectedAnchor == null
                       ? 'Add file comment'
                       : 'Comment on selected line',
-                  label: 'Comment',
-                  icon: Icons.add_comment_outlined,
+                  label: selectedAnchorThreadCount > 0 ? 'Thread' : 'Comment',
+                  icon: selectedAnchorThreadCount > 0
+                      ? Icons.forum_outlined
+                      : Icons.add_comment_outlined,
                   emphasized: selectedAnchor != null,
                   onPressed: onComment,
                 ),
@@ -848,13 +938,15 @@ class _AttentionSheet extends StatelessWidget {
     required this.scrollController,
     required this.data,
     required this.drafts,
-    required this.onSelectPath,
+    required this.onSelectDraft,
+    required this.onSelectThread,
   });
 
   final ScrollController scrollController;
   final PullRequestReviewData data;
   final List<PendingReviewDraft> drafts;
-  final ValueChanged<String> onSelectPath;
+  final ValueChanged<PendingReviewDraft> onSelectDraft;
+  final ValueChanged<ReviewThread> onSelectThread;
 
   @override
   Widget build(BuildContext context) {
@@ -881,7 +973,7 @@ class _AttentionSheet extends StatelessWidget {
                   ? draft.path
                   : '${draft.path}:${draft.line}',
               subtitle: draft.body,
-              onTap: () => onSelectPath(draft.path),
+              onTap: () => onSelectDraft(draft),
             ),
           const SizedBox(height: 12),
           _SectionLabel(label: 'Unresolved Threads', count: unresolved.length),
@@ -895,9 +987,227 @@ class _AttentionSheet extends StatelessWidget {
                   ? thread.filePath
                   : '${thread.filePath}:${thread.line}',
               subtitle: thread.body,
-              onTap: () => onSelectPath(thread.filePath),
+              onTap: () => onSelectThread(thread),
             ),
         ],
+      ),
+    );
+  }
+}
+
+class _ThreadSheet extends StatelessWidget {
+  const _ThreadSheet({
+    required this.scrollController,
+    required this.file,
+    required this.anchor,
+    required this.threads,
+    required this.onNewComment,
+  });
+
+  final ScrollController scrollController;
+  final ReviewStackFile file;
+  final DiffLineAnchor? anchor;
+  final List<ReviewThread> threads;
+  final VoidCallback onNewComment;
+
+  @override
+  Widget build(BuildContext context) {
+    final location = anchor == null
+        ? file.path
+        : '${file.path}:${anchor!.line}';
+
+    return _SheetFrame(
+      child: ListView(
+        controller: scrollController,
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 20),
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Thread',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: onNewComment,
+                icon: const Icon(Icons.add_comment_outlined, size: 18),
+                label: const Text('New comment'),
+              ),
+            ],
+          ),
+          Text(
+            location,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Color(0xff475569),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          if (anchor != null && anchor!.codePreview.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xff111827),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                anchor!.codePreview,
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xffe5e7eb),
+                  fontFamily: 'monospace',
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          for (final thread in threads) _ThreadCard(thread: thread),
+        ],
+      ),
+    );
+  }
+}
+
+class _ThreadCard extends StatelessWidget {
+  const _ThreadCard({required this.thread});
+
+  final ReviewThread thread;
+
+  @override
+  Widget build(BuildContext context) {
+    final comments = thread.comments.isEmpty
+        ? [
+            ReviewThreadComment(
+              id: thread.id,
+              authorLogin: thread.authorLogin,
+              body: thread.body,
+              updatedAt: thread.updatedAt,
+            ),
+          ]
+        : thread.comments;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xffe2e8f0)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.forum_outlined,
+                  color: _threadStateColor(thread.state),
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    thread.authorLogin ?? 'Unknown reviewer',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xff0f172a),
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                _StateChip(state: thread.state),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          for (final comment in comments) _ThreadCommentTile(comment: comment),
+        ],
+      ),
+    );
+  }
+}
+
+class _ThreadCommentTile extends StatelessWidget {
+  const _ThreadCommentTile({required this.comment});
+
+  final ReviewThreadComment comment;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  comment.authorLogin ?? 'Unknown',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xff334155),
+                    fontWeight: FontWeight.w800,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+              if (comment.updatedAt.isNotEmpty)
+                Text(
+                  _compactDate(comment.updatedAt),
+                  style: const TextStyle(
+                    color: Color(0xff64748b),
+                    fontWeight: FontWeight.w600,
+                    fontSize: 11,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            comment.body.isEmpty ? 'No visible comment body.' : comment.body,
+            style: const TextStyle(
+              color: Color(0xff0f172a),
+              fontSize: 13,
+              height: 1.35,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StateChip extends StatelessWidget {
+  const _StateChip({required this.state});
+
+  final String state;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _threadStateColor(state);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.24)),
+      ),
+      child: Text(
+        state,
+        style: TextStyle(
+          color: color,
+          fontWeight: FontWeight.w900,
+          fontSize: 11,
+        ),
       ),
     );
   }
@@ -1248,11 +1558,19 @@ class _AttentionTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0xffe2e8f0)),
       ),
-      child: ListTile(
-        leading: Icon(icon, color: color),
-        title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text(subtitle, maxLines: 3, overflow: TextOverflow.ellipsis),
-        onTap: onTap,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: ListTile(
+          leading: Icon(icon, color: color),
+          title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+          subtitle: Text(
+            subtitle,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+          ),
+          onTap: onTap,
+        ),
       ),
     );
   }
@@ -1477,6 +1795,86 @@ Set<String> _draftAnchorKeys(List<PendingReviewDraft> drafts) {
         ),
       )
       .toSet();
+}
+
+List<ReviewThread> _threadsForAnchor(
+  List<ReviewThread> threads,
+  DiffLineAnchor? anchor,
+) {
+  if (anchor == null) return const [];
+  return threads
+      .where(
+        (thread) =>
+            thread.filePath == anchor.path && thread.line == anchor.line,
+      )
+      .toList();
+}
+
+DiffLineAnchor? _anchorForThread(ReviewStackFile file, ReviewThread thread) {
+  final line = thread.line;
+  if (line == null) return null;
+  return DiffLineAnchor(
+    path: file.path,
+    line: line,
+    side: 'RIGHT',
+    codePreview: _codePreviewForLine(file.patch, line),
+    isDeletion: false,
+  );
+}
+
+String _codePreviewForLine(String? patch, int targetLine) {
+  if (patch == null || patch.isEmpty) {
+    return 'Line $targetLine';
+  }
+  final headerPattern = RegExp(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@');
+  var oldLine = 0;
+  var newLine = 0;
+
+  for (final value in patch.split(RegExp(r'\r?\n'))) {
+    final header = headerPattern.firstMatch(value);
+    if (header != null) {
+      oldLine = int.parse(header.group(1)!);
+      newLine = int.parse(header.group(2)!);
+      continue;
+    }
+    if (value.startsWith('+++') || value.startsWith('---')) {
+      continue;
+    }
+    if (value.startsWith('+')) {
+      if (newLine == targetLine) return value.substring(1).trim();
+      newLine += 1;
+      continue;
+    }
+    if (value.startsWith('-')) {
+      oldLine += 1;
+      continue;
+    }
+    final code = value.startsWith(' ') ? value.substring(1) : value;
+    if (newLine == targetLine) return code.trim();
+    if (oldLine > 0) oldLine += 1;
+    if (newLine > 0) newLine += 1;
+  }
+
+  return 'Line $targetLine';
+}
+
+Color _threadStateColor(String state) {
+  switch (state) {
+    case 'unresolved':
+      return const Color(0xff7c3aed);
+    case 'resolved':
+      return const Color(0xff0f766e);
+    case 'outdated':
+      return const Color(0xff64748b);
+    default:
+      return const Color(0xff475569);
+  }
+}
+
+String _compactDate(String value) {
+  final parsed = DateTime.tryParse(value)?.toLocal();
+  if (parsed == null) return value;
+  return '${parsed.month}/${parsed.day}/${parsed.year}';
 }
 
 bool _isUnresolvedThread(ReviewThread thread) => thread.state == 'unresolved';

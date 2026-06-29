@@ -34,7 +34,7 @@ class DiffLineAnchor {
   int get hashCode => Object.hash(path, line, side);
 }
 
-class DiffView extends StatelessWidget {
+class DiffView extends StatefulWidget {
   const DiffView({
     super.key,
     required this.path,
@@ -53,12 +53,50 @@ class DiffView extends StatelessWidget {
   final ValueChanged<DiffLineAnchor>? onLineTap;
 
   @override
+  State<DiffView> createState() => _DiffViewState();
+}
+
+class _DiffViewState extends State<DiffView> {
+  final Map<String, GlobalKey> _lineKeys = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleSelectedAnchorScroll();
+  }
+
+  @override
+  void didUpdateWidget(covariant DiffView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.path != widget.path ||
+        oldWidget.selectedAnchor != widget.selectedAnchor) {
+      _scheduleSelectedAnchorScroll();
+    }
+  }
+
+  void _scheduleSelectedAnchorScroll() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final selectedAnchor = widget.selectedAnchor;
+      if (selectedAnchor == null) return;
+      final context = _lineKeys[selectedAnchor.key]?.currentContext;
+      if (context == null) return;
+      Scrollable.ensureVisible(
+        context,
+        alignment: 0.34,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final rawLines = (patch == null || patch!.isEmpty)
+    final rawLines = (widget.patch == null || widget.patch!.isEmpty)
         ? ['Binary or non-text file']
-        : patch!.split(RegExp(r'\r?\n'));
-    final lines = _parseDiffLines(path, rawLines);
-    final language = _languageForPath(path);
+        : widget.patch!.split(RegExp(r'\r?\n'));
+    final lines = _parseDiffLines(widget.path, rawLines);
+    final language = _languageForPath(widget.path);
     final maxLineLength = rawLines.fold<int>(
       0,
       (current, line) => line.length > current ? line.length : current,
@@ -76,7 +114,7 @@ class DiffView extends StatelessWidget {
           child: SizedBox(
             width: contentWidth.toDouble(),
             child: ListView.builder(
-              key: ValueKey(path),
+              key: ValueKey(widget.path),
               padding: const EdgeInsets.only(bottom: 12),
               itemCount: lines.length,
               itemBuilder: (context, index) {
@@ -85,25 +123,30 @@ class DiffView extends StatelessWidget {
                 final anchorKey = anchor?.key;
                 final selected =
                     anchor != null &&
-                    selectedAnchor != null &&
-                    anchor == selectedAnchor;
+                    widget.selectedAnchor != null &&
+                    anchor == widget.selectedAnchor;
                 final hasThread =
-                    anchorKey != null && threadAnchorKeys.contains(anchorKey);
+                    anchorKey != null &&
+                    widget.threadAnchorKeys.contains(anchorKey);
                 final hasDraft =
-                    anchorKey != null && draftAnchorKeys.contains(anchorKey);
+                    anchorKey != null &&
+                    widget.draftAnchorKeys.contains(anchorKey);
                 final colors = _lineColors(line.kind, selected: selected);
 
                 return Material(
                   key: anchor == null
                       ? null
-                      : ValueKey(
-                          'diff-line-${anchor.path}-${anchor.side}-${anchor.line}',
-                        ),
+                      : _lineKeys.putIfAbsent(anchor.key, GlobalKey.new),
                   color: colors.background,
                   child: InkWell(
-                    onTap: anchor == null || onLineTap == null
+                    key: anchor == null
                         ? null
-                        : () => onLineTap!(anchor),
+                        : ValueKey(
+                            'diff-line-${anchor.path}-${anchor.side}-${anchor.line}',
+                          ),
+                    onTap: anchor == null || widget.onLineTap == null
+                        ? null
+                        : () => widget.onLineTap!(anchor),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
