@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release New Version"
+  short_description: "Cut Narview versions and trigger releases"
+  default_prompt: "Use $release-new-version to cut the next Narview release candidate and trigger the GitHub Actions release workflow."
