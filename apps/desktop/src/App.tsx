@@ -1747,7 +1747,7 @@ export function App({
                     placeholder="Search files"
                   />
                 </div>
-                <div className="max-h-40 space-y-1 overflow-y-auto" aria-label="All changed files">
+                <div className="pane-scroll-y max-h-40 space-y-1" aria-label="All changed files">
                   {filteredFiles.map((file) => (
                     <button
                       key={file.path}
@@ -1859,7 +1859,7 @@ export function App({
               onMoveFile={moveActiveFile}
             />
 
-            <div className="min-h-0 flex-1 overflow-auto" aria-label="Diff scroll area">
+            <div className="pane-scroll flex-1" aria-label="Diff scroll area">
               {diffState && activeFile ? (
                 activeFileCollapsed ? (
                   <CollapsedDiffPlaceholder file={activeFile} onExpand={() => setFileCollapseOverride(activeFile.path, false)} />
@@ -1931,7 +1931,7 @@ export function App({
                 </div>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto p-3" aria-label="Comments and review">
+              <div className="pane-scroll-y flex-1 p-3" aria-label="Comments and review">
                 <section className="space-y-2" aria-label="Current comment target">
                   <div className="flex items-center justify-between">
                     <h3 className="text-xs font-semibold uppercase text-muted-foreground">Comment</h3>
